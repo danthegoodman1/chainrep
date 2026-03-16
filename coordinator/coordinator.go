@@ -136,12 +136,12 @@ type assignmentCounts struct {
 
 func BuildInitialPlacement(cfg Config, nodes []Node) (*ClusterState, error) {
 	if err := validateConfig(cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err in validateConfig: %w", err)
 	}
 
 	normalizedNodes, nodesByID, nodeOrder, err := normalizeNodes(nodes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err in normalizeNodes: %w", err)
 	}
 	if cfg.ReplicationFactor > len(normalizedNodes) {
 		return nil, fmt.Errorf(
@@ -154,7 +154,7 @@ func BuildInitialPlacement(cfg Config, nodes []Node) (*ClusterState, error) {
 
 	chains, err := buildSteadyStateChains(cfg.SlotCount, cfg.ReplicationFactor, normalizedNodes, nodesByID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err in buildSteadyStateChains: %w", err)
 	}
 
 	nodeHealthByID := make(map[string]NodeHealth, len(normalizedNodes))
@@ -184,25 +184,25 @@ func PlanReconfiguration(
 
 	working, err := cloneAndValidateState(state)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err in cloneAndValidateState: %w", err)
 	}
 
 	var changedSlots []SlotPlan
 	if len(events) == 0 {
 		slotPlans, err := reconcileState(&working, policy)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("err in reconcileState: %w", err)
 		}
 		changedSlots = append(changedSlots, slotPlans...)
 	} else {
 		for _, event := range events {
 			if err := applyEvent(&working, event); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("err in applyEvent: %w", err)
 			}
 
 			slotPlans, err := reconcileState(&working, policy)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("err in reconcileState: %w", err)
 			}
 			changedSlots = append(changedSlots, slotPlans...)
 		}
@@ -218,13 +218,13 @@ func PlanReconfiguration(
 func ApplyProgress(state ClusterState, event Event) (*ClusterState, error) {
 	working, err := cloneAndValidateState(state)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err in cloneAndValidateState: %w", err)
 	}
 	if event.Kind != EventKindReplicaBecameActive && event.Kind != EventKindReplicaRemoved {
 		return nil, fmt.Errorf("%w: unsupported progress event %q", ErrInvalidEvent, event.Kind)
 	}
 	if err := applyProgressEvent(&working, event); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("err in applyProgressEvent: %w", err)
 	}
 	return &working, nil
 }
