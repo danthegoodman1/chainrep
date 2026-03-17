@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
+	"github.com/danthegoodman1/chainrep/storage"
 )
 
 func TestOpenEmptyStore(t *testing.T) {
@@ -17,6 +18,136 @@ func TestOpenEmptyStore(t *testing.T) {
 
 	if got := rt.Current(); got.Version != 0 || got.LastLogIndex != 0 || got.Cluster.SlotCount != 0 {
 		t.Fatalf("unexpected empty runtime state: %#v", got)
+	}
+}
+
+func TestHeartbeatPersistsAndRecovers(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+
+	state, err := rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-1",
+		ExpectedVersion: 0,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: 101,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat returned error: %v", err)
+	}
+	record := state.NodeLivenessByID["a"]
+	if got, want := record.State, NodeLivenessStateHealthy; got != want {
+		t.Fatalf("liveness state = %q, want %q", got, want)
+	}
+	if got, want := record.LastHeartbeatUnixNano, int64(101); got != want {
+		t.Fatalf("last heartbeat = %d, want %d", got, want)
+	}
+	if got, want := len(store.wal), 1; got != want {
+		t.Fatalf("wal length = %d, want %d", got, want)
+	}
+
+	reopened := mustOpenRuntime(t, store)
+	if got := reopened.Current(); !reflect.DeepEqual(got, state) {
+		t.Fatalf("recovered state mismatch\nrecovered=%#v\nwant=%#v", got, state)
+	}
+}
+
+func TestHeartbeatDuplicateCommandIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+
+	first, err := rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-1",
+		ExpectedVersion: 0,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: 101,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat returned error: %v", err)
+	}
+	second, err := rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-1",
+		ExpectedVersion: 0,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: 101,
+		},
+	})
+	if err != nil {
+		t.Fatalf("duplicate Heartbeat returned error: %v", err)
+	}
+	if got, want := len(store.wal), 1; got != want {
+		t.Fatalf("wal length = %d, want %d", got, want)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("duplicate heartbeat state mismatch\ngot=%#v\nwant=%#v", second, first)
+	}
+}
+
+func TestLivenessTransitionPersistsAndCheckpointRecovers(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+
+	state, err := rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-1",
+		ExpectedVersion: 0,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: 101,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat returned error: %v", err)
+	}
+	state, err = rt.ApplyLiveness(ctx, Command{
+		ID:              "liveness-a-suspect",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindLiveness,
+		Liveness: &LivenessCommand{
+			NodeID:              "a",
+			State:               NodeLivenessStateSuspect,
+			EvaluatedAtUnixNano: 201,
+			DeadActionFired:     false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyLiveness returned error: %v", err)
+	}
+	state, err = rt.ApplyLiveness(ctx, Command{
+		ID:              "liveness-a-dead",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindLiveness,
+		Liveness: &LivenessCommand{
+			NodeID:              "a",
+			State:               NodeLivenessStateDead,
+			EvaluatedAtUnixNano: 301,
+			DeadActionFired:     true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyLiveness(dead) returned error: %v", err)
+	}
+	if err := rt.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint returned error: %v", err)
+	}
+	reopened := mustOpenRuntime(t, store)
+	want := state
+	want.AppliedCommands = map[string]AppliedCommand{}
+	if got := reopened.Current(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("recovered state mismatch\nrecovered=%#v\nwant=%#v", got, want)
+	}
+	if got, want := reopened.Current().NodeLivenessByID["a"].State, NodeLivenessStateDead; got != want {
+		t.Fatalf("liveness state after reopen = %q, want %q", got, want)
 	}
 }
 
@@ -553,6 +684,15 @@ func uniqueNode(id string) coordinator.Node {
 			"rack": "rack-" + id,
 			"az":   "az-" + id,
 		},
+	}
+}
+
+func uniqueNodeStatus(id string) storage.NodeStatus {
+	return storage.NodeStatus{
+		NodeID:          id,
+		ReplicaCount:    3,
+		ActiveCount:     2,
+		CatchingUpCount: 1,
 	}
 }
 

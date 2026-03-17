@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
@@ -20,6 +21,7 @@ var (
 	ErrStateMismatch        = errors.New("coordinator server state mismatch")
 	ErrInvalidServerCommand = errors.New("invalid coordinator server command")
 	ErrRecoveryFailed       = errors.New("coordinator server recovery failed")
+	ErrInvalidServerConfig  = errors.New("invalid coordinator server config")
 )
 
 type StorageNodeClient interface {
@@ -62,18 +64,47 @@ type RoutingSnapshot struct {
 	Slots     []SlotRoute
 }
 
+type LivenessPolicy struct {
+	SuspectAfter time.Duration
+	DeadAfter    time.Duration
+}
+
+type Clock interface {
+	Now() time.Time
+}
+
+type ServerConfig struct {
+	LivenessPolicy LivenessPolicy
+	Clock          Clock
+}
+
 type Server struct {
 	rt                     *coordruntime.Runtime
 	nodes                  map[string]StorageNodeClient
 	heartbeats             map[string]storage.NodeStatus
+	liveness               map[string]coordruntime.NodeLivenessRecord
 	pending                map[int]PendingWork
 	routingSnapshot        RoutingSnapshot
 	lastPolicy             coordinator.ReconfigurationPolicy
 	unavailableReplicas    map[string]map[int]bool
 	lastRecoveryReports    map[string]storage.NodeRecoveryReport
+	livenessPolicy         LivenessPolicy
+	clock                  Clock
 }
 
 func Open(ctx context.Context, store coordruntime.Store, nodes map[string]StorageNodeClient) (*Server, error) {
+	return OpenWithConfig(ctx, store, nodes, ServerConfig{})
+}
+
+func OpenWithConfig(
+	ctx context.Context,
+	store coordruntime.Store,
+	nodes map[string]StorageNodeClient,
+	cfg ServerConfig,
+) (*Server, error) {
+	if err := validateServerConfig(cfg); err != nil {
+		return nil, fmt.Errorf("err in validateServerConfig: %w", err)
+	}
 	rt, err := coordruntime.Open(ctx, store)
 	if err != nil {
 		return nil, fmt.Errorf("err in coordruntime.Open: %w", err)
@@ -88,10 +119,17 @@ func Open(ctx context.Context, store coordruntime.Store, nodes map[string]Storag
 		rt:         rt,
 		nodes:      clonedNodes,
 		heartbeats: map[string]storage.NodeStatus{},
+		liveness:   map[string]coordruntime.NodeLivenessRecord{},
 		pending:    map[int]PendingWork{},
 		unavailableReplicas: map[string]map[int]bool{},
 		lastRecoveryReports: map[string]storage.NodeRecoveryReport{},
+		livenessPolicy: cfg.LivenessPolicy,
+		clock:          cfg.Clock,
 	}
+	if server.clock == nil {
+		server.clock = realClock{}
+	}
+	server.syncViewsFromRuntime()
 	server.rebuildRoutingSnapshot()
 	return server, nil
 }
@@ -104,6 +142,14 @@ func (s *Server) Heartbeats() map[string]storage.NodeStatus {
 	cloned := make(map[string]storage.NodeStatus, len(s.heartbeats))
 	for nodeID, status := range s.heartbeats {
 		cloned[nodeID] = status
+	}
+	return cloned
+}
+
+func (s *Server) Liveness() map[string]coordruntime.NodeLivenessRecord {
+	cloned := make(map[string]coordruntime.NodeLivenessRecord, len(s.liveness))
+	for nodeID, record := range s.liveness {
+		cloned[nodeID] = cloneLivenessRecord(record)
 	}
 	return cloned
 }
@@ -128,6 +174,7 @@ func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coord
 	if err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.Bootstrap: %w", err)
 	}
+	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	return state, nil
 }
@@ -191,6 +238,7 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	}); err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.ApplyProgress: %w", err)
 	}
+	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	delete(s.pending, slot)
 
@@ -248,6 +296,7 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 	if err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.ApplyProgress: %w", err)
 	}
+	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	delete(s.pending, slot)
 
@@ -257,11 +306,106 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 	return updated, nil
 }
 
-func (s *Server) ReportNodeHeartbeat(_ context.Context, status storage.NodeStatus) error {
+func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeStatus) error {
 	if _, ok := s.nodes[status.NodeID]; !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
 	}
-	s.heartbeats[status.NodeID] = status
+	current := s.rt.Current()
+	currentRecord, hadCurrentRecord := current.NodeLivenessByID[status.NodeID]
+	wasDead := currentRecord.State == coordruntime.NodeLivenessStateDead ||
+		nodeMarkedDead(current.Cluster, status.NodeID)
+	observedAt := s.clock.Now().UnixNano()
+	_, err := s.rt.Heartbeat(ctx, coordruntime.Command{
+		ID:              fmt.Sprintf("server-heartbeat-%s-%d", status.NodeID, observedAt),
+		ExpectedVersion: s.rt.Current().Version,
+		Kind:            coordruntime.CommandKindHeartbeat,
+		Heartbeat: &coordruntime.HeartbeatCommand{
+			Status:             status,
+			ObservedAtUnixNano: observedAt,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("err in s.rt.Heartbeat: %w", err)
+	}
+	s.syncViewsFromRuntime()
+	if wasDead && s.liveness[status.NodeID].State != coordruntime.NodeLivenessStateDead {
+		deadActionFired := hadCurrentRecord && currentRecord.DeadActionFired
+		if nodeMarkedDead(current.Cluster, status.NodeID) {
+			deadActionFired = true
+		}
+		if _, err := s.applyLivenessTransition(ctx, status.NodeID, coordruntime.NodeLivenessStateDead, observedAt, deadActionFired); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) EvaluateLiveness(ctx context.Context) error {
+	if s.livenessPolicy.SuspectAfter <= 0 || s.livenessPolicy.DeadAfter <= 0 {
+		return nil
+	}
+	nowUnix := s.clock.Now().UnixNano()
+
+	nodeIDs := make([]string, 0, len(s.liveness))
+	for nodeID := range s.liveness {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Strings(nodeIDs)
+
+	for _, nodeID := range nodeIDs {
+		record := s.liveness[nodeID]
+		age := time.Duration(nowUnix - record.LastHeartbeatUnixNano)
+		target := record.State
+		switch {
+		case age >= s.livenessPolicy.DeadAfter:
+			target = coordruntime.NodeLivenessStateDead
+		case age >= s.livenessPolicy.SuspectAfter:
+			target = coordruntime.NodeLivenessStateSuspect
+		default:
+			target = coordruntime.NodeLivenessStateHealthy
+		}
+
+		if target != record.State {
+			updated, err := s.applyLivenessTransition(ctx, nodeID, target, nowUnix, record.DeadActionFired)
+			if err != nil {
+				return err
+			}
+			record = updated
+		}
+
+		if record.State == coordruntime.NodeLivenessStateDead && !record.DeadActionFired {
+			if len(s.pending) > 0 {
+				continue
+			}
+			if nodeMarkedDead(s.rt.Current().Cluster, nodeID) || !isRuntimeInitialized(s.rt.Current()) {
+				updated, err := s.applyLivenessTransition(ctx, nodeID, coordruntime.NodeLivenessStateDead, nowUnix, true)
+				if err != nil {
+					return err
+				}
+				record = updated
+				_ = record
+				continue
+			}
+
+			if _, err := s.MarkNodeDead(ctx, coordruntime.Command{
+				ID:              fmt.Sprintf("server-auto-dead-%s-v%d", nodeID, s.rt.Current().Version),
+				ExpectedVersion: s.rt.Current().Version,
+				Kind:            coordruntime.CommandKindReconfigure,
+				Reconfigure: &coordruntime.ReconfigureCommand{
+					Events: []coordinator.Event{{
+						Kind:   coordinator.EventKindMarkNodeDead,
+						NodeID: nodeID,
+					}},
+					Policy: s.lastPolicy,
+				},
+			}); err != nil {
+				return fmt.Errorf("err in s.MarkNodeDead: %w", err)
+			}
+			if _, err := s.applyLivenessTransition(ctx, nodeID, coordruntime.NodeLivenessStateDead, nowUnix, true); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -333,6 +477,7 @@ func (s *Server) applyMembershipMutation(
 	if err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.Reconfigure: %w", err)
 	}
+	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	s.lastPolicy = cmd.Reconfigure.Policy
 
@@ -365,6 +510,7 @@ func (s *Server) reconcileAndDispatch(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("err in s.rt.Reconcile: %w", err)
 	}
+	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	if err := s.dispatchPlan(ctx, state.Version, plan); err != nil {
 		return err
@@ -893,4 +1039,85 @@ func cloneRecoveryReport(report storage.NodeRecoveryReport) storage.NodeRecovery
 		})
 	}
 	return cloned
+}
+
+func (s *Server) applyLivenessTransition(
+	ctx context.Context,
+	nodeID string,
+	state coordruntime.NodeLivenessState,
+	evaluatedAtUnixNano int64,
+	deadActionFired bool,
+) (coordruntime.NodeLivenessRecord, error) {
+	current := s.rt.Current()
+	if _, err := s.rt.ApplyLiveness(ctx, coordruntime.Command{
+		ID:              fmt.Sprintf("server-liveness-%s-%s-%d-%t-v%d", nodeID, state, evaluatedAtUnixNano, deadActionFired, current.Version),
+		ExpectedVersion: current.Version,
+		Kind:            coordruntime.CommandKindLiveness,
+		Liveness: &coordruntime.LivenessCommand{
+			NodeID:              nodeID,
+			State:               state,
+			EvaluatedAtUnixNano: evaluatedAtUnixNano,
+			DeadActionFired:     deadActionFired,
+		},
+	}); err != nil {
+		return coordruntime.NodeLivenessRecord{}, fmt.Errorf("err in s.rt.ApplyLiveness: %w", err)
+	}
+	s.syncViewsFromRuntime()
+	s.rebuildRoutingSnapshot()
+	return cloneLivenessRecord(s.liveness[nodeID]), nil
+}
+
+func (s *Server) syncViewsFromRuntime() {
+	current := s.rt.Current()
+	s.heartbeats = make(map[string]storage.NodeStatus, len(current.NodeLivenessByID))
+	s.liveness = make(map[string]coordruntime.NodeLivenessRecord, len(current.NodeLivenessByID))
+	for nodeID, record := range current.NodeLivenessByID {
+		s.heartbeats[nodeID] = cloneNodeStatus(record.LastStatus)
+		s.liveness[nodeID] = cloneLivenessRecord(record)
+	}
+}
+
+func validateServerConfig(cfg ServerConfig) error {
+	if cfg.LivenessPolicy.SuspectAfter < 0 || cfg.LivenessPolicy.DeadAfter < 0 {
+		return fmt.Errorf("%w: liveness durations must be >= 0", ErrInvalidServerConfig)
+	}
+	if cfg.LivenessPolicy.DeadAfter > 0 &&
+		cfg.LivenessPolicy.SuspectAfter > 0 &&
+		cfg.LivenessPolicy.DeadAfter < cfg.LivenessPolicy.SuspectAfter {
+		return fmt.Errorf("%w: dead timeout must be >= suspect timeout", ErrInvalidServerConfig)
+	}
+	return nil
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time {
+	return time.Now()
+}
+
+func cloneLivenessRecord(record coordruntime.NodeLivenessRecord) coordruntime.NodeLivenessRecord {
+	return coordruntime.NodeLivenessRecord{
+		LastHeartbeatUnixNano: record.LastHeartbeatUnixNano,
+		State:                 record.State,
+		LastStatus:            cloneNodeStatus(record.LastStatus),
+		DeadActionFired:       record.DeadActionFired,
+	}
+}
+
+func cloneNodeStatus(status storage.NodeStatus) storage.NodeStatus {
+	return storage.NodeStatus{
+		NodeID:          status.NodeID,
+		ReplicaCount:    status.ReplicaCount,
+		ActiveCount:     status.ActiveCount,
+		CatchingUpCount: status.CatchingUpCount,
+		LeavingCount:    status.LeavingCount,
+	}
+}
+
+func nodeMarkedDead(cluster coordinator.ClusterState, nodeID string) bool {
+	return cluster.NodeHealthByID[nodeID] == coordinator.NodeHealthDead
+}
+
+func isRuntimeInitialized(state coordruntime.State) bool {
+	return state.Cluster.SlotCount > 0
 }

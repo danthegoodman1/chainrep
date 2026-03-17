@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
+	"github.com/danthegoodman1/chainrep/storage"
 )
 
 var (
@@ -23,7 +24,23 @@ type State struct {
 	LastLogIndex    uint64
 	Cluster         coordinator.ClusterState
 	SlotVersions    map[int]uint64
+	NodeLivenessByID map[string]NodeLivenessRecord
 	AppliedCommands map[string]AppliedCommand
+}
+
+type NodeLivenessState string
+
+const (
+	NodeLivenessStateHealthy NodeLivenessState = "healthy"
+	NodeLivenessStateSuspect NodeLivenessState = "suspect"
+	NodeLivenessStateDead    NodeLivenessState = "dead"
+)
+
+type NodeLivenessRecord struct {
+	LastHeartbeatUnixNano int64
+	State                 NodeLivenessState
+	LastStatus            storage.NodeStatus
+	DeadActionFired       bool
 }
 
 type AppliedCommand struct {
@@ -32,6 +49,7 @@ type AppliedCommand struct {
 	LastLogIndex uint64
 	Cluster      coordinator.ClusterState
 	SlotVersions map[int]uint64
+	NodeLivenessByID map[string]NodeLivenessRecord
 	Plan         *coordinator.ReconfigurationPlan
 }
 
@@ -41,6 +59,8 @@ const (
 	CommandKindBootstrap   CommandKind = "bootstrap"
 	CommandKindReconfigure CommandKind = "reconfigure"
 	CommandKindProgress    CommandKind = "progress"
+	CommandKindHeartbeat   CommandKind = "heartbeat"
+	CommandKindLiveness    CommandKind = "liveness"
 )
 
 type Command struct {
@@ -50,6 +70,8 @@ type Command struct {
 	Bootstrap       *BootstrapCommand
 	Reconfigure     *ReconfigureCommand
 	Progress        *ProgressCommand
+	Heartbeat       *HeartbeatCommand
+	Liveness        *LivenessCommand
 }
 
 type BootstrapCommand struct {
@@ -64,6 +86,18 @@ type ReconfigureCommand struct {
 
 type ProgressCommand struct {
 	Event coordinator.Event
+}
+
+type HeartbeatCommand struct {
+	Status              storage.NodeStatus
+	ObservedAtUnixNano  int64
+}
+
+type LivenessCommand struct {
+	NodeID              string
+	State               NodeLivenessState
+	EvaluatedAtUnixNano int64
+	DeadActionFired     bool
 }
 
 type LogRecord struct {
@@ -192,6 +226,40 @@ func (r *Runtime) ApplyProgress(ctx context.Context, cmd Command) (State, error)
 	return cloneState(r.state), nil
 }
 
+func (r *Runtime) Heartbeat(ctx context.Context, cmd Command) (State, error) {
+	_, _, duplicate, err := r.executeHeartbeat(cmd)
+	if err != nil {
+		return State{}, fmt.Errorf("err in r.executeHeartbeat: %w", err)
+	}
+	if duplicate != nil {
+		return r.snapshotForApplied(*duplicate), nil
+	}
+
+	record, nextState := r.commitCandidate(cmd, r.state.Cluster, nil)
+	if err := r.store.AppendWAL(ctx, record); err != nil {
+		return State{}, fmt.Errorf("err in r.store.AppendWAL: %w", err)
+	}
+	r.state = nextState
+	return cloneState(r.state), nil
+}
+
+func (r *Runtime) ApplyLiveness(ctx context.Context, cmd Command) (State, error) {
+	_, _, duplicate, err := r.executeLiveness(cmd)
+	if err != nil {
+		return State{}, fmt.Errorf("err in r.executeLiveness: %w", err)
+	}
+	if duplicate != nil {
+		return r.snapshotForApplied(*duplicate), nil
+	}
+
+	record, nextState := r.commitCandidate(cmd, r.state.Cluster, nil)
+	if err := r.store.AppendWAL(ctx, record); err != nil {
+		return State{}, fmt.Errorf("err in r.store.AppendWAL: %w", err)
+	}
+	r.state = nextState
+	return cloneState(r.state), nil
+}
+
 func (r *Runtime) Checkpoint(ctx context.Context) error {
 	checkpointState := cloneState(r.state)
 	checkpointState.AppliedCommands = map[string]AppliedCommand{}
@@ -230,6 +298,14 @@ func (r *Runtime) executeReconfigure(cmd Command) (coordinator.ClusterState, *co
 }
 
 func (r *Runtime) executeProgress(cmd Command) (coordinator.ClusterState, *coordinator.ReconfigurationPlan, *AppliedCommand, error) {
+	return r.executeCommand(cmd)
+}
+
+func (r *Runtime) executeHeartbeat(cmd Command) (coordinator.ClusterState, *coordinator.ReconfigurationPlan, *AppliedCommand, error) {
+	return r.executeCommand(cmd)
+}
+
+func (r *Runtime) executeLiveness(cmd Command) (coordinator.ClusterState, *coordinator.ReconfigurationPlan, *AppliedCommand, error) {
 	return r.executeCommand(cmd)
 }
 
@@ -280,6 +356,13 @@ func (r *Runtime) executeCommand(cmd Command) (coordinator.ClusterState, *coordi
 			return coordinator.ClusterState{}, nil, nil, fmt.Errorf("err in coordinator.ApplyProgress: %w", err)
 		}
 		return cloneClusterState(*cluster), nil, nil, nil
+	case CommandKindHeartbeat:
+		return cloneClusterState(r.state.Cluster), nil, nil, nil
+	case CommandKindLiveness:
+		if cmd.Liveness.NodeID == "" {
+			return coordinator.ClusterState{}, nil, nil, fmt.Errorf("%w: liveness node ID must not be empty", ErrInvalidCommand)
+		}
+		return cloneClusterState(r.state.Cluster), nil, nil, nil
 	default:
 		return coordinator.ClusterState{}, nil, nil, fmt.Errorf(
 			"%w: unsupported command kind %q",
@@ -320,16 +403,30 @@ func (r *Runtime) validateCommand(cmd Command) (*AppliedCommand, error) {
 func validateCommandPayload(cmd Command) error {
 	switch cmd.Kind {
 	case CommandKindBootstrap:
-		if cmd.Bootstrap == nil || cmd.Reconfigure != nil || cmd.Progress != nil {
+		if cmd.Bootstrap == nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
 			return fmt.Errorf("%w: bootstrap command must set only bootstrap payload", ErrInvalidCommand)
 		}
 	case CommandKindReconfigure:
-		if cmd.Reconfigure == nil || cmd.Bootstrap != nil || cmd.Progress != nil {
+		if cmd.Reconfigure == nil || cmd.Bootstrap != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
 			return fmt.Errorf("%w: reconfigure command must set only reconfigure payload", ErrInvalidCommand)
 		}
 	case CommandKindProgress:
-		if cmd.Progress == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil {
+		if cmd.Progress == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
 			return fmt.Errorf("%w: progress command must set only progress payload", ErrInvalidCommand)
+		}
+	case CommandKindHeartbeat:
+		if cmd.Heartbeat == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Liveness != nil {
+			return fmt.Errorf("%w: heartbeat command must set only heartbeat payload", ErrInvalidCommand)
+		}
+		if cmd.Heartbeat.Status.NodeID == "" {
+			return fmt.Errorf("%w: heartbeat node ID must not be empty", ErrInvalidCommand)
+		}
+	case CommandKindLiveness:
+		if cmd.Liveness == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil {
+			return fmt.Errorf("%w: liveness command must set only liveness payload", ErrInvalidCommand)
+		}
+		if cmd.Liveness.NodeID == "" {
+			return fmt.Errorf("%w: liveness node ID must not be empty", ErrInvalidCommand)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported command kind %q", ErrInvalidCommand, cmd.Kind)
@@ -361,6 +458,7 @@ func (r *Runtime) nextStateForApplied(
 	next.LastLogIndex = logIndex
 	next.Cluster = cloneClusterState(cluster)
 	next.SlotVersions = nextSlotVersions(next.SlotVersions, next.Version, cmd.Kind, cluster, plan)
+	next.NodeLivenessByID = nextNodeLiveness(next.NodeLivenessByID, cmd)
 	if next.AppliedCommands == nil {
 		next.AppliedCommands = make(map[string]AppliedCommand)
 	}
@@ -370,6 +468,7 @@ func (r *Runtime) nextStateForApplied(
 		LastLogIndex: logIndex,
 		Cluster:      cloneClusterState(cluster),
 		SlotVersions: cloneSlotVersions(next.SlotVersions),
+		NodeLivenessByID: cloneNodeLivenessMap(next.NodeLivenessByID),
 		Plan:         clonePlan(plan),
 	}
 	return next
@@ -381,6 +480,7 @@ func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 		LastLogIndex:    applied.LastLogIndex,
 		Cluster:         cloneClusterState(applied.Cluster),
 		SlotVersions:    cloneSlotVersions(applied.SlotVersions),
+		NodeLivenessByID: cloneNodeLivenessMap(applied.NodeLivenessByID),
 		AppliedCommands: make(map[string]AppliedCommand),
 	}
 	for id, existing := range r.state.AppliedCommands {
@@ -393,8 +493,9 @@ func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 
 func zeroState() State {
 	return State{
-		SlotVersions:    map[int]uint64{},
-		AppliedCommands: map[string]AppliedCommand{},
+		SlotVersions:      map[int]uint64{},
+		NodeLivenessByID:  map[string]NodeLivenessRecord{},
+		AppliedCommands:   map[string]AppliedCommand{},
 	}
 }
 
@@ -408,6 +509,7 @@ func cloneState(state State) State {
 		LastLogIndex:    state.LastLogIndex,
 		Cluster:         cloneClusterState(state.Cluster),
 		SlotVersions:    cloneSlotVersions(state.SlotVersions),
+		NodeLivenessByID: cloneNodeLivenessMap(state.NodeLivenessByID),
 		AppliedCommands: make(map[string]AppliedCommand, len(state.AppliedCommands)),
 	}
 	for id, applied := range state.AppliedCommands {
@@ -423,6 +525,7 @@ func cloneAppliedCommand(applied AppliedCommand) AppliedCommand {
 		LastLogIndex: applied.LastLogIndex,
 		Cluster:      cloneClusterState(applied.Cluster),
 		SlotVersions: cloneSlotVersions(applied.SlotVersions),
+		NodeLivenessByID: cloneNodeLivenessMap(applied.NodeLivenessByID),
 		Plan:         clonePlan(applied.Plan),
 	}
 }
@@ -483,7 +586,71 @@ func cloneCommand(cmd Command) Command {
 			Event: cloneEvent(cmd.Progress.Event),
 		}
 	}
+	if cmd.Heartbeat != nil {
+		cloned.Heartbeat = &HeartbeatCommand{
+			Status:             cloneNodeStatus(cmd.Heartbeat.Status),
+			ObservedAtUnixNano: cmd.Heartbeat.ObservedAtUnixNano,
+		}
+	}
+	if cmd.Liveness != nil {
+		cloned.Liveness = &LivenessCommand{
+			NodeID:              cmd.Liveness.NodeID,
+			State:               cmd.Liveness.State,
+			EvaluatedAtUnixNano: cmd.Liveness.EvaluatedAtUnixNano,
+			DeadActionFired:     cmd.Liveness.DeadActionFired,
+		}
+	}
 	return cloned
+}
+
+func nextNodeLiveness(
+	current map[string]NodeLivenessRecord,
+	cmd Command,
+) map[string]NodeLivenessRecord {
+	next := cloneNodeLivenessMap(current)
+	switch cmd.Kind {
+	case CommandKindHeartbeat:
+		record := next[cmd.Heartbeat.Status.NodeID]
+		record.LastHeartbeatUnixNano = cmd.Heartbeat.ObservedAtUnixNano
+		record.LastStatus = cloneNodeStatus(cmd.Heartbeat.Status)
+		if record.State != NodeLivenessStateDead {
+			record.State = NodeLivenessStateHealthy
+			record.DeadActionFired = false
+		}
+		next[cmd.Heartbeat.Status.NodeID] = record
+	case CommandKindLiveness:
+		record := next[cmd.Liveness.NodeID]
+		record.State = cmd.Liveness.State
+		record.DeadActionFired = cmd.Liveness.DeadActionFired
+		if cmd.Liveness.EvaluatedAtUnixNano != 0 && record.LastHeartbeatUnixNano == 0 {
+			record.LastHeartbeatUnixNano = cmd.Liveness.EvaluatedAtUnixNano
+		}
+		next[cmd.Liveness.NodeID] = record
+	}
+	return next
+}
+
+func cloneNodeLivenessMap(current map[string]NodeLivenessRecord) map[string]NodeLivenessRecord {
+	cloned := make(map[string]NodeLivenessRecord, len(current))
+	for nodeID, record := range current {
+		cloned[nodeID] = NodeLivenessRecord{
+			LastHeartbeatUnixNano: record.LastHeartbeatUnixNano,
+			State:                 record.State,
+			LastStatus:            cloneNodeStatus(record.LastStatus),
+			DeadActionFired:       record.DeadActionFired,
+		}
+	}
+	return cloned
+}
+
+func cloneNodeStatus(status storage.NodeStatus) storage.NodeStatus {
+	return storage.NodeStatus{
+		NodeID:          status.NodeID,
+		ReplicaCount:    status.ReplicaCount,
+		ActiveCount:     status.ActiveCount,
+		CatchingUpCount: status.CatchingUpCount,
+		LeavingCount:    status.LeavingCount,
+	}
 }
 
 func clonePlan(plan *coordinator.ReconfigurationPlan) *coordinator.ReconfigurationPlan {

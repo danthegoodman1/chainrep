@@ -31,6 +31,7 @@ The key packages are:
 - `coordinator`: pure planning and state transitions
 - `coordinator/runtime`: optional durable wrapper with WAL, checkpoints, replay, and idempotent command handling
 - `coordserver`: synchronous coordinator service that dispatches storage-node commands, records heartbeats, and exposes routing snapshots to clients
+- `coordserver`: synchronous coordinator service that dispatches storage-node commands, durably tracks node liveness from heartbeats, automatically marks dead nodes, and exposes routing snapshots to clients
 
 ### Storage
 
@@ -195,7 +196,9 @@ Current replica lifecycle states:
 
 Storage nodes can summarize local lifecycle state through `ReportNodeHeartbeat`.
 
-This is intended for future coordinator service integration and liveness monitoring.
+The coordinator server persists these observations, tracks `healthy -> suspect -> dead` liveness state, and automatically emits `MarkNodeDead` when a node crosses the dead timeout.
+
+`suspect` is non-disruptive in the current implementation: routing does not change until the node is actually marked dead and the normal coordinator repair planner updates membership.
 
 ### Restart / recovery
 
@@ -224,7 +227,6 @@ The code now has the core interfaces and in-memory implementations, but it does 
 
 - a real network transport
 - a durable storage backend
-- heartbeat-driven liveness and automatic dead-node actions
 
 So the current shape is:
 

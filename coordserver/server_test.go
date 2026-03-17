@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
@@ -698,7 +699,9 @@ func runServerHistory(t *testing.T) historyResult {
 
 func mustOpenServer(t *testing.T, nodes map[string]StorageNodeClient) *Server {
 	t.Helper()
-	server, err := Open(context.Background(), coordruntime.NewInMemoryStore(), nodes)
+	server, err := OpenWithConfig(context.Background(), coordruntime.NewInMemoryStore(), nodes, ServerConfig{
+		Clock: &fakeClock{now: time.Unix(1, 0)},
+	})
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
