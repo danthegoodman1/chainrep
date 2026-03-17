@@ -22,6 +22,7 @@ var (
 	ErrBufferedMessageLimit      = errors.New("storage buffered replica message limit exceeded")
 	ErrRoutingMismatch           = errors.New("storage routing mismatch")
 	ErrWriteTimeout              = errors.New("storage write wait timed out or was canceled")
+	ErrAmbiguousWrite            = errors.New("storage client write outcome is ambiguous")
 )
 
 type Config struct {
@@ -122,6 +123,32 @@ type ReadResult struct {
 	ChainVersion uint64
 	Found        bool
 	Value        string
+}
+
+type AmbiguousWriteError struct {
+	Slot                 int
+	Kind                 OperationKind
+	ExpectedChainVersion uint64
+	Cause                error
+}
+
+func (e *AmbiguousWriteError) Error() string {
+	return fmt.Sprintf(
+		"%s: %s on slot %d version %d may or may not have committed: %v",
+		ErrAmbiguousWrite,
+		e.Kind,
+		e.Slot,
+		e.ExpectedChainVersion,
+		e.Cause,
+	)
+}
+
+func (e *AmbiguousWriteError) Unwrap() error {
+	return e.Cause
+}
+
+func (e *AmbiguousWriteError) Is(target error) bool {
+	return target == ErrAmbiguousWrite
 }
 
 type RoutingMismatchReason string
@@ -288,14 +315,14 @@ type pendingWrite struct {
 }
 
 type Node struct {
-	nodeID                           string
-	backend                          Backend
-	local                            LocalStateStore
-	coord                            CoordinatorClient
-	repl                             ReplicationTransport
-	replicas                         map[int]replicaRecord
+	nodeID                            string
+	backend                           Backend
+	local                             LocalStateStore
+	coord                             CoordinatorClient
+	repl                              ReplicationTransport
+	replicas                          map[int]replicaRecord
 	maxBufferedReplicaMessagesPerSlot int
-	writeCommitTimeout               time.Duration
+	writeCommitTimeout                time.Duration
 }
 
 const defaultWriteCommitTimeout = 5 * time.Second
@@ -334,14 +361,14 @@ func OpenNode(
 	}
 
 	node := &Node{
-		nodeID:                           cfg.NodeID,
-		backend:                          backend,
-		local:                            local,
-		coord:                            coord,
-		repl:                             repl,
-		replicas:                         make(map[int]replicaRecord),
+		nodeID:                            cfg.NodeID,
+		backend:                           backend,
+		local:                             local,
+		coord:                             coord,
+		repl:                              repl,
+		replicas:                          make(map[int]replicaRecord),
 		maxBufferedReplicaMessagesPerSlot: cfg.MaxBufferedReplicaMessagesPerSlot,
-		writeCommitTimeout:               cfg.WriteCommitTimeout,
+		writeCommitTimeout:                cfg.WriteCommitTimeout,
 	}
 	if node.maxBufferedReplicaMessagesPerSlot == 0 {
 		node.maxBufferedReplicaMessagesPerSlot = 64
@@ -684,6 +711,9 @@ func (n *Node) HandleClientPut(ctx context.Context, req ClientPutRequest) (Commi
 	}
 	result, err := n.submitWrite(ctx, req.Slot, OperationKindPut, req.Key, req.Value)
 	if err != nil {
+		if isAmbiguousWriteCause(err) {
+			return CommitResult{}, newAmbiguousWriteError(req.Slot, OperationKindPut, req.ExpectedChainVersion, err)
+		}
 		return CommitResult{}, err
 	}
 	return result, nil
@@ -695,6 +725,9 @@ func (n *Node) HandleClientDelete(ctx context.Context, req ClientDeleteRequest) 
 	}
 	result, err := n.submitWrite(ctx, req.Slot, OperationKindDelete, req.Key, "")
 	if err != nil {
+		if isAmbiguousWriteCause(err) {
+			return CommitResult{}, newAmbiguousWriteError(req.Slot, OperationKindDelete, req.ExpectedChainVersion, err)
+		}
 		return CommitResult{}, err
 	}
 	return result, nil
@@ -993,6 +1026,24 @@ func newRoutingMismatch(
 		CurrentState:         record.state,
 		Reason:               reason,
 	}
+}
+
+func newAmbiguousWriteError(
+	slot int,
+	kind OperationKind,
+	expectedChainVersion uint64,
+	cause error,
+) error {
+	return &AmbiguousWriteError{
+		Slot:                 slot,
+		Kind:                 kind,
+		ExpectedChainVersion: expectedChainVersion,
+		Cause:                cause,
+	}
+}
+
+func isAmbiguousWriteCause(err error) bool {
+	return errors.Is(err, ErrWriteTimeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 func (n *Node) commitLocalSequence(slot int, sequence uint64) error {

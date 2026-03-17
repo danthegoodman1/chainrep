@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestClientHandlersReadAndWriteAgainstServingReplicas(t *testing.T) {
@@ -83,6 +84,10 @@ func TestClientHandlersRejectStaleOrIllegalTargets(t *testing.T) {
 		var mismatch *RoutingMismatchError
 		if !errors.As(err, &mismatch) {
 			t.Fatalf("error = %v, want routing mismatch", err)
+		}
+		var ambiguous *AmbiguousWriteError
+		if errors.As(err, &ambiguous) {
+			t.Fatalf("error = %v, unexpectedly classified as ambiguous write", err)
 		}
 		if mismatch.Reason != wantReason {
 			t.Fatalf("mismatch reason = %q, want %q", mismatch.Reason, wantReason)
@@ -168,6 +173,101 @@ func TestCommittedReadsDoNotExposeStagedWrites(t *testing.T) {
 	if result.Found {
 		t.Fatalf("read result = %#v, want not found before commit", result)
 	}
+}
+
+func TestClientWriteTimeoutsBecomeAmbiguousErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("put timeout returns ambiguous write and preserves staged state", func(t *testing.T) {
+		transport := &blockingWriteTransport{}
+		node := mustNewNode(t, Config{
+			NodeID:             "head",
+			WriteCommitTimeout: time.Nanosecond,
+		}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 7, ReplicaAssignment{
+			Slot:         7,
+			ChainVersion: 3,
+			Role:         ReplicaRoleHead,
+			Peers:        ChainPeers{SuccessorNodeID: "tail"},
+		})
+
+		_, err := node.HandleClientPut(ctx, ClientPutRequest{
+			Slot:                 7,
+			Key:                  "k",
+			Value:                "v",
+			ExpectedChainVersion: 3,
+		})
+		if err == nil {
+			t.Fatal("HandleClientPut unexpectedly succeeded")
+		}
+		var ambiguous *AmbiguousWriteError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("error = %v, want ambiguous write", err)
+		}
+		if !errors.Is(err, ErrAmbiguousWrite) {
+			t.Fatalf("error = %v, want ErrAmbiguousWrite", err)
+		}
+		if !errors.Is(err, ErrWriteTimeout) {
+			t.Fatalf("error = %v, want ErrWriteTimeout", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want context deadline exceeded", err)
+		}
+		if got, want := ambiguous.Slot, 7; got != want {
+			t.Fatalf("ambiguous slot = %d, want %d", got, want)
+		}
+		if got, want := ambiguous.Kind, OperationKindPut; got != want {
+			t.Fatalf("ambiguous kind = %q, want %q", got, want)
+		}
+		if got, want := ambiguous.ExpectedChainVersion, uint64(3); got != want {
+			t.Fatalf("ambiguous expected version = %d, want %d", got, want)
+		}
+		if got, want := mustNodeStagedSequences(t, node, 7), []uint64{1}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("staged sequences = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("delete cancellation returns ambiguous write", func(t *testing.T) {
+		transport := &blockingWriteTransport{}
+		node := mustNewNode(t, Config{
+			NodeID:             "head",
+			WriteCommitTimeout: time.Hour,
+		}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 8, ReplicaAssignment{
+			Slot:         8,
+			ChainVersion: 4,
+			Role:         ReplicaRoleHead,
+			Peers:        ChainPeers{SuccessorNodeID: "tail"},
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := node.HandleClientDelete(ctx, ClientDeleteRequest{
+			Slot:                 8,
+			Key:                  "k",
+			ExpectedChainVersion: 4,
+		})
+		if err == nil {
+			t.Fatal("HandleClientDelete unexpectedly succeeded")
+		}
+		var ambiguous *AmbiguousWriteError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("error = %v, want ambiguous write", err)
+		}
+		if !errors.Is(err, ErrAmbiguousWrite) {
+			t.Fatalf("error = %v, want ErrAmbiguousWrite", err)
+		}
+		if !errors.Is(err, ErrWriteTimeout) {
+			t.Fatalf("error = %v, want ErrWriteTimeout", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+		if got, want := ambiguous.Kind, OperationKindDelete; got != want {
+			t.Fatalf("ambiguous kind = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestInMemoryBackendGetCommitted(t *testing.T) {

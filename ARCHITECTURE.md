@@ -221,6 +221,8 @@ The coordinator server persists these observations, tracks `healthy -> suspect -
 
 Writes are intentionally blocked while a slot contains a `joining` replica. Reads continue from the active tail during that phase.
 
+If a client write times out or is canceled after entering the storage write path, the storage node returns a typed ambiguous-write error instead of claiming success or rollback. The client does not retry automatically in that case; it must reconcile by reading from the tail. Retrying the same logical write is treated as a new write, not a replay-safe retry.
+
 ## What Is Still Missing
 
 The code now has the core interfaces and in-memory implementations, but it does not yet have:

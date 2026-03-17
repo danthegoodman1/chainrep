@@ -123,6 +123,75 @@ func TestRouterRefreshesOnceOnRoutingMismatchAndNotOnGenericFailure(t *testing.T
 	}
 }
 
+func TestRouterReturnsAmbiguousWriteWithoutRefreshOrRetry(t *testing.T) {
+	ctx := context.Background()
+	key := keyForSlot(t, 1, 4, "ambiguous")
+	snapshot := coordserver.RoutingSnapshot{
+		Version:   1,
+		SlotCount: 4,
+		Slots: []coordserver.SlotRoute{
+			{Slot: 0, ChainVersion: 1, HeadNodeID: "h0", TailNodeID: "t0", Writable: true, Readable: true},
+			{Slot: 1, ChainVersion: 2, HeadNodeID: "head-1", TailNodeID: "tail-1", Writable: true, Readable: true},
+			{Slot: 2, ChainVersion: 1, HeadNodeID: "h2", TailNodeID: "t2", Writable: true, Readable: true},
+			{Slot: 3, ChainVersion: 1, HeadNodeID: "h3", TailNodeID: "t3", Writable: true, Readable: true},
+		},
+	}
+	source := &scriptedSnapshotSource{snapshots: []coordserver.RoutingSnapshot{snapshot, snapshot}}
+	putErr := &storage.AmbiguousWriteError{
+		Slot:                 1,
+		Kind:                 storage.OperationKindPut,
+		ExpectedChainVersion: 2,
+		Cause:                fmt.Errorf("%w: %w", storage.ErrWriteTimeout, context.DeadlineExceeded),
+	}
+	deleteErr := &storage.AmbiguousWriteError{
+		Slot:                 1,
+		Kind:                 storage.OperationKindDelete,
+		ExpectedChainVersion: 2,
+		Cause:                fmt.Errorf("%w: %w", storage.ErrWriteTimeout, context.Canceled),
+	}
+	transport := &recordingTransport{
+		putErrs:    []error{putErr},
+		deleteErrs: []error{deleteErr},
+	}
+	router := mustNewRouter(t, source, transport)
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+
+	if _, err := router.Put(ctx, key, "v"); err == nil {
+		t.Fatal("Put unexpectedly succeeded")
+	} else {
+		var ambiguous *storage.AmbiguousWriteError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("Put error = %v, want ambiguous write", err)
+		}
+		if !errors.Is(err, storage.ErrAmbiguousWrite) {
+			t.Fatalf("Put error = %v, want ErrAmbiguousWrite", err)
+		}
+	}
+	if _, err := router.Delete(ctx, key); err == nil {
+		t.Fatal("Delete unexpectedly succeeded")
+	} else {
+		var ambiguous *storage.AmbiguousWriteError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("Delete error = %v, want ambiguous write", err)
+		}
+		if !errors.Is(err, storage.ErrAmbiguousWrite) {
+			t.Fatalf("Delete error = %v, want ErrAmbiguousWrite", err)
+		}
+	}
+
+	if got, want := source.calls, 1; got != want {
+		t.Fatalf("snapshot source calls = %d, want %d", got, want)
+	}
+	if got, want := transport.putNodes, []string{"head-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("put nodes = %v, want %v", got, want)
+	}
+	if got, want := transport.deleteNodes, []string{"head-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("delete nodes = %v, want %v", got, want)
+	}
+}
+
 func TestRouterSnapshotReturnsDefensiveCopy(t *testing.T) {
 	ctx := context.Background()
 	key := keyForSlot(t, 0, 2, "copy")
@@ -345,6 +414,7 @@ type recordingTransport struct {
 	deleteNodes []string
 	putErrs     []error
 	putResults  []storage.CommitResult
+	deleteErrs  []error
 }
 
 func (t *recordingTransport) Get(_ context.Context, nodeID string, req storage.ClientGetRequest) (storage.ReadResult, error) {
@@ -374,6 +444,13 @@ func (t *recordingTransport) Put(_ context.Context, nodeID string, req storage.C
 
 func (t *recordingTransport) Delete(_ context.Context, nodeID string, req storage.ClientDeleteRequest) (storage.CommitResult, error) {
 	t.deleteNodes = append(t.deleteNodes, nodeID)
+	if len(t.deleteErrs) > 0 {
+		err := t.deleteErrs[0]
+		t.deleteErrs = t.deleteErrs[1:]
+		if err != nil {
+			return storage.CommitResult{}, err
+		}
+	}
 	return storage.CommitResult{Slot: req.Slot, Sequence: 1}, nil
 }
 
