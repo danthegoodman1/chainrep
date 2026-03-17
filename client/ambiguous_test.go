@@ -154,11 +154,11 @@ func newAmbiguousRouterHarness(t *testing.T, blockAwait bool) *ambiguousRouterHa
 
 	headBackend := storage.NewInMemoryBackend()
 	tailBackend := storage.NewInMemoryBackend()
-	head := mustNewStorageNode(t, storage.Config{
+	head := mustNewStorageNode(t, context.Background(), storage.Config{
 		NodeID:             "head",
 		WriteCommitTimeout: time.Nanosecond,
 	}, headBackend, storage.NewInMemoryCoordinatorClient(), repl)
-	tail := mustNewStorageNode(t, storage.Config{
+	tail := mustNewStorageNode(t, context.Background(), storage.Config{
 		NodeID: "tail",
 	}, tailBackend, storage.NewInMemoryCoordinatorClient(), repl)
 
@@ -314,13 +314,14 @@ func (t *manualAmbiguousReplicationTransport) DeliverNextForward(ctx context.Con
 
 func mustNewStorageNode(
 	t *testing.T,
+	ctx context.Context,
 	cfg storage.Config,
 	backend storage.Backend,
 	coord storage.CoordinatorClient,
 	repl storage.ReplicationTransport,
 ) *storage.Node {
 	t.Helper()
-	node, err := storage.NewNode(cfg, backend, coord, repl)
+	node, err := storage.NewNode(ctx, cfg, backend, coord, repl)
 	if err != nil {
 		t.Fatalf("storage.NewNode returned error: %v", err)
 	}

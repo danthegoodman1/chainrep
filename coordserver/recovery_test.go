@@ -154,11 +154,11 @@ func TestEndToEndRestartResumeWithRuntimeReopen(t *testing.T) {
 	repl.Register("a", backendA)
 	repl.Register("b", backendB)
 
-	adapterA, err := OpenInMemoryNodeAdapter("a", backendA, localA, repl)
+	adapterA, err := OpenInMemoryNodeAdapter(ctx, "a", backendA, localA, repl)
 	if err != nil {
 		t.Fatalf("OpenInMemoryNodeAdapter(a) returned error: %v", err)
 	}
-	adapterB, err := OpenInMemoryNodeAdapter("b", backendB, localB, repl)
+	adapterB, err := OpenInMemoryNodeAdapter(ctx, "b", backendB, localB, repl)
 	if err != nil {
 		t.Fatalf("OpenInMemoryNodeAdapter(b) returned error: %v", err)
 	}
@@ -182,12 +182,12 @@ func TestEndToEndRestartResumeWithRuntimeReopen(t *testing.T) {
 		t.Fatalf("SubmitPut returned error: %v", err)
 	}
 
-	restartedA, err := OpenInMemoryNodeAdapter("a", backendA, localA, repl)
+	restartedA, err := OpenInMemoryNodeAdapter(ctx, "a", backendA, localA, repl)
 	if err != nil {
 		t.Fatalf("restart OpenInMemoryNodeAdapter(a) returned error: %v", err)
 	}
 	repl.RegisterNode("a", restartedA.Node())
-	restartedB, err := OpenInMemoryNodeAdapter("b", backendB, localB, repl)
+	restartedB, err := OpenInMemoryNodeAdapter(ctx, "b", backendB, localB, repl)
 	if err != nil {
 		t.Fatalf("restart OpenInMemoryNodeAdapter(b) returned error: %v", err)
 	}

@@ -14,7 +14,7 @@ func TestOpenNodeRestoresRecoveredReplicaAndResumePreservesSequence(t *testing.T
 	local := NewInMemoryLocalStateStore()
 	coord := NewInMemoryCoordinatorClient()
 
-	node, err := OpenNode(Config{NodeID: "node-a"}, backend, local, coord, repl)
+	node, err := OpenNode(ctx, Config{NodeID: "node-a"}, backend, local, coord, repl)
 	if err != nil {
 		t.Fatalf("OpenNode returned error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestOpenNodeRestoresRecoveredReplicaAndResumePreservesSequence(t *testing.T
 	}
 
 	recoveredCoord := NewInMemoryCoordinatorClient()
-	recovered, err := OpenNode(Config{NodeID: "node-a"}, backend, local, recoveredCoord, repl)
+	recovered, err := OpenNode(ctx, Config{NodeID: "node-a"}, backend, local, recoveredCoord, repl)
 	if err != nil {
 		t.Fatalf("reopen OpenNode returned error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestReportRecoveredStateMarksMissingBackendDataAsUnavailable(t *testing.T) 
 	local := NewInMemoryLocalStateStore()
 	coord := NewInMemoryCoordinatorClient()
 
-	node, err := OpenNode(Config{NodeID: "node-a"}, backend, local, coord, repl)
+	node, err := OpenNode(ctx, Config{NodeID: "node-a"}, backend, local, coord, repl)
 	if err != nil {
 		t.Fatalf("OpenNode returned error: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestReportRecoveredStateMarksMissingBackendDataAsUnavailable(t *testing.T) 
 	}
 
 	recoveredCoord := NewInMemoryCoordinatorClient()
-	recovered, err := OpenNode(Config{NodeID: "node-a"}, backend, local, recoveredCoord, repl)
+	recovered, err := OpenNode(ctx, Config{NodeID: "node-a"}, backend, local, recoveredCoord, repl)
 	if err != nil {
 		t.Fatalf("reopen OpenNode returned error: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestRecoverReplicaRebuildsFromPeerAndDropRecoveredReplicaDeletesLocalState(
 	sourceBackend := NewInMemoryBackend()
 	sourceLocal := NewInMemoryLocalStateStore()
 	sourceCoord := NewInMemoryCoordinatorClient()
-	source, err := OpenNode(Config{NodeID: "source"}, sourceBackend, sourceLocal, sourceCoord, repl)
+	source, err := OpenNode(ctx, Config{NodeID: "source"}, sourceBackend, sourceLocal, sourceCoord, repl)
 	if err != nil {
 		t.Fatalf("OpenNode(source) returned error: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRecoverReplicaRebuildsFromPeerAndDropRecoveredReplicaDeletesLocalState(
 	targetBackend := NewInMemoryBackend()
 	targetLocal := NewInMemoryLocalStateStore()
 	targetCoord := NewInMemoryCoordinatorClient()
-	target, err := OpenNode(Config{NodeID: "target"}, targetBackend, targetLocal, targetCoord, repl)
+	target, err := OpenNode(ctx, Config{NodeID: "target"}, targetBackend, targetLocal, targetCoord, repl)
 	if err != nil {
 		t.Fatalf("OpenNode(target) returned error: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestRecoverReplicaRebuildsFromPeerAndDropRecoveredReplicaDeletesLocalState(
 		t.Fatalf("target SubmitPut returned error: %v", err)
 	}
 
-	recoveredTarget, err := OpenNode(Config{NodeID: "target"}, targetBackend, targetLocal, NewInMemoryCoordinatorClient(), repl)
+	recoveredTarget, err := OpenNode(ctx, Config{NodeID: "target"}, targetBackend, targetLocal, NewInMemoryCoordinatorClient(), repl)
 	if err != nil {
 		t.Fatalf("reopen OpenNode(target) returned error: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestRecoverReplicaRebuildsFromPeerAndDropRecoveredReplicaDeletesLocalState(
 
 	staleBackend := NewInMemoryBackend()
 	staleLocal := NewInMemoryLocalStateStore()
-	stale, err := OpenNode(Config{NodeID: "stale"}, staleBackend, staleLocal, NewInMemoryCoordinatorClient(), repl)
+	stale, err := OpenNode(ctx, Config{NodeID: "stale"}, staleBackend, staleLocal, NewInMemoryCoordinatorClient(), repl)
 	if err != nil {
 		t.Fatalf("OpenNode(stale) returned error: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRecoverReplicaRebuildsFromPeerAndDropRecoveredReplicaDeletesLocalState(
 	if err := stale.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 9}); err != nil {
 		t.Fatalf("stale ActivateReplica returned error: %v", err)
 	}
-	reopenedStale, err := OpenNode(Config{NodeID: "stale"}, staleBackend, staleLocal, NewInMemoryCoordinatorClient(), repl)
+	reopenedStale, err := OpenNode(ctx, Config{NodeID: "stale"}, staleBackend, staleLocal, NewInMemoryCoordinatorClient(), repl)
 	if err != nil {
 		t.Fatalf("reopen OpenNode(stale) returned error: %v", err)
 	}

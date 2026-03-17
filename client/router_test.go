@@ -473,7 +473,7 @@ func newRouterHarness(t *testing.T, nodeIDs []string) *routerHarness {
 		backend := storage.NewInMemoryBackend()
 		backends[nodeID] = backend
 		repl.Register(nodeID, backend)
-		adapter, err := coordserver.NewInMemoryNodeAdapter(nodeID, backend, repl)
+		adapter, err := coordserver.NewInMemoryNodeAdapter(context.Background(), nodeID, backend, repl)
 		if err != nil {
 			t.Fatalf("NewInMemoryNodeAdapter(%q) returned error: %v", nodeID, err)
 		}
@@ -517,7 +517,7 @@ func newQueuedRouterHarness(t *testing.T, nodeIDs []string) *queuedRouterHarness
 		backend := storage.NewInMemoryBackend()
 		backends[nodeID] = backend
 		repl.Register(nodeID, backend)
-		adapter, err := coordserver.NewInMemoryNodeAdapter(nodeID, backend, repl)
+		adapter, err := coordserver.NewInMemoryNodeAdapter(context.Background(), nodeID, backend, repl)
 		if err != nil {
 			t.Fatalf("NewInMemoryNodeAdapter(%q) returned error: %v", nodeID, err)
 		}

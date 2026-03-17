@@ -327,11 +327,18 @@ type Node struct {
 
 const defaultWriteCommitTimeout = 5 * time.Second
 
-func NewNode(cfg Config, backend Backend, coord CoordinatorClient, repl ReplicationTransport) (*Node, error) {
-	return OpenNode(cfg, backend, NewInMemoryLocalStateStore(), coord, repl)
+func NewNode(
+	ctx context.Context,
+	cfg Config,
+	backend Backend,
+	coord CoordinatorClient,
+	repl ReplicationTransport,
+) (*Node, error) {
+	return OpenNode(ctx, cfg, backend, NewInMemoryLocalStateStore(), coord, repl)
 }
 
 func OpenNode(
+	ctx context.Context,
 	cfg Config,
 	backend Backend,
 	local LocalStateStore,
@@ -377,7 +384,7 @@ func OpenNode(
 		node.writeCommitTimeout = defaultWriteCommitTimeout
 	}
 
-	persisted, err := node.local.LoadNode(context.Background(), cfg.NodeID)
+	persisted, err := node.local.LoadNode(ctx, cfg.NodeID)
 	if err != nil {
 		return nil, fmt.Errorf("err in node.local.LoadNode: %w", err)
 	}
@@ -495,7 +502,7 @@ func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) 
 	return nil
 }
 
-func (n *Node) MarkReplicaLeaving(_ context.Context, cmd MarkReplicaLeavingCommand) error {
+func (n *Node) MarkReplicaLeaving(ctx context.Context, cmd MarkReplicaLeavingCommand) error {
 	record, ok := n.replicas[cmd.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
@@ -507,7 +514,7 @@ func (n *Node) MarkReplicaLeaving(_ context.Context, cmd MarkReplicaLeavingComma
 	record.state = ReplicaStateLeaving
 	record.lastKnownState = ReplicaStateLeaving
 	n.replicas[cmd.Slot] = record
-	if err := n.persistReplica(context.Background(), record); err != nil {
+	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
 	return nil
@@ -542,7 +549,7 @@ func (n *Node) RemoveReplica(ctx context.Context, cmd RemoveReplicaCommand) erro
 	return nil
 }
 
-func (n *Node) UpdateChainPeers(_ context.Context, cmd UpdateChainPeersCommand) error {
+func (n *Node) UpdateChainPeers(ctx context.Context, cmd UpdateChainPeersCommand) error {
 	record, ok := n.replicas[cmd.Assignment.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Assignment.Slot)
@@ -553,7 +560,7 @@ func (n *Node) UpdateChainPeers(_ context.Context, cmd UpdateChainPeersCommand) 
 		record.lastKnownState = record.state
 		n.replicas[cmd.Assignment.Slot] = record
 	}
-	if err := n.persistReplica(context.Background(), record); err != nil {
+	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
 	return nil
@@ -947,7 +954,7 @@ func (n *Node) submitWrite(
 
 	switch record.assignment.Role {
 	case ReplicaRoleSingle:
-		if err := n.commitLocalSequence(slot, operation.Sequence); err != nil {
+		if err := n.commitLocalSequence(ctx, slot, operation.Sequence); err != nil {
 			return CommitResult{}, err
 		}
 	case ReplicaRoleHead:
@@ -1046,7 +1053,7 @@ func isAmbiguousWriteCause(err error) bool {
 	return errors.Is(err, ErrWriteTimeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
-func (n *Node) commitLocalSequence(slot int, sequence uint64) error {
+func (n *Node) commitLocalSequence(ctx context.Context, slot int, sequence uint64) error {
 	if err := n.backend.CommitSequence(slot, sequence); err != nil {
 		return fmt.Errorf("err in n.backend.CommitSequence: %w", err)
 	}
@@ -1065,7 +1072,7 @@ func (n *Node) commitLocalSequence(slot int, sequence uint64) error {
 		record.lastKnownState = record.state
 		n.replicas[slot] = record
 	}
-	if err := n.persistReplica(context.Background(), record); err != nil {
+	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
 	return nil
@@ -1157,7 +1164,7 @@ func (n *Node) applyForward(ctx context.Context, record replicaRecord, req Forwa
 	n.replicas[req.Operation.Slot] = record
 
 	if record.assignment.Peers.SuccessorNodeID == "" {
-		if err := n.commitLocalSequence(req.Operation.Slot, req.Operation.Sequence); err != nil {
+		if err := n.commitLocalSequence(ctx, req.Operation.Slot, req.Operation.Sequence); err != nil {
 			return err
 		}
 		record = n.replicas[req.Operation.Slot]
@@ -1185,7 +1192,7 @@ func (n *Node) applyForward(ctx context.Context, record replicaRecord, req Forwa
 
 func (n *Node) applyCommit(ctx context.Context, record replicaRecord, req CommitWriteRequest) error {
 	record = n.ensureProtocolState(record)
-	if err := n.commitLocalSequence(req.Slot, req.Sequence); err != nil {
+	if err := n.commitLocalSequence(ctx, req.Slot, req.Sequence); err != nil {
 		return err
 	}
 

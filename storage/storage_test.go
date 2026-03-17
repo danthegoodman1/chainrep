@@ -37,7 +37,7 @@ func TestNodeAddReplicaAsTailCopiesSnapshotAndActivates(t *testing.T) {
 
 	sourceBackend := NewInMemoryBackend()
 	sourceCoord := NewInMemoryCoordinatorClient()
-	sourceNode := mustNewNode(t, Config{NodeID: "node-a"}, sourceBackend, sourceCoord, transport)
+	sourceNode := mustNewNode(t, ctx, Config{NodeID: "node-a"}, sourceBackend, sourceCoord, transport)
 	transport.Register("node-a", sourceBackend)
 
 	if err := sourceNode.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -54,7 +54,7 @@ func TestNodeAddReplicaAsTailCopiesSnapshotAndActivates(t *testing.T) {
 
 	targetBackend := NewInMemoryBackend()
 	targetCoord := NewInMemoryCoordinatorClient()
-	targetNode := mustNewNode(t, Config{NodeID: "node-b"}, targetBackend, targetCoord, transport)
+	targetNode := mustNewNode(t, ctx, Config{NodeID: "node-b"}, targetBackend, targetCoord, transport)
 	transport.Register("node-b", targetBackend)
 
 	if err := targetNode.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -100,7 +100,7 @@ func TestActivateReplicaPreservesAssignmentUpdatesFromReadyCallback(t *testing.T
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	callback := &updatingCoordinatorClient{}
-	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, callback, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-a"}, backend, callback, transport)
 	callback.node = node
 
 	if err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -134,7 +134,7 @@ func TestNodeAddReplicaAsTailFailsCleanlyWhenSourceUnavailable(t *testing.T) {
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "node-b"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-b"}, backend, coord, transport)
 
 	err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
 		Assignment: ReplicaAssignment{
@@ -163,7 +163,7 @@ func TestNodeInvalidLifecycleTransitionsFail(t *testing.T) {
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-a"}, backend, coord, transport)
 
 	if err := node.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 1}); err == nil {
 		t.Fatal("ActivateReplica unexpectedly succeeded")
@@ -188,7 +188,7 @@ func TestNodeDrainAndRemoveLifecycle(t *testing.T) {
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-a"}, backend, coord, transport)
 
 	if err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
 		Assignment: ReplicaAssignment{Slot: 1, ChainVersion: 1, Role: ReplicaRoleSingle},
@@ -228,7 +228,7 @@ func TestNodeUpdateChainPeersTargetsOnlyOneSlot(t *testing.T) {
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-a"}, backend, coord, transport)
 
 	for slot := 1; slot <= 2; slot++ {
 		if err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -266,7 +266,7 @@ func TestNodeReportHeartbeatSummarizesReplicas(t *testing.T) {
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-a"}, backend, coord, transport)
 
 	if err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
 		Assignment: ReplicaAssignment{Slot: 1, ChainVersion: 1, Role: ReplicaRoleSingle},
@@ -331,12 +331,12 @@ func TestEndToEndDrainFlowAcrossNodesWithoutNetworking(t *testing.T) {
 
 	headBackend := NewInMemoryBackend()
 	headCoord := NewInMemoryCoordinatorClient()
-	headNode := mustNewNode(t, Config{NodeID: "head"}, headBackend, headCoord, transport)
+	headNode := mustNewNode(t, ctx, Config{NodeID: "head"}, headBackend, headCoord, transport)
 	transport.Register("head", headBackend)
 
 	tailBackend := NewInMemoryBackend()
 	tailCoord := NewInMemoryCoordinatorClient()
-	tailNode := mustNewNode(t, Config{NodeID: "tail"}, tailBackend, tailCoord, transport)
+	tailNode := mustNewNode(t, ctx, Config{NodeID: "tail"}, tailBackend, tailCoord, transport)
 	transport.Register("tail", tailBackend)
 
 	if err := headNode.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -402,7 +402,7 @@ func TestMultiSlotFailureIsolation(t *testing.T) {
 
 	sourceBackend := NewInMemoryBackend()
 	sourceCoord := NewInMemoryCoordinatorClient()
-	source := mustNewNode(t, Config{NodeID: "source"}, sourceBackend, sourceCoord, transport)
+	source := mustNewNode(t, ctx, Config{NodeID: "source"}, sourceBackend, sourceCoord, transport)
 	transport.Register("source", sourceBackend)
 
 	if err := source.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -419,7 +419,7 @@ func TestMultiSlotFailureIsolation(t *testing.T) {
 
 	targetBackend := NewInMemoryBackend()
 	targetCoord := NewInMemoryCoordinatorClient()
-	target := mustNewNode(t, Config{NodeID: "target"}, targetBackend, targetCoord, transport)
+	target := mustNewNode(t, ctx, Config{NodeID: "target"}, targetBackend, targetCoord, transport)
 
 	if err := target.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
 		Assignment: ReplicaAssignment{
@@ -481,12 +481,12 @@ func runDeterministicFlow(t *testing.T) (NodeState, []int, []int, Snapshot) {
 
 	sourceBackend := NewInMemoryBackend()
 	sourceCoord := NewInMemoryCoordinatorClient()
-	source := mustNewNode(t, Config{NodeID: "source"}, sourceBackend, sourceCoord, transport)
+	source := mustNewNode(t, ctx, Config{NodeID: "source"}, sourceBackend, sourceCoord, transport)
 	transport.Register("source", sourceBackend)
 
 	targetBackend := NewInMemoryBackend()
 	targetCoord := NewInMemoryCoordinatorClient()
-	target := mustNewNode(t, Config{NodeID: "target"}, targetBackend, targetCoord, transport)
+	target := mustNewNode(t, ctx, Config{NodeID: "target"}, targetBackend, targetCoord, transport)
 	transport.Register("target", targetBackend)
 
 	if err := source.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
@@ -531,9 +531,9 @@ func runDeterministicFlow(t *testing.T) (NodeState, []int, []int, Snapshot) {
 	return target.State(), append([]int(nil), targetCoord.ReadySlots...), append([]int(nil), targetCoord.RemovedSlots...), data
 }
 
-func mustNewNode(t *testing.T, cfg Config, backend Backend, coord CoordinatorClient, repl ReplicationTransport) *Node {
+func mustNewNode(t *testing.T, ctx context.Context, cfg Config, backend Backend, coord CoordinatorClient, repl ReplicationTransport) *Node {
 	t.Helper()
-	node, err := NewNode(cfg, backend, coord, repl)
+	node, err := NewNode(ctx, cfg, backend, coord, repl)
 	if err != nil {
 		t.Fatalf("NewNode returned error: %v", err)
 	}

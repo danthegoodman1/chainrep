@@ -759,7 +759,7 @@ func newInMemoryHarness(t *testing.T, nodeIDs []string) *inMemoryHarness {
 		backend := storage.NewInMemoryBackend()
 		backends[nodeID] = backend
 		repl.Register(nodeID, backend)
-		adapter, err := NewInMemoryNodeAdapter(nodeID, backend, repl)
+		adapter, err := NewInMemoryNodeAdapter(context.Background(), nodeID, backend, repl)
 		if err != nil {
 			t.Fatalf("NewInMemoryNodeAdapter(%q) returned error: %v", nodeID, err)
 		}

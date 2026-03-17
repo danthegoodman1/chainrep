@@ -32,7 +32,7 @@ func TestClientHandlersReadAndWriteAgainstServingReplicas(t *testing.T) {
 
 	t.Run("single replica read and write succeed", func(t *testing.T) {
 		transport := NewInMemoryReplicationTransport()
-		node := mustNewNode(t, Config{NodeID: "single"}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "single"}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
 		mustActivateReplica(t, node, 2, ReplicaAssignment{Slot: 2, ChainVersion: 1, Role: ReplicaRoleSingle})
 
 		if _, err := node.HandleClientPut(ctx, ClientPutRequest{
@@ -139,7 +139,7 @@ func TestClientHandlersRejectStaleOrIllegalTargets(t *testing.T) {
 	}
 
 	transport := NewInMemoryReplicationTransport()
-	unknown := mustNewNode(t, Config{NodeID: "x"}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
+	unknown := mustNewNode(t, ctx, Config{NodeID: "x"}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
 	if _, err := unknown.HandleClientPut(ctx, ClientPutRequest{
 		Slot:                 99,
 		Key:                  "k",
@@ -156,7 +156,7 @@ func TestCommittedReadsDoNotExposeStagedWrites(t *testing.T) {
 	ctx := context.Background()
 	backend := NewInMemoryBackend()
 	transport := NewInMemoryReplicationTransport()
-	node := mustNewNode(t, Config{NodeID: "single"}, backend, NewInMemoryCoordinatorClient(), transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "single"}, backend, NewInMemoryCoordinatorClient(), transport)
 	mustActivateReplica(t, node, 4, ReplicaAssignment{Slot: 4, ChainVersion: 1, Role: ReplicaRoleSingle})
 
 	if err := backend.StagePut(4, 1, "k", "v"); err != nil {
@@ -180,7 +180,7 @@ func TestClientWriteTimeoutsBecomeAmbiguousErrors(t *testing.T) {
 
 	t.Run("put timeout returns ambiguous write and preserves staged state", func(t *testing.T) {
 		transport := &blockingWriteTransport{}
-		node := mustNewNode(t, Config{
+		node := mustNewNode(t, ctx, Config{
 			NodeID:             "head",
 			WriteCommitTimeout: time.Nanosecond,
 		}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
@@ -229,7 +229,7 @@ func TestClientWriteTimeoutsBecomeAmbiguousErrors(t *testing.T) {
 
 	t.Run("delete cancellation returns ambiguous write", func(t *testing.T) {
 		transport := &blockingWriteTransport{}
-		node := mustNewNode(t, Config{
+		node := mustNewNode(t, ctx, Config{
 			NodeID:             "head",
 			WriteCommitTimeout: time.Hour,
 		}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)

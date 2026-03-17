@@ -32,11 +32,17 @@ type InMemoryNodeAdapter struct {
 	progressQueue []queuedProgressReport
 }
 
-func NewInMemoryNodeAdapter(nodeID string, backend storage.Backend, repl storage.ReplicationTransport) (*InMemoryNodeAdapter, error) {
-	return OpenInMemoryNodeAdapter(nodeID, backend, storage.NewInMemoryLocalStateStore(), repl)
+func NewInMemoryNodeAdapter(
+	ctx context.Context,
+	nodeID string,
+	backend storage.Backend,
+	repl storage.ReplicationTransport,
+) (*InMemoryNodeAdapter, error) {
+	return OpenInMemoryNodeAdapter(ctx, nodeID, backend, storage.NewInMemoryLocalStateStore(), repl)
 }
 
 func OpenInMemoryNodeAdapter(
+	ctx context.Context,
 	nodeID string,
 	backend storage.Backend,
 	local storage.LocalStateStore,
@@ -44,6 +50,7 @@ func OpenInMemoryNodeAdapter(
 ) (*InMemoryNodeAdapter, error) {
 	adapter := &InMemoryNodeAdapter{nodeID: nodeID, local: local}
 	node, err := storage.OpenNode(
+		ctx,
 		storage.Config{NodeID: nodeID},
 		backend,
 		local,

@@ -57,7 +57,7 @@ func TestSingleReplicaSubmitPutAndDeleteCommitImmediately(t *testing.T) {
 	transport := NewInMemoryReplicationTransport()
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "node-a"}, backend, coord, transport)
 
 	mustActivateReplica(t, node, 1, ReplicaAssignment{Slot: 1, ChainVersion: 1, Role: ReplicaRoleSingle})
 
@@ -223,7 +223,7 @@ func TestPipelineStagesLaterWritesBeforeEarlierCommitAndCommitsInOrder(t *testin
 	transport := &scriptedTransport{}
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "mid"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "mid"}, backend, coord, transport)
 	mustActivateReplica(t, node, 5, ReplicaAssignment{
 		Slot:         5,
 		ChainVersion: 1,
@@ -276,7 +276,7 @@ func TestOutOfOrderForwardAndCommitRequestsAreBufferedAndDrained(t *testing.T) {
 	transport := &scriptedTransport{}
 	backend := NewInMemoryBackend()
 	coord := NewInMemoryCoordinatorClient()
-	node := mustNewNode(t, Config{NodeID: "mid"}, backend, coord, transport)
+	node := mustNewNode(t, ctx, Config{NodeID: "mid"}, backend, coord, transport)
 	mustActivateReplica(t, node, 5, ReplicaAssignment{
 		Slot:         5,
 		ChainVersion: 1,
@@ -327,7 +327,7 @@ func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
 	t.Run("duplicate staged forward is idempotent and does not refanout", func(t *testing.T) {
 		transport := &scriptedTransport{}
 		backend := NewInMemoryBackend()
-		node := mustNewNode(t, Config{NodeID: "mid"}, backend, NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "mid"}, backend, NewInMemoryCoordinatorClient(), transport)
 		mustActivateReplica(t, node, 5, ReplicaAssignment{
 			Slot:         5,
 			ChainVersion: 1,
@@ -355,7 +355,7 @@ func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
 	t.Run("duplicate committed forward is idempotent", func(t *testing.T) {
 		transport := &scriptedTransport{}
 		backend := NewInMemoryBackend()
-		node := mustNewNode(t, Config{NodeID: "tail"}, backend, NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "tail"}, backend, NewInMemoryCoordinatorClient(), transport)
 		mustActivateReplica(t, node, 5, ReplicaAssignment{
 			Slot:         5,
 			ChainVersion: 1,
@@ -380,7 +380,7 @@ func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
 	t.Run("conflicting duplicate forward is rejected", func(t *testing.T) {
 		transport := &scriptedTransport{}
 		backend := NewInMemoryBackend()
-		node := mustNewNode(t, Config{NodeID: "tail"}, backend, NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "tail"}, backend, NewInMemoryCoordinatorClient(), transport)
 		mustActivateReplica(t, node, 5, ReplicaAssignment{
 			Slot:         5,
 			ChainVersion: 1,
@@ -432,8 +432,8 @@ func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
 	t.Run("buffer overflow rejects future messages", func(t *testing.T) {
 		transport := &scriptedTransport{}
 		backend := NewInMemoryBackend()
-		node := mustNewNode(t, Config{
-			NodeID:                           "mid",
+		node := mustNewNode(t, ctx, Config{
+			NodeID:                            "mid",
 			MaxBufferedReplicaMessagesPerSlot: 1,
 		}, backend, NewInMemoryCoordinatorClient(), transport)
 		mustActivateReplica(t, node, 5, ReplicaAssignment{
@@ -460,7 +460,7 @@ func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
 	t.Run("duplicates older than retained forward history are rejected", func(t *testing.T) {
 		transport := &scriptedTransport{}
 		backend := NewInMemoryBackend()
-		node := mustNewNode(t, Config{
+		node := mustNewNode(t, ctx, Config{
 			NodeID:                            "tail",
 			MaxBufferedReplicaMessagesPerSlot: 1,
 		}, backend, NewInMemoryCoordinatorClient(), transport)
@@ -511,7 +511,7 @@ func TestWriteValidationAndDownstreamFailure(t *testing.T) {
 		transport := NewInMemoryReplicationTransport()
 		backend := NewInMemoryBackend()
 		coord := NewInMemoryCoordinatorClient()
-		node := mustNewNode(t, Config{NodeID: "a"}, backend, coord, transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "a"}, backend, coord, transport)
 		if err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
 			Assignment: ReplicaAssignment{Slot: 1, ChainVersion: 1, Role: ReplicaRoleSingle},
 		}); err != nil {
@@ -528,7 +528,7 @@ func TestWriteValidationAndDownstreamFailure(t *testing.T) {
 		transport := &scriptedTransport{}
 		backend := NewInMemoryBackend()
 		coord := NewInMemoryCoordinatorClient()
-		node := mustNewNode(t, Config{NodeID: "mid"}, backend, coord, transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "mid"}, backend, coord, transport)
 		mustActivateReplica(t, node, 4, ReplicaAssignment{
 			Slot:         4,
 			ChainVersion: 1,
@@ -547,7 +547,7 @@ func TestWriteValidationAndDownstreamFailure(t *testing.T) {
 
 	t.Run("unknown slot rejected", func(t *testing.T) {
 		transport := NewInMemoryReplicationTransport()
-		node := mustNewNode(t, Config{NodeID: "a"}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "a"}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
 		if _, err := node.SubmitPut(ctx, 999, "k", "v"); err == nil {
 			t.Fatal("SubmitPut unexpectedly succeeded on unknown slot")
 		} else if !errors.Is(err, ErrUnknownReplica) {
@@ -561,7 +561,7 @@ func TestWriteValidationAndDownstreamFailure(t *testing.T) {
 		}
 		backend := NewInMemoryBackend()
 		coord := NewInMemoryCoordinatorClient()
-		node := mustNewNode(t, Config{NodeID: "head"}, backend, coord, transport)
+		node := mustNewNode(t, ctx, Config{NodeID: "head"}, backend, coord, transport)
 		mustActivateReplica(t, node, 6, ReplicaAssignment{
 			Slot:         6,
 			ChainVersion: 1,
@@ -613,7 +613,7 @@ func runReplicationHistory(t *testing.T) replicationHistory {
 		backend := NewInMemoryBackend()
 		backends[nodeID] = backend
 		transport.Register(nodeID, backend)
-		node := mustNewNode(t, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
 		nodes[nodeID] = node
 		transport.RegisterNode(nodeID, node)
 	}
@@ -702,7 +702,7 @@ func setupActiveChain(
 		backend := NewInMemoryBackend()
 		backends[nodeID] = backend
 		transport.Register(nodeID, backend)
-		node := mustNewNode(t, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
 		nodes[nodeID] = node
 		transport.RegisterNode(nodeID, node)
 	}
@@ -769,7 +769,7 @@ func setupActiveChainWithQueuedTransport(
 		backend := NewInMemoryBackend()
 		backends[nodeID] = backend
 		transport.Register(nodeID, backend)
-		node := mustNewNode(t, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
+		node := mustNewNode(t, ctx, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
 		nodes[nodeID] = node
 		transport.RegisterNode(nodeID, node)
 	}

@@ -11,7 +11,7 @@ import (
 func TestSubmitPutTimesOutAndPreservesInFlightState(t *testing.T) {
 	ctx := context.Background()
 	transport := &blockingWriteTransport{}
-	node := mustNewNode(t, Config{
+	node := mustNewNode(t, ctx, Config{
 		NodeID:             "head",
 		WriteCommitTimeout: time.Nanosecond,
 	}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
@@ -50,7 +50,7 @@ func TestSubmitPutTimesOutAndPreservesInFlightState(t *testing.T) {
 
 func TestSubmitPutRespectsCallerCancellationBeforeDefaultTimeout(t *testing.T) {
 	transport := &blockingWriteTransport{}
-	node := mustNewNode(t, Config{
+	node := mustNewNode(t, context.Background(), Config{
 		NodeID:             "head",
 		WriteCommitTimeout: time.Hour,
 	}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
@@ -77,7 +77,7 @@ func TestSubmitPutRespectsCallerCancellationBeforeDefaultTimeout(t *testing.T) {
 
 func TestSubmitPutUsesTighterCallerDeadline(t *testing.T) {
 	transport := &blockingWriteTransport{}
-	node := mustNewNode(t, Config{
+	node := mustNewNode(t, context.Background(), Config{
 		NodeID:             "head",
 		WriteCommitTimeout: time.Hour,
 	}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)

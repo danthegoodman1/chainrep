@@ -33,7 +33,7 @@ func setupActiveChainWithQueuedTransportForBenchmark(
 		backend := NewInMemoryBackend()
 		backends[nodeID] = backend
 		transport.Register(nodeID, backend)
-		node, err := NewNode(Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
+		node, err := NewNode(ctx, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
 		if err != nil {
 			b.Fatalf("NewNode(%q) returned error: %v", nodeID, err)
 		}
