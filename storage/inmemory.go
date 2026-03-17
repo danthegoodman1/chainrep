@@ -65,6 +65,16 @@ func (b *InMemoryBackend) InstallSnapshot(slot int, snap Snapshot) error {
 	return nil
 }
 
+func (b *InMemoryBackend) SetHighestCommittedSequence(slot int, sequence uint64) error {
+	replica, exists := b.replicas[slot]
+	if !exists {
+		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+	}
+	replica.highestCommitted = sequence
+	replica.staged = map[uint64]stagedOperation{}
+	return nil
+}
+
 func (b *InMemoryBackend) Put(slot int, key string, value string) error {
 	replica, exists := b.replicas[slot]
 	if !exists {
@@ -135,6 +145,23 @@ func (b *InMemoryBackend) CommitSequence(slot int, sequence uint64) error {
 
 func (b *InMemoryBackend) CommittedSnapshot(slot int) (Snapshot, error) {
 	return b.Snapshot(slot)
+}
+
+func (b *InMemoryBackend) GetCommitted(slot int, key string) (string, bool, error) {
+	replica, exists := b.replicas[slot]
+	if !exists {
+		return "", false, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+	}
+	value, ok := replica.committed[key]
+	return value, ok, nil
+}
+
+func (b *InMemoryBackend) HighestCommittedSequence(slot int) (uint64, error) {
+	replica, exists := b.replicas[slot]
+	if !exists {
+		return 0, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+	}
+	return replica.highestCommitted, nil
 }
 
 func (b *InMemoryBackend) StagedSequences(slot int) ([]uint64, error) {
@@ -231,6 +258,19 @@ func (t *InMemoryReplicationTransport) ForwardWrite(ctx context.Context, toNodeI
 		return fmt.Errorf("err in node.HandleForwardWrite: %w", err)
 	}
 	return nil
+}
+
+func (t *InMemoryReplicationTransport) FetchCommittedSequence(_ context.Context, fromNodeID string, slot int) (uint64, error) {
+	backend, ok := t.backends[fromNodeID]
+	if !ok {
+		return 0, fmt.Errorf("%w: node %q", ErrSnapshotSourceUnavailable, fromNodeID)
+	}
+
+	sequence, err := backend.HighestCommittedSequence(slot)
+	if err != nil {
+		return 0, fmt.Errorf("err in backend.HighestCommittedSequence: %w", err)
+	}
+	return sequence, nil
 }
 
 func (t *InMemoryReplicationTransport) CommitWrite(ctx context.Context, toNodeID string, req CommitWriteRequest) error {

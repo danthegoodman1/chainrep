@@ -43,6 +43,21 @@ type PendingWork struct {
 	CommandID string
 }
 
+type SlotRoute struct {
+	Slot         int
+	ChainVersion uint64
+	HeadNodeID   string
+	TailNodeID   string
+	Writable     bool
+	Readable     bool
+}
+
+type RoutingSnapshot struct {
+	Version   uint64
+	SlotCount int
+	Slots     []SlotRoute
+}
+
 type Server struct {
 	rt         *coordruntime.Runtime
 	nodes      map[string]StorageNodeClient
@@ -88,6 +103,38 @@ func (s *Server) Pending() map[int]PendingWork {
 		cloned[slot] = pending
 	}
 	return cloned
+}
+
+func (s *Server) RoutingSnapshot(_ context.Context) (RoutingSnapshot, error) {
+	state := s.rt.Current()
+	snapshot := RoutingSnapshot{
+		Version:   state.Version,
+		SlotCount: state.Cluster.SlotCount,
+		Slots:     make([]SlotRoute, 0, len(state.Cluster.Chains)),
+	}
+	for _, chain := range state.Cluster.Chains {
+		route := SlotRoute{
+			Slot:         chain.Slot,
+			ChainVersion: state.SlotVersions[chain.Slot],
+		}
+		for _, replica := range chain.Replicas {
+			if replica.State != coordinator.ReplicaStateActive {
+				continue
+			}
+			if route.HeadNodeID == "" {
+				route.HeadNodeID = replica.NodeID
+			}
+			route.TailNodeID = replica.NodeID
+		}
+		if route.HeadNodeID != "" {
+			route.Writable = !chainHasReplicaState(chain, coordinator.ReplicaStateJoining)
+		}
+		if route.TailNodeID != "" {
+			route.Readable = true
+		}
+		snapshot.Slots = append(snapshot.Slots, route)
+	}
+	return snapshot, nil
 }
 
 func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
@@ -352,13 +399,14 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 	}
 
 	skipped := map[string]bool{addedNodeID: true}
-	updateNodes := affectedPeerUpdateNodes(slotPlan.Before, slotPlan.After, skipped)
+	servingChain := activeServingChain(slotPlan.After)
+	updateNodes := activeAfterNodeIDs(servingChain, skipped)
 	for _, nodeID := range updateNodes {
 		client, ok := s.nodes[nodeID]
 		if !ok {
 			return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, nodeID)
 		}
-		assignment, err := assignmentForNode(slotPlan.After, nodeID, chainVersion)
+		assignment, err := assignmentForNode(servingChain, nodeID, chainVersion)
 		if err != nil {
 			return fmt.Errorf("err in assignmentForNode(update append): %w", err)
 		}
@@ -386,13 +434,14 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 	}
 
 	skipped := map[string]bool{leavingNodeID: true}
-	updateNodes := affectedPeerUpdateNodes(slotPlan.Before, slotPlan.After, skipped)
+	servingChain := activeServingChain(slotPlan.After)
+	updateNodes := activeAfterNodeIDs(servingChain, skipped)
 	for _, nodeID := range updateNodes {
 		client, ok := s.nodes[nodeID]
 		if !ok {
 			return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, nodeID)
 		}
-		assignment, err := assignmentForNode(slotPlan.After, nodeID, chainVersion)
+		assignment, err := assignmentForNode(servingChain, nodeID, chainVersion)
 		if err != nil {
 			return fmt.Errorf("err in assignmentForNode(update leaving): %w", err)
 		}
@@ -455,6 +504,43 @@ func assignmentForNode(chain coordinator.Chain, nodeID string, chainVersion uint
 		assignment.Peers.SuccessorNodeID = chain.Replicas[position+1].NodeID
 	}
 	return assignment, nil
+}
+
+func activeAfterNodeIDs(chain coordinator.Chain, skipped map[string]bool) []string {
+	nodeIDs := make([]string, 0, len(chain.Replicas))
+	for _, replica := range chain.Replicas {
+		if replica.State != coordinator.ReplicaStateActive {
+			continue
+		}
+		if skipped[replica.NodeID] {
+			continue
+		}
+		nodeIDs = append(nodeIDs, replica.NodeID)
+	}
+	return nodeIDs
+}
+
+func activeServingChain(chain coordinator.Chain) coordinator.Chain {
+	serving := coordinator.Chain{
+		Slot:     chain.Slot,
+		Replicas: make([]coordinator.Replica, 0, len(chain.Replicas)),
+	}
+	for _, replica := range chain.Replicas {
+		if replica.State != coordinator.ReplicaStateActive {
+			continue
+		}
+		serving.Replicas = append(serving.Replicas, replica)
+	}
+	return serving
+}
+
+func chainHasReplicaState(chain coordinator.Chain, want coordinator.ReplicaState) bool {
+	for _, replica := range chain.Replicas {
+		if replica.State == want {
+			return true
+		}
+	}
+	return false
 }
 
 func affectedPeerUpdateNodes(before coordinator.Chain, after coordinator.Chain, skipped map[string]bool) []string {

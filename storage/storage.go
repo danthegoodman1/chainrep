@@ -17,6 +17,7 @@ var (
 	ErrSequenceMismatch          = errors.New("storage sequence mismatch")
 	ErrPeerMismatch              = errors.New("storage peer mismatch")
 	ErrStateMismatch             = errors.New("storage state mismatch")
+	ErrRoutingMismatch           = errors.New("storage routing mismatch")
 )
 
 type Config struct {
@@ -30,10 +31,13 @@ type Backend interface {
 	DeleteReplica(slot int) error
 	Snapshot(slot int) (Snapshot, error)
 	InstallSnapshot(slot int, snap Snapshot) error
+	SetHighestCommittedSequence(slot int, sequence uint64) error
 	StagePut(slot int, sequence uint64, key string, value string) error
 	StageDelete(slot int, sequence uint64, key string) error
 	CommitSequence(slot int, sequence uint64) error
 	CommittedSnapshot(slot int) (Snapshot, error)
+	GetCommitted(slot int, key string) (string, bool, error)
+	HighestCommittedSequence(slot int) (uint64, error)
 	StagedSequences(slot int) ([]uint64, error)
 }
 
@@ -45,6 +49,7 @@ type CoordinatorClient interface {
 
 type ReplicationTransport interface {
 	FetchSnapshot(ctx context.Context, fromNodeID string, slot int) (Snapshot, error)
+	FetchCommittedSequence(ctx context.Context, fromNodeID string, slot int) (uint64, error)
 	ForwardWrite(ctx context.Context, toNodeID string, req ForwardWriteRequest) error
 	CommitWrite(ctx context.Context, toNodeID string, req CommitWriteRequest) error
 }
@@ -78,6 +83,67 @@ type CommitWriteRequest struct {
 type CommitResult struct {
 	Slot     int
 	Sequence uint64
+}
+
+type ClientGetRequest struct {
+	Slot                 int
+	Key                  string
+	ExpectedChainVersion uint64
+}
+
+type ClientPutRequest struct {
+	Slot                 int
+	Key                  string
+	Value                string
+	ExpectedChainVersion uint64
+}
+
+type ClientDeleteRequest struct {
+	Slot                 int
+	Key                  string
+	ExpectedChainVersion uint64
+}
+
+type ReadResult struct {
+	Slot         int
+	ChainVersion uint64
+	Found        bool
+	Value        string
+}
+
+type RoutingMismatchReason string
+
+const (
+	RoutingMismatchReasonUnknownSlot     RoutingMismatchReason = "unknown_slot"
+	RoutingMismatchReasonWrongVersion    RoutingMismatchReason = "wrong_version"
+	RoutingMismatchReasonWrongRole       RoutingMismatchReason = "wrong_role"
+	RoutingMismatchReasonInactiveReplica RoutingMismatchReason = "inactive_replica"
+)
+
+type RoutingMismatchError struct {
+	Slot                 int
+	ExpectedChainVersion uint64
+	CurrentChainVersion  uint64
+	CurrentRole          ReplicaRole
+	CurrentState         ReplicaState
+	Reason               RoutingMismatchReason
+}
+
+func (e *RoutingMismatchError) Error() string {
+	return fmt.Sprintf(
+		"%s: slot %d expected version %d, current version %d, role %q, state %q, reason %q",
+		ErrRoutingMismatch,
+		e.Slot,
+		e.ExpectedChainVersion,
+		e.CurrentChainVersion,
+		e.CurrentRole,
+		e.CurrentState,
+		e.Reason,
+	)
+}
+
+func (e *RoutingMismatchError) Unwrap() error {
+	return ErrRoutingMismatch
 }
 
 type ReplicaState string
@@ -223,6 +289,17 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 			delete(n.replicas, cmd.Assignment.Slot)
 			return fmt.Errorf("err in n.backend.InstallSnapshot: %w", err)
 		}
+		highestCommittedSequence, err := n.repl.FetchCommittedSequence(ctx, sourceNodeID, cmd.Assignment.Slot)
+		if err != nil {
+			delete(n.replicas, cmd.Assignment.Slot)
+			return fmt.Errorf("err in n.repl.FetchCommittedSequence: %w", err)
+		}
+		if err := n.backend.SetHighestCommittedSequence(cmd.Assignment.Slot, highestCommittedSequence); err != nil {
+			delete(n.replicas, cmd.Assignment.Slot)
+			return fmt.Errorf("err in n.backend.SetHighestCommittedSequence: %w", err)
+		}
+		record.highestCommittedSequence = highestCommittedSequence
+		record.nextSequence = highestCommittedSequence + 1
 	}
 
 	record.state = ReplicaStateCatchingUp
@@ -243,6 +320,7 @@ func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) 
 		return fmt.Errorf("err in n.coord.ReportReplicaReady: %w", err)
 	}
 
+	record = n.replicas[cmd.Slot]
 	record.state = ReplicaStateActive
 	n.replicas[cmd.Slot] = record
 	return nil
@@ -310,6 +388,55 @@ func (n *Node) SubmitPut(ctx context.Context, slot int, key string, value string
 
 func (n *Node) SubmitDelete(ctx context.Context, slot int, key string) (CommitResult, error) {
 	return n.submitWrite(ctx, slot, OperationKindDelete, key, "")
+}
+
+func (n *Node) HandleClientGet(_ context.Context, req ClientGetRequest) (ReadResult, error) {
+	record, ok := n.replicas[req.Slot]
+	if !ok {
+		return ReadResult{}, newRoutingMismatch(req.Slot, req.ExpectedChainVersion, replicaRecord{}, RoutingMismatchReasonUnknownSlot)
+	}
+	if record.state != ReplicaStateActive {
+		return ReadResult{}, newRoutingMismatch(req.Slot, req.ExpectedChainVersion, record, RoutingMismatchReasonInactiveReplica)
+	}
+	if record.assignment.ChainVersion != req.ExpectedChainVersion {
+		return ReadResult{}, newRoutingMismatch(req.Slot, req.ExpectedChainVersion, record, RoutingMismatchReasonWrongVersion)
+	}
+	if record.assignment.Role != ReplicaRoleTail && record.assignment.Role != ReplicaRoleSingle {
+		return ReadResult{}, newRoutingMismatch(req.Slot, req.ExpectedChainVersion, record, RoutingMismatchReasonWrongRole)
+	}
+
+	value, found, err := n.backend.GetCommitted(req.Slot, req.Key)
+	if err != nil {
+		return ReadResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", err)
+	}
+	return ReadResult{
+		Slot:         req.Slot,
+		ChainVersion: record.assignment.ChainVersion,
+		Found:        found,
+		Value:        value,
+	}, nil
+}
+
+func (n *Node) HandleClientPut(ctx context.Context, req ClientPutRequest) (CommitResult, error) {
+	if err := n.validateClientWrite(req.Slot, req.ExpectedChainVersion); err != nil {
+		return CommitResult{}, err
+	}
+	result, err := n.submitWrite(ctx, req.Slot, OperationKindPut, req.Key, req.Value)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	return result, nil
+}
+
+func (n *Node) HandleClientDelete(ctx context.Context, req ClientDeleteRequest) (CommitResult, error) {
+	if err := n.validateClientWrite(req.Slot, req.ExpectedChainVersion); err != nil {
+		return CommitResult{}, err
+	}
+	result, err := n.submitWrite(ctx, req.Slot, OperationKindDelete, req.Key, "")
+	if err != nil {
+		return CommitResult{}, err
+	}
+	return result, nil
 }
 
 func (n *Node) HandleForwardWrite(ctx context.Context, req ForwardWriteRequest) error {
@@ -584,6 +711,39 @@ func (n *Node) stageOperation(operation WriteOperation) error {
 		return fmt.Errorf("%w: unsupported operation kind %q", ErrInvalidConfig, operation.Kind)
 	}
 	return nil
+}
+
+func (n *Node) validateClientWrite(slot int, expectedChainVersion uint64) error {
+	record, ok := n.replicas[slot]
+	if !ok {
+		return newRoutingMismatch(slot, expectedChainVersion, replicaRecord{}, RoutingMismatchReasonUnknownSlot)
+	}
+	if record.state != ReplicaStateActive {
+		return newRoutingMismatch(slot, expectedChainVersion, record, RoutingMismatchReasonInactiveReplica)
+	}
+	if record.assignment.ChainVersion != expectedChainVersion {
+		return newRoutingMismatch(slot, expectedChainVersion, record, RoutingMismatchReasonWrongVersion)
+	}
+	if record.assignment.Role != ReplicaRoleHead && record.assignment.Role != ReplicaRoleSingle {
+		return newRoutingMismatch(slot, expectedChainVersion, record, RoutingMismatchReasonWrongRole)
+	}
+	return nil
+}
+
+func newRoutingMismatch(
+	slot int,
+	expectedChainVersion uint64,
+	record replicaRecord,
+	reason RoutingMismatchReason,
+) error {
+	return &RoutingMismatchError{
+		Slot:                 slot,
+		ExpectedChainVersion: expectedChainVersion,
+		CurrentChainVersion:  record.assignment.ChainVersion,
+		CurrentRole:          record.assignment.Role,
+		CurrentState:         record.state,
+		Reason:               reason,
+	}
 }
 
 func (n *Node) commitLocalSequence(slot int, sequence uint64) error {

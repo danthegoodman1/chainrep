@@ -95,6 +95,40 @@ func TestNodeAddReplicaAsTailCopiesSnapshotAndActivates(t *testing.T) {
 	}
 }
 
+func TestActivateReplicaPreservesAssignmentUpdatesFromReadyCallback(t *testing.T) {
+	ctx := context.Background()
+	transport := NewInMemoryReplicationTransport()
+	backend := NewInMemoryBackend()
+	callback := &updatingCoordinatorClient{}
+	node := mustNewNode(t, Config{NodeID: "node-a"}, backend, callback, transport)
+	callback.node = node
+
+	if err := node.AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
+		Assignment: ReplicaAssignment{
+			Slot:         1,
+			ChainVersion: 2,
+			Role:         ReplicaRoleTail,
+		},
+	}); err != nil {
+		t.Fatalf("AddReplicaAsTail returned error: %v", err)
+	}
+
+	if err := node.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 1}); err != nil {
+		t.Fatalf("ActivateReplica returned error: %v", err)
+	}
+
+	replica := node.State().Replicas[1]
+	if got, want := replica.State, ReplicaStateActive; got != want {
+		t.Fatalf("replica state = %q, want %q", got, want)
+	}
+	if got, want := replica.Assignment.ChainVersion, uint64(4); got != want {
+		t.Fatalf("chain version = %d, want %d", got, want)
+	}
+	if got, want := replica.Assignment.Role, ReplicaRoleHead; got != want {
+		t.Fatalf("role = %q, want %q", got, want)
+	}
+}
+
 func TestNodeAddReplicaAsTailFailsCleanlyWhenSourceUnavailable(t *testing.T) {
 	ctx := context.Background()
 	transport := NewInMemoryReplicationTransport()
@@ -262,6 +296,29 @@ func TestNodeReportHeartbeatSummarizesReplicas(t *testing.T) {
 	}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("heartbeat = %#v, want %#v", got, want)
 	}
+}
+
+type updatingCoordinatorClient struct {
+	node *Node
+}
+
+func (c *updatingCoordinatorClient) ReportReplicaReady(ctx context.Context, slot int) error {
+	return c.node.UpdateChainPeers(ctx, UpdateChainPeersCommand{
+		Assignment: ReplicaAssignment{
+			Slot:         slot,
+			ChainVersion: 4,
+			Role:         ReplicaRoleHead,
+			Peers:        ChainPeers{SuccessorNodeID: "node-b"},
+		},
+	})
+}
+
+func (c *updatingCoordinatorClient) ReportReplicaRemoved(context.Context, int) error {
+	return nil
+}
+
+func (c *updatingCoordinatorClient) ReportNodeHeartbeat(context.Context, NodeStatus) error {
+	return nil
 }
 
 func TestEndToEndDrainFlowAcrossNodesWithoutNetworking(t *testing.T) {

@@ -81,6 +81,12 @@ func TestAddNodeDispatchesAddReplicaAsTailToExpectedNode(t *testing.T) {
 	if got, want := nodes["d"].calls, []string{"add_tail:1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("node d calls = %v, want %v", got, want)
 	}
+	if got, want := nodes["b"].calls, []string{"update_peers:1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("node b calls = %v, want %v", got, want)
+	}
+	if got, want := nodes["a"].calls, []string{"update_peers:1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("node a calls = %v, want %v", got, want)
+	}
 	if got, want := nodes["c"].calls, []string{"update_peers:1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("node c calls = %v, want %v", got, want)
 	}
@@ -155,6 +161,12 @@ func TestValidReadyAndRemovedProgressAdvanceStateAndDispatchNextStep(t *testing.
 	}
 	if got, want := nodes["d"].calls, []string{"add_tail:1", "update_peers:1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("node d calls after ready = %v, want %v", got, want)
+	}
+	if got, want := nodes["b"].calls, []string{"update_peers:1", "update_peers:1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("node b calls after ready = %v, want %v", got, want)
+	}
+	if got, want := nodes["a"].calls, []string{"update_peers:1", "update_peers:1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("node a calls after ready = %v, want %v", got, want)
 	}
 	if got, want := nodes["c"].calls, []string{"update_peers:1", "mark_leaving:1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("node c calls after ready = %v, want %v", got, want)
@@ -267,6 +279,93 @@ func TestHeartbeatIsRecordedButDoesNotTriggerReconfiguration(t *testing.T) {
 		CatchingUpCount: 1,
 	}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("heartbeat = %#v, want %#v", got, want)
+	}
+}
+
+func TestRoutingSnapshotExposesActiveHeadAndTail(t *testing.T) {
+	ctx := context.Background()
+	server := mustBootstrappedServer(t, ctx, mapToClient(map[string]*recordingNodeClient{
+		"a": newRecordingNodeClient("a"),
+		"b": newRecordingNodeClient("b"),
+		"c": newRecordingNodeClient("c"),
+	}), 4, 3, "a", "b", "c")
+
+	snapshot, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	if got, want := snapshot.SlotCount, 4; got != want {
+		t.Fatalf("slot count = %d, want %d", got, want)
+	}
+	for _, route := range snapshot.Slots {
+		if !route.Readable || !route.Writable {
+			t.Fatalf("route %#v should be readable and writable", route)
+		}
+		if route.HeadNodeID == "" || route.TailNodeID == "" {
+			t.Fatalf("route %#v missing endpoints", route)
+		}
+		if route.ChainVersion != 1 {
+			t.Fatalf("route %#v chain version = %d, want 1", route, route.ChainVersion)
+		}
+	}
+}
+
+func TestRoutingSnapshotExcludesJoiningAndLeavingReplicas(t *testing.T) {
+	ctx := context.Background()
+	nodes := map[string]*recordingNodeClient{
+		"a": newRecordingNodeClient("a"),
+		"b": newRecordingNodeClient("b"),
+		"c": newRecordingNodeClient("c"),
+		"d": newRecordingNodeClient("d"),
+	}
+	server := mustBootstrappedServer(t, ctx, mapToClient(nodes), 8, 3, "a", "b", "c")
+
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	snapshot, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	route := snapshot.Slots[1]
+	if got, want := route.HeadNodeID, "b"; got != want {
+		t.Fatalf("head during join = %q, want %q", got, want)
+	}
+	if got, want := route.TailNodeID, "c"; got != want {
+		t.Fatalf("tail during join = %q, want %q", got, want)
+	}
+	if route.Writable {
+		t.Fatalf("route during join = %#v, want not writable", route)
+	}
+	if !route.Readable {
+		t.Fatalf("route during join = %#v, want readable", route)
+	}
+	if got, want := route.ChainVersion, uint64(2); got != want {
+		t.Fatalf("chain version during join = %d, want %d", got, want)
+	}
+
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
+		t.Fatalf("ReportReplicaReady returned error: %v", err)
+	}
+	snapshot, err = server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after ready returned error: %v", err)
+	}
+	route = snapshot.Slots[1]
+	if got, want := route.HeadNodeID, "d"; got != want {
+		t.Fatalf("head after ready = %q, want %q", got, want)
+	}
+	if got, want := route.TailNodeID, "a"; got != want {
+		t.Fatalf("tail after ready = %q, want %q", got, want)
+	}
+	if !route.Writable || !route.Readable {
+		t.Fatalf("route after ready = %#v, want readable and writable", route)
+	}
+	if got, want := route.ChainVersion, uint64(4); got != want {
+		t.Fatalf("chain version after ready = %d, want %d", got, want)
 	}
 }
 
@@ -653,7 +752,7 @@ func TestDispatchOrderIsDeterministic(t *testing.T) {
 			got = append(got, fmt.Sprintf("%s:%s", nodeID, call))
 		}
 	}
-	want := []string{"c:update_peers:1", "d:add_tail:1"}
+	want := []string{"a:update_peers:1", "b:update_peers:1", "c:update_peers:1", "d:add_tail:1"}
 	sort.Strings(got)
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {

@@ -17,5 +17,5 @@
 - [ ] Audit and harden behavior that currently assumes synchronous in-memory transport delivery, especially dispatch ordering, progress timing, and write ack propagation.
 - [ ] Implement storage-node persistence and restart/recovery semantics.
 - [x] Implement the steady-state chain replication protocol between storage nodes.
-- [ ] Implement client-facing read/write execution and routing.
+- [x] Implement client-facing read/write execution and routing.
 - [ ] Stored objects have associated metadata, enabling conditional writes (e.g. monotonic fencing token per-object, auto-incremented on mutation)

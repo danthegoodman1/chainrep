@@ -380,6 +380,10 @@ func (t *scriptedTransport) FetchSnapshot(_ context.Context, _ string, _ int) (S
 	return Snapshot{}, nil
 }
 
+func (t *scriptedTransport) FetchCommittedSequence(_ context.Context, _ string, _ int) (uint64, error) {
+	return 0, nil
+}
+
 func (t *scriptedTransport) ForwardWrite(_ context.Context, _ string, req ForwardWriteRequest) error {
 	t.forwards = append(t.forwards, req)
 	if t.forwardErr != nil {

@@ -22,6 +22,7 @@ type State struct {
 	Version         uint64
 	LastLogIndex    uint64
 	Cluster         coordinator.ClusterState
+	SlotVersions    map[int]uint64
 	AppliedCommands map[string]AppliedCommand
 }
 
@@ -30,6 +31,7 @@ type AppliedCommand struct {
 	Version      uint64
 	LastLogIndex uint64
 	Cluster      coordinator.ClusterState
+	SlotVersions map[int]uint64
 	Plan         *coordinator.ReconfigurationPlan
 }
 
@@ -358,6 +360,7 @@ func (r *Runtime) nextStateForApplied(
 	next.Version++
 	next.LastLogIndex = logIndex
 	next.Cluster = cloneClusterState(cluster)
+	next.SlotVersions = nextSlotVersions(next.SlotVersions, next.Version, cmd.Kind, cluster, plan)
 	if next.AppliedCommands == nil {
 		next.AppliedCommands = make(map[string]AppliedCommand)
 	}
@@ -366,6 +369,7 @@ func (r *Runtime) nextStateForApplied(
 		Version:      next.Version,
 		LastLogIndex: logIndex,
 		Cluster:      cloneClusterState(cluster),
+		SlotVersions: cloneSlotVersions(next.SlotVersions),
 		Plan:         clonePlan(plan),
 	}
 	return next
@@ -376,6 +380,7 @@ func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 		Version:         applied.Version,
 		LastLogIndex:    applied.LastLogIndex,
 		Cluster:         cloneClusterState(applied.Cluster),
+		SlotVersions:    cloneSlotVersions(applied.SlotVersions),
 		AppliedCommands: make(map[string]AppliedCommand),
 	}
 	for id, existing := range r.state.AppliedCommands {
@@ -388,6 +393,7 @@ func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 
 func zeroState() State {
 	return State{
+		SlotVersions:    map[int]uint64{},
 		AppliedCommands: map[string]AppliedCommand{},
 	}
 }
@@ -401,6 +407,7 @@ func cloneState(state State) State {
 		Version:         state.Version,
 		LastLogIndex:    state.LastLogIndex,
 		Cluster:         cloneClusterState(state.Cluster),
+		SlotVersions:    cloneSlotVersions(state.SlotVersions),
 		AppliedCommands: make(map[string]AppliedCommand, len(state.AppliedCommands)),
 	}
 	for id, applied := range state.AppliedCommands {
@@ -415,8 +422,42 @@ func cloneAppliedCommand(applied AppliedCommand) AppliedCommand {
 		Version:      applied.Version,
 		LastLogIndex: applied.LastLogIndex,
 		Cluster:      cloneClusterState(applied.Cluster),
+		SlotVersions: cloneSlotVersions(applied.SlotVersions),
 		Plan:         clonePlan(applied.Plan),
 	}
+}
+
+func nextSlotVersions(
+	current map[int]uint64,
+	version uint64,
+	kind CommandKind,
+	cluster coordinator.ClusterState,
+	plan *coordinator.ReconfigurationPlan,
+) map[int]uint64 {
+	next := cloneSlotVersions(current)
+	switch kind {
+	case CommandKindBootstrap:
+		next = make(map[int]uint64, len(cluster.Chains))
+		for _, chain := range cluster.Chains {
+			next[chain.Slot] = version
+		}
+	case CommandKindReconfigure:
+		if plan == nil {
+			return next
+		}
+		for _, slotPlan := range plan.ChangedSlots {
+			next[slotPlan.Slot] = version
+		}
+	}
+	return next
+}
+
+func cloneSlotVersions(slotVersions map[int]uint64) map[int]uint64 {
+	cloned := make(map[int]uint64, len(slotVersions))
+	for slot, version := range slotVersions {
+		cloned[slot] = version
+	}
+	return cloned
 }
 
 func cloneCommand(cmd Command) Command {
