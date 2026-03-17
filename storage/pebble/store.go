@@ -22,6 +22,17 @@ const (
 	keyLocalReplica  byte = 'l'
 )
 
+const (
+	opCreateReplica               = "create_replica"
+	opDeleteReplica               = "delete_replica"
+	opInstallSnapshot             = "install_snapshot"
+	opSetHighestCommittedSequence = "set_highest_committed_sequence"
+	opCommitSequence              = "commit_sequence"
+	opUpsertLocalReplica          = "upsert_local_replica"
+	opDeleteLocalReplica          = "delete_local_replica"
+	opCleanupStagedOnOpen         = "cleanup_staged_on_open"
+)
+
 type Store struct {
 	owner *owner
 }
@@ -31,6 +42,13 @@ type owner struct {
 	closeErr  error
 	closeOnce sync.Once
 }
+
+type durableWriteHooks struct {
+	mu                 sync.Mutex
+	beforeDurableWrite func(op string) error
+}
+
+var testHooks durableWriteHooks
 
 type Backend struct {
 	owner *owner
@@ -51,7 +69,15 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("err in pebble.Open: %w", err)
 	}
-	return &Store{owner: &owner{db: db}}, nil
+	owner := &owner{db: db}
+	if err := owner.cleanupStagedOperationsOnOpen(); err != nil {
+		closeErr := owner.Close()
+		if closeErr != nil {
+			return nil, errors.Join(fmt.Errorf("err in cleanupStagedOperationsOnOpen: %w", err), closeErr)
+		}
+		return nil, fmt.Errorf("err in cleanupStagedOperationsOnOpen: %w", err)
+	}
+	return &Store{owner: owner}, nil
 }
 
 func (s *Store) Backend() storage.Backend {
@@ -95,8 +121,8 @@ func (b *Backend) CreateReplica(slot int) error {
 	if err := batch.Set(replicaMetaKey(slot), encodeUint64(0), nil); err != nil {
 		return fmt.Errorf("err in batch.Set(replica meta): %w", err)
 	}
-	if err := batch.Commit(cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in batch.Commit(create replica): %w", err)
+	if err := b.owner.commitBatch(batch, opCreateReplica); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(create replica): %w", err)
 	}
 	return nil
 }
@@ -116,8 +142,8 @@ func (b *Backend) DeleteReplica(slot int) error {
 	if err := batch.Delete(replicaMetaKey(slot), nil); err != nil {
 		return fmt.Errorf("err in batch.Delete(replica meta): %w", err)
 	}
-	if err := batch.Commit(cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in batch.Commit(delete replica): %w", err)
+	if err := b.owner.commitBatch(batch, opDeleteReplica); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(delete replica): %w", err)
 	}
 	return nil
 }
@@ -144,8 +170,8 @@ func (b *Backend) InstallSnapshot(slot int, snap storage.Snapshot) error {
 			return fmt.Errorf("err in batch.Set(committed snapshot): %w", err)
 		}
 	}
-	if err := batch.Commit(cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in batch.Commit(install snapshot): %w", err)
+	if err := b.owner.commitBatch(batch, opInstallSnapshot); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(install snapshot): %w", err)
 	}
 	return nil
 }
@@ -162,8 +188,8 @@ func (b *Backend) SetHighestCommittedSequence(slot int, sequence uint64) error {
 	if err := batch.Set(replicaMetaKey(slot), encodeUint64(sequence), nil); err != nil {
 		return fmt.Errorf("err in batch.Set(replica meta): %w", err)
 	}
-	if err := batch.Commit(cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in batch.Commit(set highest committed sequence): %w", err)
+	if err := b.owner.commitBatch(batch, opSetHighestCommittedSequence); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(set highest committed sequence): %w", err)
 	}
 	return nil
 }
@@ -222,8 +248,8 @@ func (b *Backend) CommitSequence(slot int, sequence uint64) error {
 	if err := batch.Set(replicaMetaKey(slot), encodeUint64(sequence), nil); err != nil {
 		return fmt.Errorf("err in batch.Set(replica meta): %w", err)
 	}
-	if err := batch.Commit(cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in batch.Commit(commit sequence): %w", err)
+	if err := b.owner.commitBatch(batch, opCommitSequence); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(commit sequence): %w", err)
 	}
 	return nil
 }
@@ -342,15 +368,15 @@ func (l *LocalStore) UpsertReplica(_ context.Context, nodeID string, replica sto
 	if err != nil {
 		return fmt.Errorf("err in json.Marshal(local replica): %w", err)
 	}
-	if err := l.owner.db.Set(localReplicaKey(nodeID, replica.Assignment.Slot), encoded, cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in db.Set(local replica): %w", err)
+	if err := l.owner.setSync(localReplicaKey(nodeID, replica.Assignment.Slot), encoded, opUpsertLocalReplica); err != nil {
+		return fmt.Errorf("err in owner.setSync(local replica): %w", err)
 	}
 	return nil
 }
 
 func (l *LocalStore) DeleteReplica(_ context.Context, nodeID string, slot int) error {
-	if err := l.owner.db.Delete(localReplicaKey(nodeID, slot), cockroachpebble.Sync); err != nil && !errors.Is(err, cockroachpebble.ErrNotFound) {
-		return fmt.Errorf("err in db.Delete(local replica): %w", err)
+	if err := l.owner.deleteSync(localReplicaKey(nodeID, slot), opDeleteLocalReplica); err != nil && !errors.Is(err, cockroachpebble.ErrNotFound) {
+		return fmt.Errorf("err in owner.deleteSync(local replica): %w", err)
 	}
 	return nil
 }
@@ -368,8 +394,8 @@ func (b *Backend) stageOperation(slot int, sequence uint64, operation stagedValu
 	if err != nil {
 		return fmt.Errorf("err in json.Marshal(staged op): %w", err)
 	}
-	if err := b.owner.db.Set(stagedKey(slot, sequence), encoded, cockroachpebble.Sync); err != nil {
-		return fmt.Errorf("err in db.Set(staged op): %w", err)
+	if err := b.owner.setSync(stagedKey(slot, sequence), encoded, "stage_operation"); err != nil {
+		return fmt.Errorf("err in owner.setSync(staged op): %w", err)
 	}
 	return nil
 }
@@ -408,6 +434,90 @@ func deletePrefix(db *cockroachpebble.DB, batch *cockroachpebble.Batch, prefix [
 		return fmt.Errorf("err in iter.Error(prefix delete): %w", err)
 	}
 	return nil
+}
+
+func (o *owner) cleanupStagedOperationsOnOpen() error {
+	prefix := []byte{keyStagedOp}
+	iter, err := o.db.NewIter(&cockroachpebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: prefixUpperBound(prefix),
+	})
+	if err != nil {
+		return fmt.Errorf("err in db.NewIter(staged cleanup): %w", err)
+	}
+	defer iter.Close()
+
+	batch := o.db.NewBatch()
+	defer batch.Close()
+	count := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		if err := batch.Delete(slices.Clone(iter.Key()), nil); err != nil {
+			return fmt.Errorf("err in batch.Delete(staged cleanup): %w", err)
+		}
+		count++
+	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("err in iter.Error(staged cleanup): %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	if err := o.commitBatch(batch, opCleanupStagedOnOpen); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(staged cleanup): %w", err)
+	}
+	return nil
+}
+
+func (o *owner) commitBatch(batch *cockroachpebble.Batch, op string) error {
+	if err := runBeforeDurableWrite(op); err != nil {
+		return err
+	}
+	if err := batch.Commit(cockroachpebble.Sync); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *owner) setSync(key []byte, value []byte, op string) error {
+	if err := runBeforeDurableWrite(op); err != nil {
+		return err
+	}
+	if err := o.db.Set(key, value, cockroachpebble.Sync); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *owner) deleteSync(key []byte, op string) error {
+	if err := runBeforeDurableWrite(op); err != nil {
+		return err
+	}
+	if err := o.db.Delete(key, cockroachpebble.Sync); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runBeforeDurableWrite(op string) error {
+	testHooks.mu.Lock()
+	hook := testHooks.beforeDurableWrite
+	testHooks.mu.Unlock()
+	if hook == nil {
+		return nil
+	}
+	return hook(op)
+}
+
+func setBeforeDurableWriteForTest(hook func(op string) error) func() {
+	testHooks.mu.Lock()
+	prev := testHooks.beforeDurableWrite
+	testHooks.beforeDurableWrite = hook
+	testHooks.mu.Unlock()
+	return func() {
+		testHooks.mu.Lock()
+		testHooks.beforeDurableWrite = prev
+		testHooks.mu.Unlock()
+	}
 }
 
 func replicaMetaKey(slot int) []byte {

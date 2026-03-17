@@ -114,6 +114,13 @@ Methods:
 `storage.Node` is also where runtime resource controls live. Backpressure for client writes, buffered replica protocol messages, and catch-up concurrency is enforced at the node/process layer rather than by the backend, so custom backends do not need to provide node-wide admission or cross-slot coordination semantics.
 - current implementation is an in-memory restart-capable reference store
 
+For the durable Pebble-backed reference implementation, the crash-consistency contract is:
+
+- after crash/reopen, visible durable state is equivalent to a prefix of successful completed public backend/local-store operations
+- completed `CreateReplica`, `DeleteReplica`, `InstallSnapshot`, `SetHighestCommittedSequence`, `CommitSequence`, `UpsertReplica`, and `DeleteReplica(node,slot)` operations are durable and not torn at their public API boundary
+- committed data, highest committed sequence, and persisted local replica metadata are authoritative after reopen
+- staged but uncommitted replica operations are not authoritative crash-recovery state; the Pebble reference backend removes staged remnants on reopen before the store is exposed
+
 Methods:
 
 - `LoadNode`
@@ -237,7 +244,6 @@ The code now has the core interfaces plus:
 It still does not yet have:
 
 - a real network transport
-- crash-consistency hardening beyond reopen/restart validation for the durable storage path
 
 So the current shape is:
 
