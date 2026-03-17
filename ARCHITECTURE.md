@@ -225,10 +225,15 @@ If a client write times out or is canceled after entering the storage write path
 
 ## What Is Still Missing
 
-The code now has the core interfaces and in-memory implementations, but it does not yet have:
+The code now has the core interfaces plus:
+
+- in-memory reference implementations
+- a local durable Pebble-backed storage backend and local metadata store
+
+It still does not yet have:
 
 - a real network transport
-- a durable storage backend
+- crash-consistency hardening beyond reopen/restart validation for the durable storage path
 
 So the current shape is:
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 )
@@ -46,12 +47,14 @@ type Backend interface {
 	GetCommitted(slot int, key string) (string, bool, error)
 	HighestCommittedSequence(slot int) (uint64, error)
 	StagedSequences(slot int) ([]uint64, error)
+	Close() error
 }
 
 type LocalStateStore interface {
 	LoadNode(ctx context.Context, nodeID string) (PersistedNodeState, error)
 	UpsertReplica(ctx context.Context, nodeID string, replica PersistedReplica) error
 	DeleteReplica(ctx context.Context, nodeID string, slot int) error
+	Close() error
 }
 
 type CoordinatorClient interface {
@@ -323,6 +326,8 @@ type Node struct {
 	replicas                          map[int]replicaRecord
 	maxBufferedReplicaMessagesPerSlot int
 	writeCommitTimeout                time.Duration
+	closeErr                          error
+	closed                            bool
 }
 
 const defaultWriteCommitTimeout = 5 * time.Second
@@ -675,6 +680,22 @@ func (n *Node) DropRecoveredReplica(ctx context.Context, cmd DropRecoveredReplic
 	}
 	delete(n.replicas, cmd.Slot)
 	return nil
+}
+
+func (n *Node) Close() error {
+	if n.closed {
+		return n.closeErr
+	}
+	n.closed = true
+
+	var errs []error
+	if sameOwnedResource(n.backend, n.local) {
+		errs = append(errs, n.backend.Close())
+	} else {
+		errs = append(errs, n.backend.Close(), n.local.Close())
+	}
+	n.closeErr = errors.Join(errs...)
+	return n.closeErr
 }
 
 func (n *Node) SubmitPut(ctx context.Context, slot int, key string, value string) (CommitResult, error) {
@@ -1400,4 +1421,24 @@ func sortedReplicaSlots(replicas map[int]replicaRecord) []int {
 	}
 	sort.Ints(slots)
 	return slots
+}
+
+func sameOwnedResource(left any, right any) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	if !leftValue.IsValid() || !rightValue.IsValid() || leftValue.Type() != rightValue.Type() {
+		return false
+	}
+	if leftValue.Type().Comparable() {
+		return leftValue.Interface() == rightValue.Interface()
+	}
+	switch leftValue.Kind() {
+	case reflect.Pointer, reflect.UnsafePointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return leftValue.Pointer() == rightValue.Pointer()
+	default:
+		return false
+	}
 }

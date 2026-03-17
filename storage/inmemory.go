@@ -179,6 +179,10 @@ func (b *InMemoryBackend) StagedSequences(slot int) ([]uint64, error) {
 	return sequences, nil
 }
 
+func (b *InMemoryBackend) Close() error {
+	return nil
+}
+
 type InMemoryCoordinatorClient struct {
 	ReadySlots      []int
 	RemovedSlots    []int
@@ -281,6 +285,10 @@ func (s *InMemoryLocalStateStore) DeleteReplica(_ context.Context, nodeID string
 	}
 	state.Replicas = replicas
 	s.nodes[nodeID] = state
+	return nil
+}
+
+func (s *InMemoryLocalStateStore) Close() error {
 	return nil
 }
 

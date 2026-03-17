@@ -242,3 +242,7 @@ func (s *blockingLocalStateStore) DeleteReplica(ctx context.Context, nodeID stri
 	}
 	return s.inner.DeleteReplica(ctx, nodeID, slot)
 }
+
+func (s *blockingLocalStateStore) Close() error {
+	return s.inner.Close()
+}

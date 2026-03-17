@@ -10,7 +10,7 @@
 - [x] Add a storage replication transport interface for node-to-node communication.
 - [x] Build in-memory reference implementations for both transport layers.
 - [x] Add end-to-end tests that run a coordinator plus several storage nodes without real networking.
-- [ ] Add a durable or interface-stabilized local storage backend beyond the in-memory KV model.
+- [x] Add a durable or interface-stabilized local storage backend beyond the in-memory KV model.
 - [x] Add the coordinator server that issues storage-node commands and consumes storage-node progress.
 - [x] Add node liveness detection and heartbeat-driven reconfiguration policy, including suspect/dead timeouts and automatic coordinator actions.
 - [ ] Add real network transports for coordinator control-plane traffic and storage-node replication traffic.
