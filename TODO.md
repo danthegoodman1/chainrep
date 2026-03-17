@@ -17,7 +17,7 @@
 - [x] Implement storage-node persistence and restart/recovery semantics.
 - [x] Implement the steady-state chain replication protocol between storage nodes.
 - [x] Implement client-facing read/write execution and routing.
-- [ ] Add client request IDs, retry semantics, and ambiguous-write handling across coordinator and storage paths.
+- [ ] Add ambiguous client write handling across client and storage paths, with client read-back reconciliation after timeout/cancellation.
 - [x] Add transport-level idempotency and duplicate/out-of-order message handling for replica protocol messages.
 - [x] Add timeout/cancellation enforcement for externally-coupled operations, especially head write commit waiting and coordinator-to-storage command dispatch.
 - [ ] Remove internal context.Background persistence calls in storage and thread caller/context-derived deadlines through local metadata and recovery paths.
