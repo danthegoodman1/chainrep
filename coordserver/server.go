@@ -59,11 +59,12 @@ type RoutingSnapshot struct {
 }
 
 type Server struct {
-	rt         *coordruntime.Runtime
-	nodes      map[string]StorageNodeClient
-	heartbeats map[string]storage.NodeStatus
-	pending    map[int]PendingWork
-	lastPolicy coordinator.ReconfigurationPolicy
+	rt              *coordruntime.Runtime
+	nodes           map[string]StorageNodeClient
+	heartbeats      map[string]storage.NodeStatus
+	pending         map[int]PendingWork
+	routingSnapshot RoutingSnapshot
+	lastPolicy      coordinator.ReconfigurationPolicy
 }
 
 func Open(ctx context.Context, store coordruntime.Store, nodes map[string]StorageNodeClient) (*Server, error) {
@@ -77,12 +78,14 @@ func Open(ctx context.Context, store coordruntime.Store, nodes map[string]Storag
 		clonedNodes[nodeID] = node
 	}
 
-	return &Server{
+	server := &Server{
 		rt:         rt,
 		nodes:      clonedNodes,
 		heartbeats: map[string]storage.NodeStatus{},
 		pending:    map[int]PendingWork{},
-	}, nil
+	}
+	server.rebuildRoutingSnapshot()
+	return server, nil
 }
 
 func (s *Server) Current() coordruntime.State {
@@ -106,35 +109,7 @@ func (s *Server) Pending() map[int]PendingWork {
 }
 
 func (s *Server) RoutingSnapshot(_ context.Context) (RoutingSnapshot, error) {
-	state := s.rt.Current()
-	snapshot := RoutingSnapshot{
-		Version:   state.Version,
-		SlotCount: state.Cluster.SlotCount,
-		Slots:     make([]SlotRoute, 0, len(state.Cluster.Chains)),
-	}
-	for _, chain := range state.Cluster.Chains {
-		route := SlotRoute{
-			Slot:         chain.Slot,
-			ChainVersion: state.SlotVersions[chain.Slot],
-		}
-		for _, replica := range chain.Replicas {
-			if replica.State != coordinator.ReplicaStateActive {
-				continue
-			}
-			if route.HeadNodeID == "" {
-				route.HeadNodeID = replica.NodeID
-			}
-			route.TailNodeID = replica.NodeID
-		}
-		if route.HeadNodeID != "" {
-			route.Writable = !chainHasReplicaState(chain, coordinator.ReplicaStateJoining)
-		}
-		if route.TailNodeID != "" {
-			route.Readable = true
-		}
-		snapshot.Slots = append(snapshot.Slots, route)
-	}
-	return snapshot, nil
+	return cloneRoutingSnapshot(s.routingSnapshot), nil
 }
 
 func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
@@ -145,6 +120,7 @@ func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coord
 	if err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.Bootstrap: %w", err)
 	}
+	s.rebuildRoutingSnapshot()
 	return state, nil
 }
 
@@ -207,6 +183,7 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	}); err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.ApplyProgress: %w", err)
 	}
+	s.rebuildRoutingSnapshot()
 	delete(s.pending, slot)
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
@@ -263,6 +240,7 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 	if err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.ApplyProgress: %w", err)
 	}
+	s.rebuildRoutingSnapshot()
 	delete(s.pending, slot)
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
@@ -299,6 +277,7 @@ func (s *Server) applyMembershipMutation(
 	if err != nil {
 		return coordruntime.State{}, fmt.Errorf("err in s.rt.Reconfigure: %w", err)
 	}
+	s.rebuildRoutingSnapshot()
 	s.lastPolicy = cmd.Reconfigure.Policy
 
 	if err := s.dispatchPlan(ctx, state.Version, plan); err != nil {
@@ -330,6 +309,7 @@ func (s *Server) reconcileAndDispatch(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("err in s.rt.Reconcile: %w", err)
 	}
+	s.rebuildRoutingSnapshot()
 	if err := s.dispatchPlan(ctx, state.Version, plan); err != nil {
 		return err
 	}
@@ -518,6 +498,46 @@ func activeAfterNodeIDs(chain coordinator.Chain, skipped map[string]bool) []stri
 		nodeIDs = append(nodeIDs, replica.NodeID)
 	}
 	return nodeIDs
+}
+
+func (s *Server) rebuildRoutingSnapshot() {
+	state := s.rt.Current()
+	snapshot := RoutingSnapshot{
+		Version:   state.Version,
+		SlotCount: state.Cluster.SlotCount,
+		Slots:     make([]SlotRoute, 0, len(state.Cluster.Chains)),
+	}
+	for _, chain := range state.Cluster.Chains {
+		route := SlotRoute{
+			Slot:         chain.Slot,
+			ChainVersion: state.SlotVersions[chain.Slot],
+		}
+		for _, replica := range chain.Replicas {
+			if replica.State != coordinator.ReplicaStateActive {
+				continue
+			}
+			if route.HeadNodeID == "" {
+				route.HeadNodeID = replica.NodeID
+			}
+			route.TailNodeID = replica.NodeID
+		}
+		if route.HeadNodeID != "" {
+			route.Writable = !chainHasReplicaState(chain, coordinator.ReplicaStateJoining)
+		}
+		if route.TailNodeID != "" {
+			route.Readable = true
+		}
+		snapshot.Slots = append(snapshot.Slots, route)
+	}
+	s.routingSnapshot = snapshot
+}
+
+func cloneRoutingSnapshot(snapshot RoutingSnapshot) RoutingSnapshot {
+	return RoutingSnapshot{
+		Version:   snapshot.Version,
+		SlotCount: snapshot.SlotCount,
+		Slots:     append([]SlotRoute(nil), snapshot.Slots...),
+	}
 }
 
 func activeServingChain(chain coordinator.Chain) coordinator.Chain {

@@ -86,17 +86,17 @@ func (r *Router) Delete(ctx context.Context, key string) (storage.CommitResult, 
 	return r.deleteWithSnapshot(ctx, key, snapshot, true)
 }
 
-func (r *Router) loadedSnapshot() (coordserver.RoutingSnapshot, error) {
+func (r *Router) loadedSnapshot() (*coordserver.RoutingSnapshot, error) {
 	if r.snapshot == nil {
-		return coordserver.RoutingSnapshot{}, ErrSnapshotNotLoaded
+		return nil, ErrSnapshotNotLoaded
 	}
-	return cloneSnapshot(*r.snapshot), nil
+	return r.snapshot, nil
 }
 
 func (r *Router) getWithSnapshot(
 	ctx context.Context,
 	key string,
-	snapshot coordserver.RoutingSnapshot,
+	snapshot *coordserver.RoutingSnapshot,
 	allowRefresh bool,
 ) (storage.ReadResult, error) {
 	route, err := routeForKey(snapshot, key)
@@ -116,8 +116,7 @@ func (r *Router) getWithSnapshot(
 			if refreshErr := r.Refresh(ctx); refreshErr != nil {
 				return storage.ReadResult{}, refreshErr
 			}
-			refreshed, _ := r.Snapshot()
-			return r.getWithSnapshot(ctx, key, refreshed, false)
+			return r.getWithSnapshot(ctx, key, r.snapshot, false)
 		}
 		return storage.ReadResult{}, err
 	}
@@ -128,7 +127,7 @@ func (r *Router) putWithSnapshot(
 	ctx context.Context,
 	key string,
 	value string,
-	snapshot coordserver.RoutingSnapshot,
+	snapshot *coordserver.RoutingSnapshot,
 	allowRefresh bool,
 ) (storage.CommitResult, error) {
 	route, err := routeForKey(snapshot, key)
@@ -149,8 +148,7 @@ func (r *Router) putWithSnapshot(
 			if refreshErr := r.Refresh(ctx); refreshErr != nil {
 				return storage.CommitResult{}, refreshErr
 			}
-			refreshed, _ := r.Snapshot()
-			return r.putWithSnapshot(ctx, key, value, refreshed, false)
+			return r.putWithSnapshot(ctx, key, value, r.snapshot, false)
 		}
 		return storage.CommitResult{}, err
 	}
@@ -160,7 +158,7 @@ func (r *Router) putWithSnapshot(
 func (r *Router) deleteWithSnapshot(
 	ctx context.Context,
 	key string,
-	snapshot coordserver.RoutingSnapshot,
+	snapshot *coordserver.RoutingSnapshot,
 	allowRefresh bool,
 ) (storage.CommitResult, error) {
 	route, err := routeForKey(snapshot, key)
@@ -180,15 +178,17 @@ func (r *Router) deleteWithSnapshot(
 			if refreshErr := r.Refresh(ctx); refreshErr != nil {
 				return storage.CommitResult{}, refreshErr
 			}
-			refreshed, _ := r.Snapshot()
-			return r.deleteWithSnapshot(ctx, key, refreshed, false)
+			return r.deleteWithSnapshot(ctx, key, r.snapshot, false)
 		}
 		return storage.CommitResult{}, err
 	}
 	return result, nil
 }
 
-func routeForKey(snapshot coordserver.RoutingSnapshot, key string) (coordserver.SlotRoute, error) {
+func routeForKey(snapshot *coordserver.RoutingSnapshot, key string) (coordserver.SlotRoute, error) {
+	if snapshot == nil {
+		return coordserver.SlotRoute{}, ErrSnapshotNotLoaded
+	}
 	if snapshot.SlotCount <= 0 || len(snapshot.Slots) != snapshot.SlotCount {
 		return coordserver.SlotRoute{}, fmt.Errorf("%w: invalid snapshot slot count %d", ErrNoRoute, snapshot.SlotCount)
 	}

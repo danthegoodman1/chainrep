@@ -369,6 +369,46 @@ func TestRoutingSnapshotExcludesJoiningAndLeavingReplicas(t *testing.T) {
 	}
 }
 
+func TestRoutingSnapshotReturnsDefensiveCopyAndStableRepeatedReads(t *testing.T) {
+	ctx := context.Background()
+	server := mustBootstrappedServer(t, ctx, mapToClient(map[string]*recordingNodeClient{
+		"a": newRecordingNodeClient("a"),
+		"b": newRecordingNodeClient("b"),
+		"c": newRecordingNodeClient("c"),
+	}), 4, 3, "a", "b", "c")
+
+	first, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	second, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot second read returned error: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("repeated snapshots differ\nfirst=%#v\nsecond=%#v", first, second)
+	}
+
+	first.Slots[0].HeadNodeID = "mutated-head"
+	first.Slots[0].TailNodeID = "mutated-tail"
+	first.Slots[0].Readable = false
+	first.Slots[0].Writable = false
+
+	third, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot third read returned error: %v", err)
+	}
+	if got, want := third.Slots[0].HeadNodeID, second.Slots[0].HeadNodeID; got != want {
+		t.Fatalf("head node after external mutation = %q, want %q", got, want)
+	}
+	if got, want := third.Slots[0].TailNodeID, second.Slots[0].TailNodeID; got != want {
+		t.Fatalf("tail node after external mutation = %q, want %q", got, want)
+	}
+	if third.Slots[0].Readable != second.Slots[0].Readable || third.Slots[0].Writable != second.Slots[0].Writable {
+		t.Fatalf("route flags after external mutation = %#v, want %#v", third.Slots[0], second.Slots[0])
+	}
+}
+
 func TestEndToEndAddNodeFlowWithInMemoryNodes(t *testing.T) {
 	ctx := context.Background()
 	h := newInMemoryHarness(t, []string{"a", "b", "c", "d"})

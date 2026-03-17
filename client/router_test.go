@@ -123,6 +123,56 @@ func TestRouterRefreshesOnceOnRoutingMismatchAndNotOnGenericFailure(t *testing.T
 	}
 }
 
+func TestRouterSnapshotReturnsDefensiveCopy(t *testing.T) {
+	ctx := context.Background()
+	key := keyForSlot(t, 0, 2, "copy")
+	source := &scriptedSnapshotSource{snapshots: []coordserver.RoutingSnapshot{
+		{
+			Version:   1,
+			SlotCount: 2,
+			Slots: []coordserver.SlotRoute{
+				{Slot: 0, ChainVersion: 1, HeadNodeID: "head-0", TailNodeID: "tail-0", Writable: true, Readable: true},
+				{Slot: 1, ChainVersion: 1, HeadNodeID: "head-1", TailNodeID: "tail-1", Writable: true, Readable: true},
+			},
+		},
+	}}
+	transport := &recordingTransport{}
+	router := mustNewRouter(t, source, transport)
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+
+	snapshot, ok := router.Snapshot()
+	if !ok {
+		t.Fatal("Snapshot unexpectedly not loaded")
+	}
+	snapshot.Slots[0].HeadNodeID = "mutated-head"
+	snapshot.Slots[0].TailNodeID = "mutated-tail"
+	snapshot.Slots[0].Writable = false
+	snapshot.Slots[0].Readable = false
+
+	if _, err := router.Put(ctx, key, "v"); err != nil {
+		t.Fatalf("Put returned error: %v", err)
+	}
+	if got, want := transport.putNodes, []string{"head-0"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("put nodes = %v, want %v", got, want)
+	}
+
+	snapshot, ok = router.Snapshot()
+	if !ok {
+		t.Fatal("Snapshot unexpectedly not loaded on second read")
+	}
+	if got, want := snapshot.Slots[0].HeadNodeID, "head-0"; got != want {
+		t.Fatalf("head node after external mutation = %q, want %q", got, want)
+	}
+	if got, want := snapshot.Slots[0].TailNodeID, "tail-0"; got != want {
+		t.Fatalf("tail node after external mutation = %q, want %q", got, want)
+	}
+	if !snapshot.Slots[0].Writable || !snapshot.Slots[0].Readable {
+		t.Fatalf("route after external mutation = %#v, want readable and writable", snapshot.Slots[0])
+	}
+}
+
 func TestEndToEndRouterPutGetDeleteAndRefreshAfterReconfiguration(t *testing.T) {
 	ctx := context.Background()
 	h := newRouterHarness(t, []string{"a", "b", "c", "d"})
