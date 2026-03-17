@@ -275,6 +275,56 @@ func TestEndToEndRouterPutGetDeleteAndRefreshAfterReconfiguration(t *testing.T) 
 	assertChainValue(t, h, 1, key, "")
 }
 
+func TestEndToEndRouterPutGetDeleteWithQueuedReplicationTransport(t *testing.T) {
+	ctx := context.Background()
+	h := newQueuedRouterHarness(t, []string{"a", "b", "c"})
+	if _, err := h.server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 4, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 4, 3, []string{"a", "b", "c"})
+
+	var observedHeadStaged bool
+	h.repl.SetBeforeDeliver(func(msg storage.QueuedReplicationMessage) {})
+	router := mustNewRouter(t, h.server, h.transport)
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+	key := keyForSlot(t, 1, 4, "queued")
+
+	h.repl.SetBeforeDeliver(func(msg storage.QueuedReplicationMessage) {
+		if observedHeadStaged || msg.Forward == nil {
+			return
+		}
+		observedHeadStaged = true
+		if got, want := mustNodeStagedSequencesForRouter(t, h.adapters["b"].Node(), 1), []uint64{1}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("head staged before first queued delivery = %v, want %v", got, want)
+		}
+	})
+	if _, err := router.Put(ctx, key, "v1"); err != nil {
+		t.Fatalf("Put returned error: %v", err)
+	}
+	if !observedHeadStaged {
+		t.Fatal("queued replication hook did not observe staged head write")
+	}
+	readResult, err := router.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got, want := readResult.Value, "v1"; got != want {
+		t.Fatalf("read value = %q, want %q", got, want)
+	}
+	if _, err := router.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	readResult, err = router.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after delete returned error: %v", err)
+	}
+	if readResult.Found {
+		t.Fatalf("read result after delete = %#v, want not found", readResult)
+	}
+}
+
 type scriptedSnapshotSource struct {
 	snapshots []coordserver.RoutingSnapshot
 	calls     int
@@ -332,6 +382,7 @@ type routerHarness struct {
 	transport *InMemoryTransport
 	adapters  map[string]*coordserver.InMemoryNodeAdapter
 	backends  map[string]*storage.InMemoryBackend
+	repl      interface{}
 }
 
 func newRouterHarness(t *testing.T, nodeIDs []string) *routerHarness {
@@ -366,6 +417,80 @@ func newRouterHarness(t *testing.T, nodeIDs []string) *routerHarness {
 		transport: transport,
 		adapters:  adapters,
 		backends:  backends,
+		repl:      repl,
+	}
+}
+
+type queuedRouterHarness struct {
+	server    *coordserver.Server
+	transport *InMemoryTransport
+	adapters  map[string]*coordserver.InMemoryNodeAdapter
+	backends  map[string]*storage.InMemoryBackend
+	repl      *storage.QueuedInMemoryReplicationTransport
+}
+
+func newQueuedRouterHarness(t *testing.T, nodeIDs []string) *queuedRouterHarness {
+	t.Helper()
+	repl := storage.NewQueuedInMemoryReplicationTransport()
+	transport := NewInMemoryTransport()
+	adapters := make(map[string]*coordserver.InMemoryNodeAdapter, len(nodeIDs))
+	backends := make(map[string]*storage.InMemoryBackend, len(nodeIDs))
+	nodeClients := make(map[string]coordserver.StorageNodeClient, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		backend := storage.NewInMemoryBackend()
+		backends[nodeID] = backend
+		repl.Register(nodeID, backend)
+		adapter, err := coordserver.NewInMemoryNodeAdapter(nodeID, backend, repl)
+		if err != nil {
+			t.Fatalf("NewInMemoryNodeAdapter(%q) returned error: %v", nodeID, err)
+		}
+		adapters[nodeID] = adapter
+		nodeClients[nodeID] = adapter
+		repl.RegisterNode(nodeID, adapter.Node())
+		transport.RegisterNode(nodeID, adapter.Node())
+	}
+	server, err := coordserver.Open(context.Background(), coordruntime.NewInMemoryStore(), nodeClients)
+	if err != nil {
+		t.Fatalf("coordserver.Open returned error: %v", err)
+	}
+	for _, adapter := range adapters {
+		adapter.BindServer(server)
+	}
+	return &queuedRouterHarness{
+		server:    server,
+		transport: transport,
+		adapters:  adapters,
+		backends:  backends,
+		repl:      repl,
+	}
+}
+
+func (h *queuedRouterHarness) seedBootstrap(t *testing.T, slotCount int, replicationFactor int, nodeIDs []string) {
+	t.Helper()
+	state, err := coordinator.BuildInitialPlacement(coordinator.Config{
+		SlotCount:         slotCount,
+		ReplicationFactor: replicationFactor,
+	}, uniqueNodes(nodeIDs...))
+	if err != nil {
+		t.Fatalf("BuildInitialPlacement returned error: %v", err)
+	}
+	for _, adapter := range h.adapters {
+		adapter.BindServer(nil)
+	}
+	for _, chain := range state.Chains {
+		for _, replica := range chain.Replicas {
+			assignment := assignmentForChainNode(chain, replica.NodeID, 1)
+			adapter := h.adapters[replica.NodeID]
+			if err := adapter.Node().AddReplicaAsTail(context.Background(), storage.AddReplicaAsTailCommand{Assignment: assignment}); err != nil {
+				t.Fatalf("seed AddReplicaAsTail returned error: %v", err)
+			}
+			if err := adapter.Node().ActivateReplica(context.Background(), storage.ActivateReplicaCommand{Slot: chain.Slot}); err != nil {
+				t.Fatalf("seed ActivateReplica returned error: %v", err)
+			}
+		}
+	}
+	for _, adapter := range h.adapters {
+		adapter.BindServer(h.server)
 	}
 }
 
@@ -524,6 +649,15 @@ func assertChainValue(t *testing.T, h *routerHarness, slot int, key string, want
 			t.Fatalf("node %q slot %d value = %q, want %q", nodeID, slot, got, want)
 		}
 	}
+}
+
+func mustNodeStagedSequencesForRouter(t *testing.T, node *storage.Node, slot int) []uint64 {
+	t.Helper()
+	sequences, err := node.StagedSequences(slot)
+	if err != nil {
+		t.Fatalf("StagedSequences returned error: %v", err)
+	}
+	return sequences
 }
 
 func mustNewRouter(t *testing.T, source SnapshotSource, transport Transport) *Router {

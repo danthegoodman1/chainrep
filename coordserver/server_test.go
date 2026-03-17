@@ -209,10 +209,62 @@ func TestUnexpectedAndDuplicateProgressAreRejected(t *testing.T) {
 	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err == nil {
-		t.Fatal("duplicate ReportReplicaReady unexpectedly succeeded")
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
+		t.Fatalf("duplicate ReportReplicaReady returned error: %v", err)
+	}
+	if _, err := server.ReportReplicaReady(ctx, "c", 1, "removed-1"); err == nil {
+		t.Fatal("mismatched progress unexpectedly succeeded")
 	} else if !errors.Is(err, ErrUnexpectedProgress) {
 		t.Fatalf("error = %v, want unexpected progress", err)
+	}
+}
+
+func TestDelayedProgressFromQueuedAdaptersCompletesPendingWork(t *testing.T) {
+	ctx := context.Background()
+	h := newInMemoryHarness(t, []string{"a", "b", "c", "d"})
+	for _, adapter := range h.adapters {
+		adapter.EnableQueuedProgress()
+	}
+	server := h.server
+
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 8, 3, []string{"a", "b", "c"})
+
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 1}); err != nil {
+		t.Fatalf("ActivateReplica returned error: %v", err)
+	}
+	if got, want := h.adapters["d"].PendingProgress(), 1; got != want {
+		t.Fatalf("pending queued progress = %d, want %d", got, want)
+	}
+	if got, want := server.Pending()[1], (PendingWork{Slot: 1, NodeID: "d", Kind: pendingKindReady}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending ready = %#v, want %#v", got, want)
+	}
+	if err := h.adapters["d"].DeliverNextProgress(ctx); err != nil {
+		t.Fatalf("DeliverNextProgress returned error: %v", err)
+	}
+	if got, want := server.Pending()[1], (PendingWork{Slot: 1, NodeID: "c", Kind: pendingKindRemoved}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending after delayed ready = %#v, want %#v", got, want)
+	}
+
+	if err := h.adapters["c"].RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: 1}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	if got, want := h.adapters["c"].PendingProgress(), 1; got != want {
+		t.Fatalf("pending queued removed progress = %d, want %d", got, want)
+	}
+	if err := h.adapters["c"].DeliverNextProgress(ctx); err != nil {
+		t.Fatalf("DeliverNextProgress removed returned error: %v", err)
+	}
+	if _, exists := server.Pending()[1]; exists {
+		t.Fatal("pending work still present after delayed removal delivery")
 	}
 }
 

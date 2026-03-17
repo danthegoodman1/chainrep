@@ -357,6 +357,137 @@ type replicationHandler interface {
 	HandleCommitWrite(ctx context.Context, req CommitWriteRequest) error
 }
 
+type QueuedReplicationMessage struct {
+	ToNodeID string
+	Forward  *ForwardWriteRequest
+	Commit   *CommitWriteRequest
+}
+
+type QueuedInMemoryReplicationTransport struct {
+	backends      map[string]Backend
+	nodes         map[string]replicationHandler
+	queue         []QueuedReplicationMessage
+	dropNextWrite bool
+	beforeDeliver func(QueuedReplicationMessage)
+}
+
+func NewQueuedInMemoryReplicationTransport() *QueuedInMemoryReplicationTransport {
+	return &QueuedInMemoryReplicationTransport{
+		backends: map[string]Backend{},
+		nodes:    map[string]replicationHandler{},
+	}
+}
+
+func (t *QueuedInMemoryReplicationTransport) Register(nodeID string, backend Backend) {
+	t.backends[nodeID] = backend
+}
+
+func (t *QueuedInMemoryReplicationTransport) RegisterNode(nodeID string, node replicationHandler) {
+	t.nodes[nodeID] = node
+}
+
+func (t *QueuedInMemoryReplicationTransport) FetchSnapshot(ctx context.Context, fromNodeID string, slot int) (Snapshot, error) {
+	inline := InMemoryReplicationTransport{backends: t.backends}
+	return inline.FetchSnapshot(ctx, fromNodeID, slot)
+}
+
+func (t *QueuedInMemoryReplicationTransport) FetchCommittedSequence(ctx context.Context, fromNodeID string, slot int) (uint64, error) {
+	inline := InMemoryReplicationTransport{backends: t.backends}
+	return inline.FetchCommittedSequence(ctx, fromNodeID, slot)
+}
+
+func (t *QueuedInMemoryReplicationTransport) ForwardWrite(_ context.Context, toNodeID string, req ForwardWriteRequest) error {
+	if _, ok := t.nodes[toNodeID]; !ok {
+		return fmt.Errorf("%w: node %q", ErrSnapshotSourceUnavailable, toNodeID)
+	}
+	if t.dropNextWrite {
+		t.dropNextWrite = false
+		return nil
+	}
+	cloned := req
+	cloned.Operation = cloneWriteOperation(req.Operation)
+	t.queue = append(t.queue, QueuedReplicationMessage{
+		ToNodeID: toNodeID,
+		Forward:  &cloned,
+	})
+	return nil
+}
+
+func (t *QueuedInMemoryReplicationTransport) CommitWrite(_ context.Context, toNodeID string, req CommitWriteRequest) error {
+	if _, ok := t.nodes[toNodeID]; !ok {
+		return fmt.Errorf("%w: node %q", ErrSnapshotSourceUnavailable, toNodeID)
+	}
+	if t.dropNextWrite {
+		t.dropNextWrite = false
+		return nil
+	}
+	cloned := req
+	t.queue = append(t.queue, QueuedReplicationMessage{
+		ToNodeID: toNodeID,
+		Commit:   &cloned,
+	})
+	return nil
+}
+
+func (t *QueuedInMemoryReplicationTransport) AwaitWriteCommit(ctx context.Context, check func() bool) error {
+	for !check() {
+		if len(t.queue) == 0 {
+			return fmt.Errorf("%w: replication queue drained before write completed", ErrStateMismatch)
+		}
+		if err := t.DeliverNext(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *QueuedInMemoryReplicationTransport) Pending() int {
+	return len(t.queue)
+}
+
+func (t *QueuedInMemoryReplicationTransport) DropNext() {
+	t.dropNextWrite = true
+}
+
+func (t *QueuedInMemoryReplicationTransport) SetBeforeDeliver(hook func(QueuedReplicationMessage)) {
+	t.beforeDeliver = hook
+}
+
+func (t *QueuedInMemoryReplicationTransport) DeliverNext(ctx context.Context) error {
+	if len(t.queue) == 0 {
+		return nil
+	}
+	msg := t.queue[0]
+	t.queue = t.queue[1:]
+	if t.beforeDeliver != nil {
+		t.beforeDeliver(msg)
+	}
+	node, ok := t.nodes[msg.ToNodeID]
+	if !ok {
+		return fmt.Errorf("%w: node %q", ErrSnapshotSourceUnavailable, msg.ToNodeID)
+	}
+	switch {
+	case msg.Forward != nil:
+		if err := node.HandleForwardWrite(ctx, *msg.Forward); err != nil {
+			return fmt.Errorf("err in node.HandleForwardWrite: %w", err)
+		}
+	case msg.Commit != nil:
+		if err := node.HandleCommitWrite(ctx, *msg.Commit); err != nil {
+			return fmt.Errorf("err in node.HandleCommitWrite: %w", err)
+		}
+	}
+	return nil
+}
+
+func (t *QueuedInMemoryReplicationTransport) DeliverAll(ctx context.Context) error {
+	for len(t.queue) > 0 {
+		if err := t.DeliverNext(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func clonePersistedReplica(replica PersistedReplica) PersistedReplica {
 	return PersistedReplica{
 		Assignment:               cloneAssignment(replica.Assignment),

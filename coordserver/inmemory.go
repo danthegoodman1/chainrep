@@ -7,11 +7,29 @@ import (
 	"github.com/danthegoodman1/chainrep/storage"
 )
 
+type queuedProgressReportKind string
+
+const (
+	queuedProgressReportReady     queuedProgressReportKind = "ready"
+	queuedProgressReportRemoved   queuedProgressReportKind = "removed"
+	queuedProgressReportHeartbeat queuedProgressReportKind = "heartbeat"
+	queuedProgressReportRecovered queuedProgressReportKind = "recovered"
+)
+
+type queuedProgressReport struct {
+	kind     queuedProgressReportKind
+	slot     int
+	status   storage.NodeStatus
+	recovery storage.NodeRecoveryReport
+}
+
 type InMemoryNodeAdapter struct {
-	nodeID string
-	node   *storage.Node
-	sink   *Server
-	local  storage.LocalStateStore
+	nodeID        string
+	node          *storage.Node
+	sink          *Server
+	local         storage.LocalStateStore
+	queued        bool
+	progressQueue []queuedProgressReport
 }
 
 func NewInMemoryNodeAdapter(nodeID string, backend storage.Backend, repl storage.ReplicationTransport) (*InMemoryNodeAdapter, error) {
@@ -41,6 +59,45 @@ func OpenInMemoryNodeAdapter(
 
 func (a *InMemoryNodeAdapter) BindServer(server *Server) {
 	a.sink = server
+}
+
+func (a *InMemoryNodeAdapter) EnableQueuedProgress() {
+	a.queued = true
+}
+
+func (a *InMemoryNodeAdapter) PendingProgress() int {
+	return len(a.progressQueue)
+}
+
+func (a *InMemoryNodeAdapter) DeliverNextProgress(ctx context.Context) error {
+	if len(a.progressQueue) == 0 || a.sink == nil {
+		return nil
+	}
+	report := a.progressQueue[0]
+	a.progressQueue = a.progressQueue[1:]
+	switch report.kind {
+	case queuedProgressReportReady:
+		_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, report.slot, "")
+		return err
+	case queuedProgressReportRemoved:
+		_, err := a.sink.ReportReplicaRemoved(ctx, a.nodeID, report.slot, "")
+		return err
+	case queuedProgressReportHeartbeat:
+		return a.sink.ReportNodeHeartbeat(ctx, report.status)
+	case queuedProgressReportRecovered:
+		return a.sink.ReportNodeRecovered(ctx, report.recovery)
+	default:
+		return nil
+	}
+}
+
+func (a *InMemoryNodeAdapter) DeliverAllProgress(ctx context.Context) error {
+	for len(a.progressQueue) > 0 {
+		if err := a.DeliverNextProgress(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *InMemoryNodeAdapter) Node() *storage.Node {
@@ -83,12 +140,26 @@ func (a *InMemoryNodeAdapter) ReportReplicaReady(ctx context.Context, slot int) 
 	if a.sink == nil {
 		return nil
 	}
+	if a.queued {
+		a.progressQueue = append(a.progressQueue, queuedProgressReport{
+			kind: queuedProgressReportReady,
+			slot: slot,
+		})
+		return nil
+	}
 	_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, slot, "")
 	return err
 }
 
 func (a *InMemoryNodeAdapter) ReportReplicaRemoved(ctx context.Context, slot int) error {
 	if a.sink == nil {
+		return nil
+	}
+	if a.queued {
+		a.progressQueue = append(a.progressQueue, queuedProgressReport{
+			kind: queuedProgressReportRemoved,
+			slot: slot,
+		})
 		return nil
 	}
 	_, err := a.sink.ReportReplicaRemoved(ctx, a.nodeID, slot, "")
@@ -99,11 +170,25 @@ func (a *InMemoryNodeAdapter) ReportNodeHeartbeat(ctx context.Context, status st
 	if a.sink == nil {
 		return nil
 	}
+	if a.queued {
+		a.progressQueue = append(a.progressQueue, queuedProgressReport{
+			kind:   queuedProgressReportHeartbeat,
+			status: status,
+		})
+		return nil
+	}
 	return a.sink.ReportNodeHeartbeat(ctx, status)
 }
 
 func (a *InMemoryNodeAdapter) ReportNodeRecovered(ctx context.Context, report storage.NodeRecoveryReport) error {
 	if a.sink == nil {
+		return nil
+	}
+	if a.queued {
+		a.progressQueue = append(a.progressQueue, queuedProgressReport{
+			kind:     queuedProgressReportRecovered,
+			recovery: report,
+		})
 		return nil
 	}
 	return a.sink.ReportNodeRecovered(ctx, report)

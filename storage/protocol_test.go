@@ -113,6 +113,66 @@ func TestHeadMiddleTailPutAndDeleteReplicateAndCommit(t *testing.T) {
 	assertCommittedStateEqual(t, nodes, 7, Snapshot{}, 2)
 }
 
+func TestQueuedTransportWaitsForExplicitCommitAndPreservesStaging(t *testing.T) {
+	ctx := context.Background()
+	nodes, _, transport := setupActiveChainWithQueuedTransport(t, 7, []string{"head", "mid", "tail"})
+
+	var delivered []string
+	transport.SetBeforeDeliver(func(msg QueuedReplicationMessage) {
+		switch {
+		case msg.Forward != nil:
+			delivered = append(delivered, "forward:"+msg.ToNodeID)
+		case msg.Commit != nil:
+			delivered = append(delivered, "commit:"+msg.ToNodeID)
+		}
+		if len(delivered) != 1 {
+			return
+		}
+		if got, want := mustNodeStagedSequences(t, nodes["head"], 7), []uint64{1}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("head staged sequences before first delivery = %v, want %v", got, want)
+		}
+		if got, want := mustNodeCommittedSnapshot(t, nodes["head"], 7), (Snapshot{}); !reflect.DeepEqual(got, want) {
+			t.Fatalf("head committed snapshot before first delivery = %v, want %v", got, want)
+		}
+	})
+
+	result, err := nodes["head"].SubmitPut(ctx, 7, "k", "v")
+	if err != nil {
+		t.Fatalf("SubmitPut returned error: %v", err)
+	}
+	if got, want := result, (CommitResult{Slot: 7, Sequence: 1}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commit result = %#v, want %#v", got, want)
+	}
+	if got, want := delivered, []string{"forward:mid", "forward:tail", "commit:mid", "commit:head"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("delivery order = %v, want %v", got, want)
+	}
+	assertCommittedStateEqual(t, nodes, 7, Snapshot{"k": "v"}, 1)
+	if got := transport.Pending(); got != 0 {
+		t.Fatalf("pending queued messages = %d, want 0", got)
+	}
+}
+
+func TestQueuedTransportDropLeavesWriteStagedAndUncommitted(t *testing.T) {
+	ctx := context.Background()
+	nodes, _, transport := setupActiveChainWithQueuedTransport(t, 6, []string{"head", "tail"})
+	transport.DropNext()
+
+	if _, err := nodes["head"].SubmitPut(ctx, 6, "k", "v"); err == nil {
+		t.Fatal("SubmitPut unexpectedly succeeded")
+	} else if !errors.Is(err, ErrStateMismatch) {
+		t.Fatalf("error = %v, want state mismatch", err)
+	}
+	if got, want := mustNodeCommittedSnapshot(t, nodes["head"], 6), (Snapshot{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("committed snapshot = %v, want empty", got)
+	}
+	if got, want := mustNodeStagedSequences(t, nodes["head"], 6), []uint64{1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged sequences = %v, want %v", got, want)
+	}
+	if got, want := mustHighestCommitted(t, nodes["head"], 6), uint64(0); got != want {
+		t.Fatalf("highest committed = %d, want %d", got, want)
+	}
+}
+
 func TestPipelineStagesLaterWritesBeforeEarlierCommitAndCommitsInOrder(t *testing.T) {
 	ctx := context.Background()
 	transport := &scriptedTransport{}
@@ -408,6 +468,73 @@ func setupActiveChain(
 	t.Helper()
 	ctx := context.Background()
 	transport := NewInMemoryReplicationTransport()
+	nodes := make(map[string]*Node, len(nodeIDs))
+	backends := make(map[string]*InMemoryBackend, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		backend := NewInMemoryBackend()
+		backends[nodeID] = backend
+		transport.Register(nodeID, backend)
+		node := mustNewNode(t, Config{NodeID: nodeID}, backend, NewInMemoryCoordinatorClient(), transport)
+		nodes[nodeID] = node
+		transport.RegisterNode(nodeID, node)
+	}
+
+	mustActivateReplica(t, nodes[nodeIDs[0]], slot, ReplicaAssignment{
+		Slot:         slot,
+		ChainVersion: 1,
+		Role:         ReplicaRoleSingle,
+	})
+	for i := 1; i < len(nodeIDs); i++ {
+		if err := nodes[nodeIDs[i]].AddReplicaAsTail(ctx, AddReplicaAsTailCommand{
+			Assignment: ReplicaAssignment{
+				Slot:         slot,
+				ChainVersion: 1,
+				Role:         ReplicaRoleTail,
+				Peers:        ChainPeers{PredecessorNodeID: nodeIDs[i-1]},
+			},
+		}); err != nil {
+			t.Fatalf("AddReplicaAsTail(%q) returned error: %v", nodeIDs[i], err)
+		}
+		if err := nodes[nodeIDs[i]].ActivateReplica(ctx, ActivateReplicaCommand{Slot: slot}); err != nil {
+			t.Fatalf("ActivateReplica(%q) returned error: %v", nodeIDs[i], err)
+		}
+	}
+	for i, nodeID := range nodeIDs {
+		role := ReplicaRoleMiddle
+		switch {
+		case len(nodeIDs) == 1:
+			role = ReplicaRoleSingle
+		case i == 0:
+			role = ReplicaRoleHead
+		case i == len(nodeIDs)-1:
+			role = ReplicaRoleTail
+		}
+		assignment := ReplicaAssignment{
+			Slot:         slot,
+			ChainVersion: 1,
+			Role:         role,
+		}
+		if i > 0 {
+			assignment.Peers.PredecessorNodeID = nodeIDs[i-1]
+		}
+		if i+1 < len(nodeIDs) {
+			assignment.Peers.SuccessorNodeID = nodeIDs[i+1]
+		}
+		if err := nodes[nodeID].UpdateChainPeers(ctx, UpdateChainPeersCommand{Assignment: assignment}); err != nil {
+			t.Fatalf("UpdateChainPeers(%q) returned error: %v", nodeID, err)
+		}
+	}
+	return nodes, backends, transport
+}
+
+func setupActiveChainWithQueuedTransport(
+	t *testing.T,
+	slot int,
+	nodeIDs []string,
+) (map[string]*Node, map[string]*InMemoryBackend, *QueuedInMemoryReplicationTransport) {
+	t.Helper()
+	ctx := context.Background()
+	transport := NewQueuedInMemoryReplicationTransport()
 	nodes := make(map[string]*Node, len(nodeIDs))
 	backends := make(map[string]*InMemoryBackend, len(nodeIDs))
 	for _, nodeID := range nodeIDs {

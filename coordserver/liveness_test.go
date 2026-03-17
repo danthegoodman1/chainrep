@@ -129,6 +129,44 @@ func TestDeadTransitionTriggersRepairAndDoesNotDuplicate(t *testing.T) {
 	}
 }
 
+func TestDeadTransitionRepairCompletesWithDelayedQueuedProgress(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{SuspectAfter: 5 * time.Second, DeadAfter: 10 * time.Second},
+		Clock:          clock,
+	})
+	h.adapters["d"].EnableQueuedProgress()
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c", "d")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 3, []string{"a", "b", "c", "d"})
+	if err := h.adapters["b"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat returned error: %v", err)
+	}
+
+	clock.Advance(11 * time.Second)
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness returned error: %v", err)
+	}
+	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+		t.Fatalf("ActivateReplica returned error: %v", err)
+	}
+	if got, want := h.adapters["d"].PendingProgress(), 1; got != want {
+		t.Fatalf("queued progress = %d, want %d", got, want)
+	}
+	if got, want := replicaNodeStates(server.Current().Cluster.Chains[0]), []string{"a:active", "c:active", "d:joining"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("chain before delayed ready delivery = %v, want %v", got, want)
+	}
+	if err := h.adapters["d"].DeliverNextProgress(ctx); err != nil {
+		t.Fatalf("DeliverNextProgress returned error: %v", err)
+	}
+	if got, want := replicaNodeStates(server.Current().Cluster.Chains[0]), []string{"a:active", "c:active", "d:active"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("final chain after delayed ready delivery = %v, want %v", got, want)
+	}
+}
+
 func TestLivenessRecoveryAfterCoordinatorReopenDoesNotDuplicateDeadAction(t *testing.T) {
 	ctx := context.Background()
 	store := coordruntime.NewInMemoryStore()

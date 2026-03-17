@@ -84,6 +84,7 @@ type Server struct {
 	heartbeats             map[string]storage.NodeStatus
 	liveness               map[string]coordruntime.NodeLivenessRecord
 	pending                map[int]PendingWork
+	completed              map[int]map[pendingKind]PendingWork
 	routingSnapshot        RoutingSnapshot
 	lastPolicy             coordinator.ReconfigurationPolicy
 	unavailableReplicas    map[string]map[int]bool
@@ -121,6 +122,7 @@ func OpenWithConfig(
 		heartbeats: map[string]storage.NodeStatus{},
 		liveness:   map[string]coordruntime.NodeLivenessRecord{},
 		pending:    map[int]PendingWork{},
+		completed:  map[int]map[pendingKind]PendingWork{},
 		unavailableReplicas: map[string]map[int]bool{},
 		lastRecoveryReports: map[string]storage.NodeRecoveryReport{},
 		livenessPolicy: cfg.LivenessPolicy,
@@ -194,6 +196,9 @@ func (s *Server) MarkNodeDead(ctx context.Context, cmd coordruntime.Command) (co
 func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int, commandID string) (coordruntime.State, error) {
 	pending, ok := s.pending[slot]
 	if !ok || pending.Kind != pendingKindReady || pending.NodeID != nodeID {
+		if s.matchesCompleted(slot, nodeID, pendingKindReady, commandID) {
+			return s.rt.Current(), nil
+		}
 		return coordruntime.State{}, fmt.Errorf(
 			"%w: unexpected ready report for node %q slot %d",
 			ErrUnexpectedProgress,
@@ -241,6 +246,7 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	delete(s.pending, slot)
+	s.recordCompleted(slot, pending)
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
@@ -251,6 +257,9 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot int, commandID string) (coordruntime.State, error) {
 	pending, ok := s.pending[slot]
 	if !ok || pending.Kind != pendingKindRemoved || pending.NodeID != nodeID {
+		if s.matchesCompleted(slot, nodeID, pendingKindRemoved, commandID) {
+			return s.rt.Current(), nil
+		}
 		return coordruntime.State{}, fmt.Errorf(
 			"%w: unexpected removed report for node %q slot %d",
 			ErrUnexpectedProgress,
@@ -299,6 +308,7 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	delete(s.pending, slot)
+	s.recordCompleted(slot, pending)
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
@@ -566,7 +576,6 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 	if existing, ok := s.pending[slotPlan.Slot]; ok && existing.NodeID != addedNodeID {
 		return fmt.Errorf("%w: slot %d already has pending work for node %q", ErrConflictingPending, slotPlan.Slot, existing.NodeID)
 	}
-
 	addAssignment, err := assignmentForNode(slotPlan.After, addedNodeID, chainVersion)
 	if err != nil {
 		return fmt.Errorf("err in assignmentForNode(add): %w", err)
@@ -614,7 +623,6 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 	if existing, ok := s.pending[slotPlan.Slot]; ok && existing.NodeID != leavingNodeID {
 		return fmt.Errorf("%w: slot %d already has pending work for node %q", ErrConflictingPending, slotPlan.Slot, existing.NodeID)
 	}
-
 	skipped := map[string]bool{leavingNodeID: true}
 	servingChain := activeServingChain(slotPlan.After)
 	updateNodes := activeAfterNodeIDs(servingChain, skipped)
@@ -798,6 +806,31 @@ func cloneRoutingSnapshot(snapshot RoutingSnapshot) RoutingSnapshot {
 		SlotCount: snapshot.SlotCount,
 		Slots:     append([]SlotRoute(nil), snapshot.Slots...),
 	}
+}
+
+func (s *Server) matchesCompleted(slot int, nodeID string, kind pendingKind, commandID string) bool {
+	completedByKind, ok := s.completed[slot]
+	if !ok {
+		return false
+	}
+	completed, ok := completedByKind[kind]
+	if !ok {
+		return false
+	}
+	if completed.NodeID != nodeID || completed.Kind != kind {
+		return false
+	}
+	if commandID != "" && completed.CommandID != "" && completed.CommandID != commandID {
+		return false
+	}
+	return true
+}
+
+func (s *Server) recordCompleted(slot int, pending PendingWork) {
+	if _, ok := s.completed[slot]; !ok {
+		s.completed[slot] = map[pendingKind]PendingWork{}
+	}
+	s.completed[slot][pending.Kind] = pending
 }
 
 func activeServingChain(chain coordinator.Chain) coordinator.Chain {

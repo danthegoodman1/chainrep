@@ -267,6 +267,11 @@ type replicaRecord struct {
 	highestCommittedSequence uint64
 	localDataPresent         bool
 	lastKnownState           ReplicaState
+	pendingWrites            map[uint64]pendingWrite
+}
+
+type pendingWrite struct {
+	completed bool
 }
 
 type Node struct {
@@ -339,6 +344,7 @@ func OpenNode(
 		} else if !errors.Is(err, ErrUnknownReplica) {
 			return nil, fmt.Errorf("err in backend.HighestCommittedSequence: %w", err)
 		}
+		record.pendingWrites = map[uint64]pendingWrite{}
 
 		node.replicas[replica.Assignment.Slot] = record
 	}
@@ -371,6 +377,7 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 		nextSequence:     1,
 		localDataPresent: true,
 		lastKnownState:   ReplicaStatePending,
+		pendingWrites:    map[uint64]pendingWrite{},
 	}
 	n.replicas[cmd.Assignment.Slot] = record
 
@@ -578,6 +585,7 @@ func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) er
 		highestCommittedSequence: highestCommittedSequence,
 		localDataPresent:         true,
 		lastKnownState:           ReplicaStateActive,
+		pendingWrites:            map[uint64]pendingWrite{},
 	}
 	n.replicas[cmd.Assignment.Slot] = record
 	if err := n.persistReplica(ctx, record); err != nil {
@@ -687,6 +695,7 @@ func (n *Node) HandleForwardWrite(ctx context.Context, req ForwardWriteRequest) 
 	if err := n.stageOperation(req.Operation); err != nil {
 		return err
 	}
+	record = n.ensurePendingWrites(record)
 
 	record.nextSequence++
 	n.replicas[req.Operation.Slot] = record
@@ -744,6 +753,12 @@ func (n *Node) HandleCommitWrite(ctx context.Context, req CommitWriteRequest) er
 	}
 
 	record = n.replicas[req.Slot]
+	record = n.ensurePendingWrites(record)
+	if pending, ok := record.pendingWrites[req.Sequence]; ok {
+		pending.completed = true
+		record.pendingWrites[req.Sequence] = pending
+		n.replicas[req.Slot] = record
+	}
 	if record.assignment.Peers.PredecessorNodeID != "" {
 		if err := n.repl.CommitWrite(ctx, record.assignment.Peers.PredecessorNodeID, CommitWriteRequest{
 			Slot:       req.Slot,
@@ -872,6 +887,8 @@ func (n *Node) submitWrite(
 	if err := n.stageOperation(operation); err != nil {
 		return CommitResult{}, err
 	}
+	record = n.ensurePendingWrites(record)
+	record.pendingWrites[operation.Sequence] = pendingWrite{}
 
 	record.nextSequence++
 	n.replicas[slot] = record
@@ -891,13 +908,8 @@ func (n *Node) submitWrite(
 		}); err != nil {
 			return CommitResult{}, fmt.Errorf("err in n.repl.ForwardWrite: %w", err)
 		}
-		if n.replicas[slot].highestCommittedSequence < operation.Sequence {
-			return CommitResult{}, fmt.Errorf(
-				"%w: slot %d sequence %d was not committed before forward returned",
-				ErrStateMismatch,
-				slot,
-				operation.Sequence,
-			)
+		if err := n.awaitWriteCompletion(ctx, slot, operation.Sequence); err != nil {
+			return CommitResult{}, err
 		}
 	}
 
@@ -969,8 +981,10 @@ func (n *Node) commitLocalSequence(slot int, sequence uint64) error {
 		return fmt.Errorf("err in n.backend.CommitSequence: %w", err)
 	}
 	record := n.replicas[slot]
+	record = n.ensurePendingWrites(record)
 	record.highestCommittedSequence = sequence
 	record.localDataPresent = true
+	delete(record.pendingWrites, sequence)
 	n.replicas[slot] = record
 	if record.state != ReplicaStateRecovered {
 		record.lastKnownState = record.state
@@ -980,6 +994,45 @@ func (n *Node) commitLocalSequence(slot int, sequence uint64) error {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
 	return nil
+}
+
+func (n *Node) ensurePendingWrites(record replicaRecord) replicaRecord {
+	if record.pendingWrites == nil {
+		record.pendingWrites = map[uint64]pendingWrite{}
+	}
+	return record
+}
+
+func (n *Node) awaitWriteCompletion(ctx context.Context, slot int, sequence uint64) error {
+	if n.writeCommitted(slot, sequence) {
+		return nil
+	}
+	if waiter, ok := n.repl.(interface {
+		AwaitWriteCommit(ctx context.Context, check func() bool) error
+	}); ok {
+		if err := waiter.AwaitWriteCommit(ctx, func() bool {
+			return n.writeCommitted(slot, sequence)
+		}); err != nil {
+			return fmt.Errorf("err in repl.AwaitWriteCommit: %w", err)
+		}
+	}
+	if !n.writeCommitted(slot, sequence) {
+		return fmt.Errorf(
+			"%w: slot %d sequence %d was not committed before write completion wait ended",
+			ErrStateMismatch,
+			slot,
+			sequence,
+		)
+	}
+	return nil
+}
+
+func (n *Node) writeCommitted(slot int, sequence uint64) bool {
+	record, ok := n.replicas[slot]
+	if !ok {
+		return false
+	}
+	return record.highestCommittedSequence >= sequence
 }
 
 func (n *Node) persistReplica(ctx context.Context, record replicaRecord) error {
