@@ -69,6 +69,22 @@ func (a *InMemoryNodeAdapter) PendingProgress() int {
 	return len(a.progressQueue)
 }
 
+func (a *InMemoryNodeAdapter) PendingProgressReports() []queuedProgressReport {
+	cloned := make([]queuedProgressReport, 0, len(a.progressQueue))
+	for _, report := range a.progressQueue {
+		cloned = append(cloned, cloneQueuedProgressReport(report))
+	}
+	return cloned
+}
+
+func (a *InMemoryNodeAdapter) DropProgressAt(index int) error {
+	if index < 0 || index >= len(a.progressQueue) {
+		return fmt.Errorf("%w: progress queue index %d", ErrStateMismatch, index)
+	}
+	a.progressQueue = append(a.progressQueue[:index], a.progressQueue[index+1:]...)
+	return nil
+}
+
 func (a *InMemoryNodeAdapter) DuplicateProgressAt(index int) error {
 	if index < 0 || index >= len(a.progressQueue) {
 		return fmt.Errorf("%w: progress queue index %d", ErrStateMismatch, index)
@@ -78,21 +94,44 @@ func (a *InMemoryNodeAdapter) DuplicateProgressAt(index int) error {
 }
 
 func (a *InMemoryNodeAdapter) MoveProgressToFront(index int) error {
+	return a.MoveProgressTo(index, 0)
+}
+
+func (a *InMemoryNodeAdapter) MoveProgressTo(index int, destination int) error {
 	if index < 0 || index >= len(a.progressQueue) {
 		return fmt.Errorf("%w: progress queue index %d", ErrStateMismatch, index)
 	}
+	if destination < 0 || destination >= len(a.progressQueue) {
+		return fmt.Errorf("%w: progress queue destination %d", ErrStateMismatch, destination)
+	}
+	if index == destination {
+		return nil
+	}
 	report := a.progressQueue[index]
-	copy(a.progressQueue[1:index+1], a.progressQueue[0:index])
-	a.progressQueue[0] = report
+	a.progressQueue = append(a.progressQueue[:index], a.progressQueue[index+1:]...)
+	if destination >= len(a.progressQueue) {
+		a.progressQueue = append(a.progressQueue, report)
+		return nil
+	}
+	a.progressQueue = append(a.progressQueue, queuedProgressReport{})
+	copy(a.progressQueue[destination+1:], a.progressQueue[destination:])
+	a.progressQueue[destination] = report
 	return nil
 }
 
 func (a *InMemoryNodeAdapter) DeliverNextProgress(ctx context.Context) error {
+	return a.DeliverProgressAt(ctx, 0)
+}
+
+func (a *InMemoryNodeAdapter) DeliverProgressAt(ctx context.Context, index int) error {
 	if len(a.progressQueue) == 0 || a.sink == nil {
 		return nil
 	}
-	report := a.progressQueue[0]
-	a.progressQueue = a.progressQueue[1:]
+	if index < 0 || index >= len(a.progressQueue) {
+		return fmt.Errorf("%w: progress queue index %d", ErrStateMismatch, index)
+	}
+	report := a.progressQueue[index]
+	a.progressQueue = append(a.progressQueue[:index], a.progressQueue[index+1:]...)
 	switch report.kind {
 	case queuedProgressReportReady:
 		_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, report.slot, "")

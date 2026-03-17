@@ -23,6 +23,6 @@
 - [ ] Remove internal context.Background persistence calls in storage and thread caller/context-derived deadlines through local metadata and recovery paths.
 - [ ] Add observability and ops surfaces: metrics, structured logs, health/admin endpoints, and repair visibility.
 - [ ] Add backpressure and resource controls for replication, catch-up, and client write paths.
-- [ ] Add fault-injected async transport tests for delay, drop, duplicate, and reorder behavior.
+- [x] Add fault-injected async transport tests for delay, drop, duplicate, and reorder behavior.
 - [ ] Define and test crash-consistency guarantees for the durable storage backend and local metadata store.
 - [ ] Stored objects have associated metadata, enabling conditional writes (e.g. monotonic fencing token per-object, auto-incremented on mutation)

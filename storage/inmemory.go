@@ -446,38 +446,56 @@ func (t *QueuedInMemoryReplicationTransport) Pending() int {
 }
 
 func (t *QueuedInMemoryReplicationTransport) PendingMessages() []QueuedReplicationMessage {
-	return append([]QueuedReplicationMessage(nil), t.queue...)
+	cloned := make([]QueuedReplicationMessage, 0, len(t.queue))
+	for _, msg := range t.queue {
+		cloned = append(cloned, cloneQueuedReplicationMessage(msg))
+	}
+	return cloned
 }
 
 func (t *QueuedInMemoryReplicationTransport) DropNext() {
 	t.dropNextWrite = true
 }
 
+func (t *QueuedInMemoryReplicationTransport) DropAt(index int) error {
+	if index < 0 || index >= len(t.queue) {
+		return fmt.Errorf("%w: queued message index %d", ErrStateMismatch, index)
+	}
+	t.queue = append(t.queue[:index], t.queue[index+1:]...)
+	return nil
+}
+
 func (t *QueuedInMemoryReplicationTransport) DuplicateAt(index int) error {
 	if index < 0 || index >= len(t.queue) {
 		return fmt.Errorf("%w: queued message index %d", ErrStateMismatch, index)
 	}
-	msg := t.queue[index]
-	dup := QueuedReplicationMessage{ToNodeID: msg.ToNodeID}
-	if msg.Forward != nil {
-		cloned := cloneForwardRequest(*msg.Forward)
-		dup.Forward = &cloned
-	}
-	if msg.Commit != nil {
-		cloned := cloneCommitRequest(*msg.Commit)
-		dup.Commit = &cloned
-	}
-	t.queue = append(t.queue, dup)
+	t.queue = append(t.queue, cloneQueuedReplicationMessage(t.queue[index]))
 	return nil
 }
 
 func (t *QueuedInMemoryReplicationTransport) MoveToFront(index int) error {
+	return t.MoveTo(index, 0)
+}
+
+func (t *QueuedInMemoryReplicationTransport) MoveTo(index int, destination int) error {
 	if index < 0 || index >= len(t.queue) {
 		return fmt.Errorf("%w: queued message index %d", ErrStateMismatch, index)
 	}
+	if destination < 0 || destination >= len(t.queue) {
+		return fmt.Errorf("%w: queued message destination %d", ErrStateMismatch, destination)
+	}
+	if index == destination {
+		return nil
+	}
 	msg := t.queue[index]
-	copy(t.queue[1:index+1], t.queue[0:index])
-	t.queue[0] = msg
+	t.queue = append(t.queue[:index], t.queue[index+1:]...)
+	if destination >= len(t.queue) {
+		t.queue = append(t.queue, msg)
+		return nil
+	}
+	t.queue = append(t.queue, QueuedReplicationMessage{})
+	copy(t.queue[destination+1:], t.queue[destination:])
+	t.queue[destination] = msg
 	return nil
 }
 
@@ -486,11 +504,18 @@ func (t *QueuedInMemoryReplicationTransport) SetBeforeDeliver(hook func(QueuedRe
 }
 
 func (t *QueuedInMemoryReplicationTransport) DeliverNext(ctx context.Context) error {
+	return t.DeliverAt(ctx, 0)
+}
+
+func (t *QueuedInMemoryReplicationTransport) DeliverAt(ctx context.Context, index int) error {
 	if len(t.queue) == 0 {
 		return nil
 	}
-	msg := t.queue[0]
-	t.queue = t.queue[1:]
+	if index < 0 || index >= len(t.queue) {
+		return fmt.Errorf("%w: queued message index %d", ErrStateMismatch, index)
+	}
+	msg := t.queue[index]
+	t.queue = append(t.queue[:index], t.queue[index+1:]...)
 	if t.beforeDeliver != nil {
 		t.beforeDeliver(msg)
 	}
@@ -527,6 +552,19 @@ func clonePersistedReplica(replica PersistedReplica) PersistedReplica {
 		HighestCommittedSequence: replica.HighestCommittedSequence,
 		HasCommittedData:         replica.HasCommittedData,
 	}
+}
+
+func cloneQueuedReplicationMessage(msg QueuedReplicationMessage) QueuedReplicationMessage {
+	cloned := QueuedReplicationMessage{ToNodeID: msg.ToNodeID}
+	if msg.Forward != nil {
+		req := cloneForwardRequest(*msg.Forward)
+		cloned.Forward = &req
+	}
+	if msg.Commit != nil {
+		req := cloneCommitRequest(*msg.Commit)
+		cloned.Commit = &req
+	}
+	return cloned
 }
 
 func clonePersistedNodeState(state PersistedNodeState) PersistedNodeState {
