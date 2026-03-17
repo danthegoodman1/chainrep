@@ -270,6 +270,80 @@ func TestPlanReconfigurationRejectsBrokenChainWithoutActiveAnchor(t *testing.T) 
 	}
 }
 
+func TestPlanReconfigurationDoesNotAdvanceUnderReplicatedChainWithoutActiveReplacement(t *testing.T) {
+	state := ClusterState{
+		Chains: []Chain{
+			{
+				Slot: 0,
+				Replicas: []Replica{
+					{NodeID: "a", State: ReplicaStateActive},
+					{NodeID: "b", State: ReplicaStateJoining},
+					{NodeID: "c", State: ReplicaStateJoining},
+				},
+			},
+		},
+		NodesByID: map[string]Node{
+			"a": uniqueNode("a"),
+			"b": uniqueNode("b"),
+			"c": uniqueNode("c"),
+		},
+		NodeHealthByID: map[string]NodeHealth{
+			"a": NodeHealthAlive,
+			"b": NodeHealthAlive,
+			"c": NodeHealthAlive,
+		},
+		DrainingNodeIDs:   map[string]bool{},
+		NodeOrder:         []string{"a", "b", "c"},
+		SlotCount:         1,
+		ReplicationFactor: 3,
+	}
+
+	t.Run("drain does not mark last active leaving while joiners pending", func(t *testing.T) {
+		plan, err := PlanReconfiguration(state, []Event{
+			{Kind: EventKindBeginDrainNode, NodeID: "a"},
+		}, ReconfigurationPolicy{})
+		if err != nil {
+			t.Fatalf("PlanReconfiguration returned error: %v", err)
+		}
+		if got, want := len(plan.ChangedSlots), 0; got != want {
+			t.Fatalf("changed slots = %d, want %d", got, want)
+		}
+		if got, want := replicaNodeStates(plan.UpdatedState.Chains[0]), []string{"a:active", "b:joining", "c:joining"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("updated chain = %v, want %v", got, want)
+		}
+		if !plan.UpdatedState.DrainingNodeIDs["a"] {
+			t.Fatal("draining node a not recorded")
+		}
+	})
+
+	t.Run("healthy add does not remap under replicated pending chain", func(t *testing.T) {
+		plan, err := PlanReconfiguration(state, []Event{
+			{Kind: EventKindAddNode, Node: uniqueNode("d")},
+		}, ReconfigurationPolicy{MaxChangedChains: 1})
+		if err != nil {
+			t.Fatalf("PlanReconfiguration returned error: %v", err)
+		}
+		if got, want := len(plan.ChangedSlots), 0; got != want {
+			t.Fatalf("changed slots = %d, want %d", got, want)
+		}
+		if got, want := replicaNodeStates(plan.UpdatedState.Chains[0]), []string{"a:active", "b:joining", "c:joining"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("updated chain = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("dead last active anchor with multiple joiners still breaks chain", func(t *testing.T) {
+		_, err := PlanReconfiguration(state, []Event{
+			{Kind: EventKindMarkNodeDead, NodeID: "a"},
+		}, ReconfigurationPolicy{})
+		if err == nil {
+			t.Fatal("PlanReconfiguration unexpectedly succeeded")
+		}
+		if !errors.Is(err, ErrBrokenChain) {
+			t.Fatalf("error = %v, want broken chain", err)
+		}
+	})
+}
+
 func TestPlanReconfigurationIsDeterministicForSameInput(t *testing.T) {
 	state := mustBuildInitialState(t, Config{SlotCount: 8, ReplicationFactor: 3}, uniqueNodes("a", "b", "c"))
 	events := []Event{{Kind: EventKindAddNode, Node: uniqueNode("d")}}
