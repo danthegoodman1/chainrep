@@ -19,6 +19,7 @@ var (
 	ErrConflictingPending   = errors.New("conflicting coordinator server pending work")
 	ErrStateMismatch        = errors.New("coordinator server state mismatch")
 	ErrInvalidServerCommand = errors.New("invalid coordinator server command")
+	ErrRecoveryFailed       = errors.New("coordinator server recovery failed")
 )
 
 type StorageNodeClient interface {
@@ -27,6 +28,9 @@ type StorageNodeClient interface {
 	MarkReplicaLeaving(ctx context.Context, cmd storage.MarkReplicaLeavingCommand) error
 	RemoveReplica(ctx context.Context, cmd storage.RemoveReplicaCommand) error
 	UpdateChainPeers(ctx context.Context, cmd storage.UpdateChainPeersCommand) error
+	ResumeRecoveredReplica(ctx context.Context, cmd storage.ResumeRecoveredReplicaCommand) error
+	RecoverReplica(ctx context.Context, cmd storage.RecoverReplicaCommand) error
+	DropRecoveredReplica(ctx context.Context, cmd storage.DropRecoveredReplicaCommand) error
 }
 
 type pendingKind string
@@ -59,12 +63,14 @@ type RoutingSnapshot struct {
 }
 
 type Server struct {
-	rt              *coordruntime.Runtime
-	nodes           map[string]StorageNodeClient
-	heartbeats      map[string]storage.NodeStatus
-	pending         map[int]PendingWork
-	routingSnapshot RoutingSnapshot
-	lastPolicy      coordinator.ReconfigurationPolicy
+	rt                     *coordruntime.Runtime
+	nodes                  map[string]StorageNodeClient
+	heartbeats             map[string]storage.NodeStatus
+	pending                map[int]PendingWork
+	routingSnapshot        RoutingSnapshot
+	lastPolicy             coordinator.ReconfigurationPolicy
+	unavailableReplicas    map[string]map[int]bool
+	lastRecoveryReports    map[string]storage.NodeRecoveryReport
 }
 
 func Open(ctx context.Context, store coordruntime.Store, nodes map[string]StorageNodeClient) (*Server, error) {
@@ -83,6 +89,8 @@ func Open(ctx context.Context, store coordruntime.Store, nodes map[string]Storag
 		nodes:      clonedNodes,
 		heartbeats: map[string]storage.NodeStatus{},
 		pending:    map[int]PendingWork{},
+		unavailableReplicas: map[string]map[int]bool{},
+		lastRecoveryReports: map[string]storage.NodeRecoveryReport{},
 	}
 	server.rebuildRoutingSnapshot()
 	return server, nil
@@ -254,6 +262,54 @@ func (s *Server) ReportNodeHeartbeat(_ context.Context, status storage.NodeStatu
 		return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
 	}
 	s.heartbeats[status.NodeID] = status
+	return nil
+}
+
+func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRecoveryReport) error {
+	if _, ok := s.nodes[report.NodeID]; !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownNode, report.NodeID)
+	}
+	if prior, ok := s.lastRecoveryReports[report.NodeID]; ok && reflect.DeepEqual(prior, report) && !s.nodeHasUnavailableSlots(report.NodeID) {
+		return nil
+	}
+
+	reportSlots := make(map[int]storage.RecoveredReplica, len(report.Replicas))
+	s.markUnavailableReplicas(report)
+
+	state := s.rt.Current()
+	for _, recovered := range report.Replicas {
+		reportSlots[recovered.Assignment.Slot] = recovered
+		currentAssignment, ok := currentAssignmentForNode(state, report.NodeID, recovered.Assignment.Slot)
+		if !ok {
+			if err := s.dropRecoveredReplica(ctx, report.NodeID, recovered.Assignment.Slot); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch {
+		case canResumeRecoveredReplica(recovered, currentAssignment):
+			if err := s.resumeRecoveredReplica(ctx, report.NodeID, currentAssignment); err != nil {
+				return err
+			}
+		default:
+			sourceNodeID, ok := recoverySourceNodeID(state.Cluster.Chains[recovered.Assignment.Slot], report.NodeID)
+			if !ok {
+				return fmt.Errorf(
+					"%w: slot %d node %q has no valid recovery source",
+					ErrRecoveryFailed,
+					recovered.Assignment.Slot,
+					report.NodeID,
+				)
+			}
+			if err := s.recoverReplica(ctx, report.NodeID, currentAssignment, sourceNodeID); err != nil {
+				return err
+			}
+		}
+	}
+
+	s.lastRecoveryReports[report.NodeID] = cloneRecoveryReport(report)
+	s.rebuildRoutingSnapshot()
 	return nil
 }
 
@@ -445,6 +501,57 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 	return nil
 }
 
+func (s *Server) resumeRecoveredReplica(
+	ctx context.Context,
+	nodeID string,
+	assignment storage.ReplicaAssignment,
+) error {
+	client, ok := s.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
+	}
+	if err := client.ResumeRecoveredReplica(ctx, storage.ResumeRecoveredReplicaCommand{Assignment: assignment}); err != nil {
+		return fmt.Errorf("%w: err in node[%q].ResumeRecoveredReplica: %v", ErrRecoveryFailed, nodeID, err)
+	}
+	s.clearUnavailable(nodeID, assignment.Slot)
+	return nil
+}
+
+func (s *Server) recoverReplica(
+	ctx context.Context,
+	nodeID string,
+	assignment storage.ReplicaAssignment,
+	sourceNodeID string,
+) error {
+	client, ok := s.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
+	}
+	if _, ok := s.nodes[sourceNodeID]; !ok {
+		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, sourceNodeID)
+	}
+	if err := client.RecoverReplica(ctx, storage.RecoverReplicaCommand{
+		Assignment:   assignment,
+		SourceNodeID: sourceNodeID,
+	}); err != nil {
+		return fmt.Errorf("%w: err in node[%q].RecoverReplica: %v", ErrRecoveryFailed, nodeID, err)
+	}
+	s.clearUnavailable(nodeID, assignment.Slot)
+	return nil
+}
+
+func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot int) error {
+	client, ok := s.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
+	}
+	if err := client.DropRecoveredReplica(ctx, storage.DropRecoveredReplicaCommand{Slot: slot}); err != nil {
+		return fmt.Errorf("%w: err in node[%q].DropRecoveredReplica: %v", ErrRecoveryFailed, nodeID, err)
+	}
+	s.clearUnavailable(nodeID, slot)
+	return nil
+}
+
 func assignmentForNode(chain coordinator.Chain, nodeID string, chainVersion uint64) (storage.ReplicaAssignment, error) {
 	position := -1
 	for i, replica := range chain.Replicas {
@@ -512,8 +619,15 @@ func (s *Server) rebuildRoutingSnapshot() {
 			Slot:         chain.Slot,
 			ChainVersion: state.SlotVersions[chain.Slot],
 		}
+		if chainHasUnavailableReplica(chain, s.unavailableReplicas) {
+			snapshot.Slots = append(snapshot.Slots, route)
+			continue
+		}
 		for _, replica := range chain.Replicas {
 			if replica.State != coordinator.ReplicaStateActive {
+				continue
+			}
+			if s.replicaUnavailable(replica.NodeID, chain.Slot) {
 				continue
 			}
 			if route.HeadNodeID == "" {
@@ -653,4 +767,130 @@ func distinctStepKinds(steps []coordinator.ReconfigurationStep) []coordinator.St
 		return kinds[i] < kinds[j]
 	})
 	return kinds
+}
+
+func (s *Server) markUnavailableReplicas(report storage.NodeRecoveryReport) {
+	slots := s.unavailableReplicas[report.NodeID]
+	if slots == nil {
+		slots = map[int]bool{}
+		s.unavailableReplicas[report.NodeID] = slots
+	}
+	for _, replica := range report.Replicas {
+		slots[replica.Assignment.Slot] = true
+	}
+	s.rebuildRoutingSnapshot()
+}
+
+func (s *Server) clearUnavailable(nodeID string, slot int) {
+	slots, ok := s.unavailableReplicas[nodeID]
+	if !ok {
+		return
+	}
+	delete(slots, slot)
+	if len(slots) == 0 {
+		delete(s.unavailableReplicas, nodeID)
+	}
+	s.rebuildRoutingSnapshot()
+}
+
+func (s *Server) replicaUnavailable(nodeID string, slot int) bool {
+	slots, ok := s.unavailableReplicas[nodeID]
+	if !ok {
+		return false
+	}
+	return slots[slot]
+}
+
+func (s *Server) nodeHasUnavailableSlots(nodeID string) bool {
+	slots, ok := s.unavailableReplicas[nodeID]
+	return ok && len(slots) > 0
+}
+
+func chainHasUnavailableReplica(chain coordinator.Chain, unavailable map[string]map[int]bool) bool {
+	for _, replica := range chain.Replicas {
+		if replica.State != coordinator.ReplicaStateActive {
+			continue
+		}
+		if unavailable[replica.NodeID][chain.Slot] {
+			return true
+		}
+	}
+	return false
+}
+
+func currentAssignmentForNode(
+	state coordruntime.State,
+	nodeID string,
+	slot int,
+) (storage.ReplicaAssignment, bool) {
+	if slot < 0 || slot >= len(state.Cluster.Chains) {
+		return storage.ReplicaAssignment{}, false
+	}
+	chain := state.Cluster.Chains[slot]
+	for _, replica := range chain.Replicas {
+		if replica.NodeID != nodeID {
+			continue
+		}
+		assignment, err := assignmentForNode(chain, nodeID, state.SlotVersions[slot])
+		if err != nil {
+			return storage.ReplicaAssignment{}, false
+		}
+		return assignment, true
+	}
+	return storage.ReplicaAssignment{}, false
+}
+
+func assignedReplicasForNode(state coordruntime.State, nodeID string) map[int]storage.ReplicaAssignment {
+	assignments := map[int]storage.ReplicaAssignment{}
+	for _, chain := range state.Cluster.Chains {
+		for _, replica := range chain.Replicas {
+			if replica.NodeID != nodeID {
+				continue
+			}
+			assignment, err := assignmentForNode(chain, nodeID, state.SlotVersions[chain.Slot])
+			if err != nil {
+				continue
+			}
+			assignments[chain.Slot] = assignment
+		}
+	}
+	return assignments
+}
+
+func canResumeRecoveredReplica(recovered storage.RecoveredReplica, current storage.ReplicaAssignment) bool {
+	return recovered.HasCommittedData &&
+		recovered.LastKnownState == storage.ReplicaStateActive &&
+		reflect.DeepEqual(recovered.Assignment, current)
+}
+
+func recoverySourceNodeID(chain coordinator.Chain, recoveringNodeID string) (string, bool) {
+	for i, replica := range chain.Replicas {
+		if replica.NodeID != recoveringNodeID {
+			continue
+		}
+		if i > 0 {
+			return chain.Replicas[i-1].NodeID, true
+		}
+		if i+1 < len(chain.Replicas) {
+			return chain.Replicas[i+1].NodeID, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func cloneRecoveryReport(report storage.NodeRecoveryReport) storage.NodeRecoveryReport {
+	cloned := storage.NodeRecoveryReport{
+		NodeID:   report.NodeID,
+		Replicas: make([]storage.RecoveredReplica, 0, len(report.Replicas)),
+	}
+	for _, replica := range report.Replicas {
+		cloned.Replicas = append(cloned.Replicas, storage.RecoveredReplica{
+			Assignment:               replica.Assignment,
+			LastKnownState:           replica.LastKnownState,
+			HighestCommittedSequence: replica.HighestCommittedSequence,
+			HasCommittedData:         replica.HasCommittedData,
+		})
+	}
+	return cloned
 }

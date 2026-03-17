@@ -41,9 +41,16 @@ type Backend interface {
 	StagedSequences(slot int) ([]uint64, error)
 }
 
+type LocalStateStore interface {
+	LoadNode(ctx context.Context, nodeID string) (PersistedNodeState, error)
+	UpsertReplica(ctx context.Context, nodeID string, replica PersistedReplica) error
+	DeleteReplica(ctx context.Context, nodeID string, slot int) error
+}
+
 type CoordinatorClient interface {
 	ReportReplicaReady(ctx context.Context, slot int) error
 	ReportReplicaRemoved(ctx context.Context, slot int) error
+	ReportNodeRecovered(ctx context.Context, report NodeRecoveryReport) error
 	ReportNodeHeartbeat(ctx context.Context, status NodeStatus) error
 }
 
@@ -153,6 +160,7 @@ const (
 	ReplicaStateCatchingUp ReplicaState = "catching_up"
 	ReplicaStateActive     ReplicaState = "active"
 	ReplicaStateLeaving    ReplicaState = "leaving"
+	ReplicaStateRecovered  ReplicaState = "recovered"
 	ReplicaStateRemoved    ReplicaState = "removed"
 )
 
@@ -195,6 +203,30 @@ type NodeStatus struct {
 	LeavingCount    int
 }
 
+type PersistedReplica struct {
+	Assignment               ReplicaAssignment
+	LastKnownState           ReplicaState
+	HighestCommittedSequence uint64
+	HasCommittedData         bool
+}
+
+type PersistedNodeState struct {
+	NodeID   string
+	Replicas []PersistedReplica
+}
+
+type RecoveredReplica struct {
+	Assignment               ReplicaAssignment
+	LastKnownState           ReplicaState
+	HighestCommittedSequence uint64
+	HasCommittedData         bool
+}
+
+type NodeRecoveryReport struct {
+	NodeID   string
+	Replicas []RecoveredReplica
+}
+
 type AddReplicaAsTailCommand struct {
 	Assignment ReplicaAssignment
 }
@@ -215,27 +247,56 @@ type UpdateChainPeersCommand struct {
 	Assignment ReplicaAssignment
 }
 
+type ResumeRecoveredReplicaCommand struct {
+	Assignment ReplicaAssignment
+}
+
+type RecoverReplicaCommand struct {
+	Assignment   ReplicaAssignment
+	SourceNodeID string
+}
+
+type DropRecoveredReplicaCommand struct {
+	Slot int
+}
+
 type replicaRecord struct {
 	assignment               ReplicaAssignment
 	state                    ReplicaState
 	nextSequence             uint64
 	highestCommittedSequence uint64
+	localDataPresent         bool
+	lastKnownState           ReplicaState
 }
 
 type Node struct {
 	nodeID   string
 	backend  Backend
+	local    LocalStateStore
 	coord    CoordinatorClient
 	repl     ReplicationTransport
 	replicas map[int]replicaRecord
 }
 
 func NewNode(cfg Config, backend Backend, coord CoordinatorClient, repl ReplicationTransport) (*Node, error) {
+	return OpenNode(cfg, backend, NewInMemoryLocalStateStore(), coord, repl)
+}
+
+func OpenNode(
+	cfg Config,
+	backend Backend,
+	local LocalStateStore,
+	coord CoordinatorClient,
+	repl ReplicationTransport,
+) (*Node, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("%w: node ID must not be empty", ErrInvalidConfig)
 	}
 	if backend == nil {
 		return nil, fmt.Errorf("%w: backend must not be nil", ErrInvalidConfig)
+	}
+	if local == nil {
+		return nil, fmt.Errorf("%w: local state store must not be nil", ErrInvalidConfig)
 	}
 	if coord == nil {
 		return nil, fmt.Errorf("%w: coordinator client must not be nil", ErrInvalidConfig)
@@ -244,13 +305,45 @@ func NewNode(cfg Config, backend Backend, coord CoordinatorClient, repl Replicat
 		return nil, fmt.Errorf("%w: replication transport must not be nil", ErrInvalidConfig)
 	}
 
-	return &Node{
+	node := &Node{
 		nodeID:   cfg.NodeID,
 		backend:  backend,
+		local:    local,
 		coord:    coord,
 		repl:     repl,
 		replicas: make(map[int]replicaRecord),
-	}, nil
+	}
+
+	persisted, err := node.local.LoadNode(context.Background(), cfg.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("err in node.local.LoadNode: %w", err)
+	}
+	for _, replica := range persisted.Replicas {
+		record := replicaRecord{
+			assignment:               cloneAssignment(replica.Assignment),
+			state:                    ReplicaStateRecovered,
+			nextSequence:             replica.HighestCommittedSequence + 1,
+			highestCommittedSequence: replica.HighestCommittedSequence,
+			localDataPresent:         false,
+			lastKnownState:           replica.LastKnownState,
+		}
+
+		if _, err := backend.HighestCommittedSequence(replica.Assignment.Slot); err == nil {
+			record.localDataPresent = true
+			sequence, err := backend.HighestCommittedSequence(replica.Assignment.Slot)
+			if err != nil {
+				return nil, fmt.Errorf("err in backend.HighestCommittedSequence: %w", err)
+			}
+			record.highestCommittedSequence = sequence
+			record.nextSequence = sequence + 1
+		} else if !errors.Is(err, ErrUnknownReplica) {
+			return nil, fmt.Errorf("err in backend.HighestCommittedSequence: %w", err)
+		}
+
+		node.replicas[replica.Assignment.Slot] = record
+	}
+
+	return node, nil
 }
 
 func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand) error {
@@ -273,9 +366,11 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 	}()
 
 	record := replicaRecord{
-		assignment:   cloneAssignment(cmd.Assignment),
-		state:        ReplicaStatePending,
-		nextSequence: 1,
+		assignment:       cloneAssignment(cmd.Assignment),
+		state:            ReplicaStatePending,
+		nextSequence:     1,
+		localDataPresent: true,
+		lastKnownState:   ReplicaStatePending,
 	}
 	n.replicas[cmd.Assignment.Slot] = record
 
@@ -303,7 +398,12 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 	}
 
 	record.state = ReplicaStateCatchingUp
+	record.lastKnownState = ReplicaStateCatchingUp
 	n.replicas[cmd.Assignment.Slot] = record
+	if err := n.persistReplica(ctx, record); err != nil {
+		delete(n.replicas, cmd.Assignment.Slot)
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
 	rollback = false
 	return nil
 }
@@ -322,7 +422,11 @@ func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) 
 
 	record = n.replicas[cmd.Slot]
 	record.state = ReplicaStateActive
+	record.lastKnownState = ReplicaStateActive
 	n.replicas[cmd.Slot] = record
+	if err := n.persistReplica(ctx, record); err != nil {
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
 	return nil
 }
 
@@ -336,7 +440,11 @@ func (n *Node) MarkReplicaLeaving(_ context.Context, cmd MarkReplicaLeavingComma
 	}
 
 	record.state = ReplicaStateLeaving
+	record.lastKnownState = ReplicaStateLeaving
 	n.replicas[cmd.Slot] = record
+	if err := n.persistReplica(context.Background(), record); err != nil {
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
 	return nil
 }
 
@@ -354,7 +462,12 @@ func (n *Node) RemoveReplica(ctx context.Context, cmd RemoveReplicaCommand) erro
 			return fmt.Errorf("err in n.backend.DeleteReplica: %w", err)
 		}
 		record.state = ReplicaStateRemoved
+		record.localDataPresent = false
+		record.lastKnownState = ReplicaStateRemoved
 		n.replicas[cmd.Slot] = record
+		if err := n.local.DeleteReplica(ctx, n.nodeID, cmd.Slot); err != nil {
+			return fmt.Errorf("err in n.local.DeleteReplica: %w", err)
+		}
 	}
 	if err := n.coord.ReportReplicaRemoved(ctx, cmd.Slot); err != nil {
 		return fmt.Errorf("err in n.coord.ReportReplicaRemoved: %w", err)
@@ -371,6 +484,13 @@ func (n *Node) UpdateChainPeers(_ context.Context, cmd UpdateChainPeersCommand) 
 	}
 	record.assignment = cloneAssignment(cmd.Assignment)
 	n.replicas[cmd.Assignment.Slot] = record
+	if record.state != ReplicaStateRecovered {
+		record.lastKnownState = record.state
+		n.replicas[cmd.Assignment.Slot] = record
+	}
+	if err := n.persistReplica(context.Background(), record); err != nil {
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
 	return nil
 }
 
@@ -379,6 +499,108 @@ func (n *Node) ReportHeartbeat(ctx context.Context) error {
 	if err := n.coord.ReportNodeHeartbeat(ctx, status); err != nil {
 		return fmt.Errorf("err in n.coord.ReportNodeHeartbeat: %w", err)
 	}
+	return nil
+}
+
+func (n *Node) ReportRecoveredState(ctx context.Context) error {
+	report := NodeRecoveryReport{
+		NodeID:   n.nodeID,
+		Replicas: make([]RecoveredReplica, 0, len(n.replicas)),
+	}
+	slots := sortedReplicaSlots(n.replicas)
+	for _, slot := range slots {
+		record := n.replicas[slot]
+		if record.state != ReplicaStateRecovered {
+			continue
+		}
+		report.Replicas = append(report.Replicas, RecoveredReplica{
+			Assignment:               cloneAssignment(record.assignment),
+			LastKnownState:           record.lastKnownState,
+			HighestCommittedSequence: record.highestCommittedSequence,
+			HasCommittedData:         record.localDataPresent,
+		})
+	}
+	if err := n.coord.ReportNodeRecovered(ctx, report); err != nil {
+		return fmt.Errorf("err in n.coord.ReportNodeRecovered: %w", err)
+	}
+	return nil
+}
+
+func (n *Node) ResumeRecoveredReplica(ctx context.Context, cmd ResumeRecoveredReplicaCommand) error {
+	record, ok := n.replicas[cmd.Assignment.Slot]
+	if !ok {
+		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Assignment.Slot)
+	}
+	if record.state != ReplicaStateRecovered {
+		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
+	}
+	if !record.localDataPresent {
+		return fmt.Errorf("%w: slot %d has no committed data to resume", ErrStateMismatch, cmd.Assignment.Slot)
+	}
+	record.assignment = cloneAssignment(cmd.Assignment)
+	record.state = ReplicaStateActive
+	record.lastKnownState = ReplicaStateActive
+	record.nextSequence = record.highestCommittedSequence + 1
+	n.replicas[cmd.Assignment.Slot] = record
+	if err := n.persistReplica(ctx, record); err != nil {
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
+	return nil
+}
+
+func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) error {
+	record, exists := n.replicas[cmd.Assignment.Slot]
+	if exists && record.state != ReplicaStateRecovered {
+		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
+	}
+	if err := n.ensureBackendReplica(cmd.Assignment.Slot); err != nil {
+		return fmt.Errorf("err in n.ensureBackendReplica: %w", err)
+	}
+	snapshot, err := n.repl.FetchSnapshot(ctx, cmd.SourceNodeID, cmd.Assignment.Slot)
+	if err != nil {
+		return fmt.Errorf("err in n.repl.FetchSnapshot: %w", err)
+	}
+	if err := n.backend.InstallSnapshot(cmd.Assignment.Slot, snapshot); err != nil {
+		return fmt.Errorf("err in n.backend.InstallSnapshot: %w", err)
+	}
+	highestCommittedSequence, err := n.repl.FetchCommittedSequence(ctx, cmd.SourceNodeID, cmd.Assignment.Slot)
+	if err != nil {
+		return fmt.Errorf("err in n.repl.FetchCommittedSequence: %w", err)
+	}
+	if err := n.backend.SetHighestCommittedSequence(cmd.Assignment.Slot, highestCommittedSequence); err != nil {
+		return fmt.Errorf("err in n.backend.SetHighestCommittedSequence: %w", err)
+	}
+
+	record = replicaRecord{
+		assignment:               cloneAssignment(cmd.Assignment),
+		state:                    ReplicaStateActive,
+		nextSequence:             highestCommittedSequence + 1,
+		highestCommittedSequence: highestCommittedSequence,
+		localDataPresent:         true,
+		lastKnownState:           ReplicaStateActive,
+	}
+	n.replicas[cmd.Assignment.Slot] = record
+	if err := n.persistReplica(ctx, record); err != nil {
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
+	return nil
+}
+
+func (n *Node) DropRecoveredReplica(ctx context.Context, cmd DropRecoveredReplicaCommand) error {
+	record, ok := n.replicas[cmd.Slot]
+	if !ok {
+		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
+	}
+	if record.state != ReplicaStateRecovered {
+		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Slot, record.state)
+	}
+	if err := n.backend.DeleteReplica(cmd.Slot); err != nil && !errors.Is(err, ErrUnknownReplica) {
+		return fmt.Errorf("err in n.backend.DeleteReplica: %w", err)
+	}
+	if err := n.local.DeleteReplica(ctx, n.nodeID, cmd.Slot); err != nil {
+		return fmt.Errorf("err in n.local.DeleteReplica: %w", err)
+	}
+	delete(n.replicas, cmd.Slot)
 	return nil
 }
 
@@ -574,11 +796,7 @@ func (n *Node) State() NodeState {
 
 func (n *Node) snapshotNodeStatus() NodeStatus {
 	status := NodeStatus{NodeID: n.nodeID}
-	slots := make([]int, 0, len(n.replicas))
-	for slot := range n.replicas {
-		slots = append(slots, slot)
-	}
-	sort.Ints(slots)
+	slots := sortedReplicaSlots(n.replicas)
 	for _, slot := range slots {
 		record := n.replicas[slot]
 		status.ReplicaCount++
@@ -752,6 +970,48 @@ func (n *Node) commitLocalSequence(slot int, sequence uint64) error {
 	}
 	record := n.replicas[slot]
 	record.highestCommittedSequence = sequence
+	record.localDataPresent = true
 	n.replicas[slot] = record
+	if record.state != ReplicaStateRecovered {
+		record.lastKnownState = record.state
+		n.replicas[slot] = record
+	}
+	if err := n.persistReplica(context.Background(), record); err != nil {
+		return fmt.Errorf("err in n.persistReplica: %w", err)
+	}
 	return nil
+}
+
+func (n *Node) persistReplica(ctx context.Context, record replicaRecord) error {
+	persisted := PersistedReplica{
+		Assignment:               cloneAssignment(record.assignment),
+		LastKnownState:           record.lastKnownState,
+		HighestCommittedSequence: record.highestCommittedSequence,
+		HasCommittedData:         record.localDataPresent,
+	}
+	if err := n.local.UpsertReplica(ctx, n.nodeID, persisted); err != nil {
+		return fmt.Errorf("err in n.local.UpsertReplica: %w", err)
+	}
+	return nil
+}
+
+func (n *Node) ensureBackendReplica(slot int) error {
+	if _, err := n.backend.HighestCommittedSequence(slot); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrUnknownReplica) {
+		return fmt.Errorf("err in n.backend.HighestCommittedSequence: %w", err)
+	}
+	if err := n.backend.CreateReplica(slot); err != nil && !errors.Is(err, ErrReplicaExists) {
+		return fmt.Errorf("err in n.backend.CreateReplica: %w", err)
+	}
+	return nil
+}
+
+func sortedReplicaSlots(replicas map[int]replicaRecord) []int {
+	slots := make([]int, 0, len(replicas))
+	for slot := range replicas {
+		slots = append(slots, slot)
+	}
+	sort.Ints(slots)
+	return slots
 }

@@ -517,6 +517,9 @@ type recordingNodeClient struct {
 	updatePeersErr   error
 	markLeavingErr   error
 	removeReplicaErr error
+	resumeErr        error
+	recoverErr       error
+	dropErr          error
 }
 
 func newRecordingNodeClient(nodeID string) *recordingNodeClient {
@@ -557,6 +560,30 @@ func (r *recordingNodeClient) UpdateChainPeers(_ context.Context, cmd storage.Up
 		return r.updatePeersErr
 	}
 	r.calls = append(r.calls, fmt.Sprintf("update_peers:%d", cmd.Assignment.Slot))
+	return nil
+}
+
+func (r *recordingNodeClient) ResumeRecoveredReplica(_ context.Context, cmd storage.ResumeRecoveredReplicaCommand) error {
+	if r.resumeErr != nil {
+		return r.resumeErr
+	}
+	r.calls = append(r.calls, fmt.Sprintf("resume:%d", cmd.Assignment.Slot))
+	return nil
+}
+
+func (r *recordingNodeClient) RecoverReplica(_ context.Context, cmd storage.RecoverReplicaCommand) error {
+	if r.recoverErr != nil {
+		return r.recoverErr
+	}
+	r.calls = append(r.calls, fmt.Sprintf("recover:%d:%s", cmd.Assignment.Slot, cmd.SourceNodeID))
+	return nil
+}
+
+func (r *recordingNodeClient) DropRecoveredReplica(_ context.Context, cmd storage.DropRecoveredReplicaCommand) error {
+	if r.dropErr != nil {
+		return r.dropErr
+	}
+	r.calls = append(r.calls, fmt.Sprintf("drop:%d", cmd.Slot))
 	return nil
 }
 

@@ -317,6 +317,10 @@ func (c *updatingCoordinatorClient) ReportReplicaRemoved(context.Context, int) e
 	return nil
 }
 
+func (c *updatingCoordinatorClient) ReportNodeRecovered(context.Context, NodeRecoveryReport) error {
+	return nil
+}
+
 func (c *updatingCoordinatorClient) ReportNodeHeartbeat(context.Context, NodeStatus) error {
 	return nil
 }

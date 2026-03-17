@@ -14,7 +14,7 @@
 - [ ] Add node liveness detection and heartbeat-driven reconfiguration policy, including suspect/dead timeouts and automatic coordinator actions.
 - [ ] Add real network transports for coordinator control-plane traffic and storage-node replication traffic.
 - [ ] Audit and harden behavior that currently assumes synchronous in-memory transport delivery, especially dispatch ordering, progress timing, and write ack propagation.
-- [ ] Implement storage-node persistence and restart/recovery semantics.
+- [x] Implement storage-node persistence and restart/recovery semantics.
 - [x] Implement the steady-state chain replication protocol between storage nodes.
 - [x] Implement client-facing read/write execution and routing.
 - [ ] Stored objects have associated metadata, enabling conditional writes (e.g. monotonic fencing token per-object, auto-incremented on mutation)

@@ -180,12 +180,14 @@ func (b *InMemoryBackend) StagedSequences(slot int) ([]uint64, error) {
 }
 
 type InMemoryCoordinatorClient struct {
-	ReadySlots   []int
-	RemovedSlots []int
-	Heartbeats   []NodeStatus
-	ReadyErr     error
-	RemovedErr   error
-	HeartbeatErr error
+	ReadySlots      []int
+	RemovedSlots    []int
+	RecoveryReports []NodeRecoveryReport
+	Heartbeats      []NodeStatus
+	ReadyErr        error
+	RemovedErr      error
+	RecoveredErr    error
+	HeartbeatErr    error
 }
 
 func NewInMemoryCoordinatorClient() *InMemoryCoordinatorClient {
@@ -208,11 +210,77 @@ func (c *InMemoryCoordinatorClient) ReportReplicaRemoved(_ context.Context, slot
 	return nil
 }
 
+func (c *InMemoryCoordinatorClient) ReportNodeRecovered(_ context.Context, report NodeRecoveryReport) error {
+	if c.RecoveredErr != nil {
+		return c.RecoveredErr
+	}
+	c.RecoveryReports = append(c.RecoveryReports, cloneRecoveryReport(report))
+	return nil
+}
+
 func (c *InMemoryCoordinatorClient) ReportNodeHeartbeat(_ context.Context, status NodeStatus) error {
 	if c.HeartbeatErr != nil {
 		return c.HeartbeatErr
 	}
 	c.Heartbeats = append(c.Heartbeats, status)
+	return nil
+}
+
+type InMemoryLocalStateStore struct {
+	nodes map[string]PersistedNodeState
+}
+
+func NewInMemoryLocalStateStore() *InMemoryLocalStateStore {
+	return &InMemoryLocalStateStore{
+		nodes: map[string]PersistedNodeState{},
+	}
+}
+
+func (s *InMemoryLocalStateStore) LoadNode(_ context.Context, nodeID string) (PersistedNodeState, error) {
+	state, ok := s.nodes[nodeID]
+	if !ok {
+		return PersistedNodeState{NodeID: nodeID}, nil
+	}
+	return clonePersistedNodeState(state), nil
+}
+
+func (s *InMemoryLocalStateStore) UpsertReplica(_ context.Context, nodeID string, replica PersistedReplica) error {
+	state, ok := s.nodes[nodeID]
+	if !ok {
+		state = PersistedNodeState{NodeID: nodeID}
+	}
+	replaced := false
+	for i := range state.Replicas {
+		if state.Replicas[i].Assignment.Slot == replica.Assignment.Slot {
+			state.Replicas[i] = clonePersistedReplica(replica)
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		state.Replicas = append(state.Replicas, clonePersistedReplica(replica))
+	}
+	sort.Slice(state.Replicas, func(i, j int) bool {
+		return state.Replicas[i].Assignment.Slot < state.Replicas[j].Assignment.Slot
+	})
+	s.nodes[nodeID] = state
+	return nil
+}
+
+func (s *InMemoryLocalStateStore) DeleteReplica(_ context.Context, nodeID string, slot int) error {
+	state, ok := s.nodes[nodeID]
+	if !ok {
+		return nil
+	}
+	replicas := state.Replicas[:0]
+	for _, replica := range state.Replicas {
+		if replica.Assignment.Slot == slot {
+			continue
+		}
+		replicas = append(replicas, replica)
+	}
+	state.Replicas = replicas
+	s.nodes[nodeID] = state
 	return nil
 }
 
@@ -287,4 +355,40 @@ func (t *InMemoryReplicationTransport) CommitWrite(ctx context.Context, toNodeID
 type replicationHandler interface {
 	HandleForwardWrite(ctx context.Context, req ForwardWriteRequest) error
 	HandleCommitWrite(ctx context.Context, req CommitWriteRequest) error
+}
+
+func clonePersistedReplica(replica PersistedReplica) PersistedReplica {
+	return PersistedReplica{
+		Assignment:               cloneAssignment(replica.Assignment),
+		LastKnownState:           replica.LastKnownState,
+		HighestCommittedSequence: replica.HighestCommittedSequence,
+		HasCommittedData:         replica.HasCommittedData,
+	}
+}
+
+func clonePersistedNodeState(state PersistedNodeState) PersistedNodeState {
+	cloned := PersistedNodeState{
+		NodeID:   state.NodeID,
+		Replicas: make([]PersistedReplica, 0, len(state.Replicas)),
+	}
+	for _, replica := range state.Replicas {
+		cloned.Replicas = append(cloned.Replicas, clonePersistedReplica(replica))
+	}
+	return cloned
+}
+
+func cloneRecoveryReport(report NodeRecoveryReport) NodeRecoveryReport {
+	cloned := NodeRecoveryReport{
+		NodeID:   report.NodeID,
+		Replicas: make([]RecoveredReplica, 0, len(report.Replicas)),
+	}
+	for _, replica := range report.Replicas {
+		cloned.Replicas = append(cloned.Replicas, RecoveredReplica{
+			Assignment:               cloneAssignment(replica.Assignment),
+			LastKnownState:           replica.LastKnownState,
+			HighestCommittedSequence: replica.HighestCommittedSequence,
+			HasCommittedData:         replica.HasCommittedData,
+		})
+	}
+	return cloned
 }

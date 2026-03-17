@@ -45,6 +45,8 @@ It is responsible for:
 - serving direct client requests when the local replica is the correct active head or tail
 - tracking local replica lifecycle state
 - reporting readiness, removal, and heartbeat information back to the coordinator
+- reopening persisted replica metadata and committed state after restart
+- reporting recovered local inventory to the coordinator for explicit revalidation
 
 It is not responsible for:
 
@@ -98,7 +100,20 @@ Methods:
 
 - `ReportReplicaReady`
 - `ReportReplicaRemoved`
+- `ReportNodeRecovered`
 - `ReportNodeHeartbeat`
+
+`LocalStateStore`
+
+- local metadata persistence for which replicas a physical node believes it hosts
+- distinct from `Backend`, which owns the committed replica data itself
+- current implementation is an in-memory restart-capable reference store
+
+Methods:
+
+- `LoadNode`
+- `UpsertReplica`
+- `DeleteReplica`
 
 `ReplicationTransport`
 
@@ -153,6 +168,7 @@ Current replica lifecycle states:
 - `catching_up`
 - `active`
 - `leaving`
+- `recovered`
 - `removed`
 
 ## Current Integration Flow
@@ -181,6 +197,17 @@ Storage nodes can summarize local lifecycle state through `ReportNodeHeartbeat`.
 
 This is intended for future coordinator service integration and liveness monitoring.
 
+### Restart / recovery
+
+1. a restarted storage node reopens its `LocalStateStore` plus committed `Backend` data
+2. every reopened replica starts as local `recovered` and is non-serving
+3. the node sends `ReportNodeRecovered` with its recovered inventory
+4. the coordinator server compares that inventory against current coordinator state
+5. if a recovered replica exactly matches the current assignment and still has committed data, the coordinator sends `ResumeRecoveredReplica`
+6. otherwise, if the node should still host that slot, the coordinator sends `RecoverReplica` so the node rebuilds in place from a peer
+7. stale recovered local replicas that are no longer assigned are removed through `DropRecoveredReplica`
+8. routing snapshots exclude slots with unrevalidated recovered replicas, so clients do not route through restarted nodes until revalidation completes
+
 ### Client routing
 
 1. a client fetches a `RoutingSnapshot` from `coordserver`
@@ -197,7 +224,6 @@ The code now has the core interfaces and in-memory implementations, but it does 
 
 - a real network transport
 - a durable storage backend
-- storage restart/recovery semantics
 - heartbeat-driven liveness and automatic dead-node actions
 
 So the current shape is:
