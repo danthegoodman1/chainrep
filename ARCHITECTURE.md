@@ -80,6 +80,8 @@ The intended connection is coordinator-driven:
 - owns per-slot replica data
 - current implementation is in-memory KV
 - later this can be replaced with a durable backend without changing node lifecycle logic
+- backend atomicity is only required within a slot; cross-slot atomic mutations are intentionally out of scope
+- valid implementations may use one DB per node or one DB per slot as long as the per-slot contract is satisfied
 
 Methods:
 
@@ -108,6 +110,8 @@ Methods:
 
 - local metadata persistence for which replicas a physical node believes it hosts
 - distinct from `Backend`, which owns the committed replica data itself
+
+`storage.Node` is also where runtime resource controls live. Backpressure for client writes, buffered replica protocol messages, and catch-up concurrency is enforced at the node/process layer rather than by the backend, so custom backends do not need to provide node-wide admission or cross-slot coordination semantics.
 - current implementation is an in-memory restart-capable reference store
 
 Methods:

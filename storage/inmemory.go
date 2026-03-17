@@ -372,11 +372,15 @@ type QueuedReplicationMessage struct {
 }
 
 type QueuedInMemoryReplicationTransport struct {
-	backends      map[string]Backend
-	nodes         map[string]replicationHandler
-	queue         []QueuedReplicationMessage
-	dropNextWrite bool
-	beforeDeliver func(QueuedReplicationMessage)
+	backends            map[string]Backend
+	nodes               map[string]replicationHandler
+	queue               []QueuedReplicationMessage
+	dropNextWrite       bool
+	beforeDeliver       func(QueuedReplicationMessage)
+	beforeFetchSnapshot func(fromNodeID string, slot int)
+	beforeFetchSequence func(fromNodeID string, slot int)
+	blockSnapshot       <-chan struct{}
+	blockSequence       <-chan struct{}
 }
 
 func NewQueuedInMemoryReplicationTransport() *QueuedInMemoryReplicationTransport {
@@ -395,11 +399,31 @@ func (t *QueuedInMemoryReplicationTransport) RegisterNode(nodeID string, node re
 }
 
 func (t *QueuedInMemoryReplicationTransport) FetchSnapshot(ctx context.Context, fromNodeID string, slot int) (Snapshot, error) {
+	if t.beforeFetchSnapshot != nil {
+		t.beforeFetchSnapshot(fromNodeID, slot)
+	}
+	if t.blockSnapshot != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-t.blockSnapshot:
+		}
+	}
 	inline := InMemoryReplicationTransport{backends: t.backends}
 	return inline.FetchSnapshot(ctx, fromNodeID, slot)
 }
 
 func (t *QueuedInMemoryReplicationTransport) FetchCommittedSequence(ctx context.Context, fromNodeID string, slot int) (uint64, error) {
+	if t.beforeFetchSequence != nil {
+		t.beforeFetchSequence(fromNodeID, slot)
+	}
+	if t.blockSequence != nil {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-t.blockSequence:
+		}
+	}
 	inline := InMemoryReplicationTransport{backends: t.backends}
 	return inline.FetchCommittedSequence(ctx, fromNodeID, slot)
 }
@@ -514,6 +538,22 @@ func (t *QueuedInMemoryReplicationTransport) MoveTo(index int, destination int) 
 
 func (t *QueuedInMemoryReplicationTransport) SetBeforeDeliver(hook func(QueuedReplicationMessage)) {
 	t.beforeDeliver = hook
+}
+
+func (t *QueuedInMemoryReplicationTransport) SetBeforeFetchSnapshot(hook func(fromNodeID string, slot int)) {
+	t.beforeFetchSnapshot = hook
+}
+
+func (t *QueuedInMemoryReplicationTransport) SetBeforeFetchCommittedSequence(hook func(fromNodeID string, slot int)) {
+	t.beforeFetchSequence = hook
+}
+
+func (t *QueuedInMemoryReplicationTransport) BlockFetchSnapshot(ch <-chan struct{}) {
+	t.blockSnapshot = ch
+}
+
+func (t *QueuedInMemoryReplicationTransport) BlockFetchCommittedSequence(ch <-chan struct{}) {
+	t.blockSequence = ch
 }
 
 func (t *QueuedInMemoryReplicationTransport) DeliverNext(ctx context.Context) error {

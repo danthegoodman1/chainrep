@@ -20,7 +20,10 @@ var (
 	ErrPeerMismatch              = errors.New("storage peer mismatch")
 	ErrStateMismatch             = errors.New("storage state mismatch")
 	ErrProtocolConflict          = errors.New("storage replica protocol conflict")
-	ErrBufferedMessageLimit      = errors.New("storage buffered replica message limit exceeded")
+	ErrReplicaBackpressure       = errors.New("storage replica backpressure")
+	ErrBufferedMessageLimit      = ErrReplicaBackpressure
+	ErrWriteBackpressure         = errors.New("storage client write backpressure")
+	ErrCatchupBackpressure       = errors.New("storage catch-up backpressure")
 	ErrRoutingMismatch           = errors.New("storage routing mismatch")
 	ErrWriteTimeout              = errors.New("storage write wait timed out or was canceled")
 	ErrAmbiguousWrite            = errors.New("storage client write outcome is ambiguous")
@@ -28,7 +31,11 @@ var (
 
 type Config struct {
 	NodeID                            string
+	MaxInFlightClientWritesPerNode    int
+	MaxInFlightClientWritesPerSlot    int
+	MaxBufferedReplicaMessagesPerNode int
 	MaxBufferedReplicaMessagesPerSlot int
+	MaxConcurrentCatchups             int
 	WriteCommitTimeout                time.Duration
 }
 
@@ -133,6 +140,44 @@ type AmbiguousWriteError struct {
 	Kind                 OperationKind
 	ExpectedChainVersion uint64
 	Cause                error
+}
+
+type BackpressureResource string
+
+const (
+	BackpressureResourceClientWrite   BackpressureResource = "client_write"
+	BackpressureResourceReplicaBuffer BackpressureResource = "replica_buffer"
+	BackpressureResourceCatchup       BackpressureResource = "catchup"
+)
+
+type BackpressureError struct {
+	Slot     int
+	Current  int
+	Limit    int
+	Resource BackpressureResource
+	Cause    error
+}
+
+func (e *BackpressureError) Error() string {
+	if e.Slot >= 0 {
+		return fmt.Sprintf(
+			"%s: %s slot %d current=%d limit=%d",
+			e.Cause,
+			e.Resource,
+			e.Slot,
+			e.Current,
+			e.Limit,
+		)
+	}
+	return fmt.Sprintf("%s: %s current=%d limit=%d", e.Cause, e.Resource, e.Current, e.Limit)
+}
+
+func (e *BackpressureError) Unwrap() error {
+	return e.Cause
+}
+
+func (e *BackpressureError) Is(target error) bool {
+	return target == e.Cause
 }
 
 func (e *AmbiguousWriteError) Error() string {
@@ -311,6 +356,7 @@ type replicaRecord struct {
 	recentCommittedCommits   map[uint64]CommitWriteRequest
 	recentForwardOrder       []uint64
 	recentCommitOrder        []uint64
+	inFlightClientWrites     int
 }
 
 type pendingWrite struct {
@@ -324,8 +370,14 @@ type Node struct {
 	coord                             CoordinatorClient
 	repl                              ReplicationTransport
 	replicas                          map[int]replicaRecord
+	maxInFlightClientWritesPerNode    int
+	maxInFlightClientWritesPerSlot    int
+	maxBufferedReplicaMessagesPerNode int
 	maxBufferedReplicaMessagesPerSlot int
+	maxConcurrentCatchups             int
 	writeCommitTimeout                time.Duration
+	inFlightClientWrites              int
+	inFlightCatchups                  int
 	closeErr                          error
 	closed                            bool
 }
@@ -353,8 +405,20 @@ func OpenNode(
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("%w: node ID must not be empty", ErrInvalidConfig)
 	}
+	if cfg.MaxInFlightClientWritesPerNode < 0 {
+		return nil, fmt.Errorf("%w: max in-flight client writes per node must be >= 0", ErrInvalidConfig)
+	}
+	if cfg.MaxInFlightClientWritesPerSlot < 0 {
+		return nil, fmt.Errorf("%w: max in-flight client writes per slot must be >= 0", ErrInvalidConfig)
+	}
+	if cfg.MaxBufferedReplicaMessagesPerNode < 0 {
+		return nil, fmt.Errorf("%w: max buffered replica messages per node must be >= 0", ErrInvalidConfig)
+	}
 	if cfg.MaxBufferedReplicaMessagesPerSlot < 0 {
 		return nil, fmt.Errorf("%w: max buffered replica messages per slot must be >= 0", ErrInvalidConfig)
+	}
+	if cfg.MaxConcurrentCatchups < 0 {
+		return nil, fmt.Errorf("%w: max concurrent catchups must be >= 0", ErrInvalidConfig)
 	}
 	if cfg.WriteCommitTimeout < 0 {
 		return nil, fmt.Errorf("%w: write commit timeout must be >= 0", ErrInvalidConfig)
@@ -379,7 +443,11 @@ func OpenNode(
 		coord:                             coord,
 		repl:                              repl,
 		replicas:                          make(map[int]replicaRecord),
+		maxInFlightClientWritesPerNode:    cfg.MaxInFlightClientWritesPerNode,
+		maxInFlightClientWritesPerSlot:    cfg.MaxInFlightClientWritesPerSlot,
+		maxBufferedReplicaMessagesPerNode: cfg.MaxBufferedReplicaMessagesPerNode,
 		maxBufferedReplicaMessagesPerSlot: cfg.MaxBufferedReplicaMessagesPerSlot,
+		maxConcurrentCatchups:             cfg.MaxConcurrentCatchups,
 		writeCommitTimeout:                cfg.WriteCommitTimeout,
 	}
 	if node.maxBufferedReplicaMessagesPerSlot == 0 {
@@ -428,6 +496,13 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 	}
 	if _, exists := n.replicas[cmd.Assignment.Slot]; exists {
 		return fmt.Errorf("%w: slot %d", ErrReplicaExists, cmd.Assignment.Slot)
+	}
+	needsCatchup := cmd.Assignment.Peers.PredecessorNodeID != ""
+	if needsCatchup {
+		if err := n.admitCatchup(); err != nil {
+			return err
+		}
+		defer n.releaseCatchup()
 	}
 
 	if err := n.backend.CreateReplica(cmd.Assignment.Slot); err != nil {
@@ -630,6 +705,10 @@ func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) er
 	if exists && record.state != ReplicaStateRecovered {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
 	}
+	if err := n.admitCatchup(); err != nil {
+		return err
+	}
+	defer n.releaseCatchup()
 	if err := n.ensureBackendReplica(cmd.Assignment.Slot); err != nil {
 		return fmt.Errorf("err in n.ensureBackendReplica: %w", err)
 	}
@@ -875,6 +954,26 @@ func (n *Node) HighestCommittedSequence(slot int) (uint64, error) {
 	return record.highestCommittedSequence, nil
 }
 
+func (n *Node) InFlightClientWrites() int {
+	return n.inFlightClientWrites
+}
+
+func (n *Node) InFlightClientWritesForSlot(slot int) (int, error) {
+	record, ok := n.replicas[slot]
+	if !ok {
+		return 0, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+	}
+	return record.inFlightClientWrites, nil
+}
+
+func (n *Node) BufferedReplicaMessages() int {
+	return n.bufferedReplicaMessagesForNode()
+}
+
+func (n *Node) CatchupCount() int {
+	return n.inFlightCatchups
+}
+
 func (n *Node) State() NodeState {
 	state := NodeState{
 		NodeID:   n.nodeID,
@@ -956,6 +1055,18 @@ func (n *Node) submitWrite(
 			record.assignment.Role,
 		)
 	}
+	if err := n.admitClientWrite(slot); err != nil {
+		return CommitResult{}, err
+	}
+	record = n.replicas[slot]
+	releasedAdmission := false
+	defer func() {
+		if releasedAdmission {
+			return
+		}
+		n.releaseClientWrite(slot)
+		releasedAdmission = true
+	}()
 
 	operation := WriteOperation{
 		Slot:     slot,
@@ -993,6 +1104,8 @@ func (n *Node) submitWrite(
 		}
 	}
 
+	n.releaseClientWrite(slot)
+	releasedAdmission = true
 	return CommitResult{Slot: slot, Sequence: operation.Sequence}, nil
 }
 
@@ -1072,6 +1185,89 @@ func newAmbiguousWriteError(
 
 func isAmbiguousWriteCause(err error) bool {
 	return errors.Is(err, ErrWriteTimeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+func newWriteBackpressureError(slot int, current int, limit int) error {
+	return &BackpressureError{
+		Slot:     slot,
+		Current:  current,
+		Limit:    limit,
+		Resource: BackpressureResourceClientWrite,
+		Cause:    ErrWriteBackpressure,
+	}
+}
+
+func newReplicaBackpressureError(slot int, current int, limit int) error {
+	return &BackpressureError{
+		Slot:     slot,
+		Current:  current,
+		Limit:    limit,
+		Resource: BackpressureResourceReplicaBuffer,
+		Cause:    ErrReplicaBackpressure,
+	}
+}
+
+func newCatchupBackpressureError(current int, limit int) error {
+	return &BackpressureError{
+		Slot:     -1,
+		Current:  current,
+		Limit:    limit,
+		Resource: BackpressureResourceCatchup,
+		Cause:    ErrCatchupBackpressure,
+	}
+}
+
+func (n *Node) admitClientWrite(slot int) error {
+	if n.maxInFlightClientWritesPerNode > 0 && n.inFlightClientWrites >= n.maxInFlightClientWritesPerNode {
+		return newWriteBackpressureError(slot, n.inFlightClientWrites, n.maxInFlightClientWritesPerNode)
+	}
+	record := n.replicas[slot]
+	if n.maxInFlightClientWritesPerSlot > 0 && record.inFlightClientWrites >= n.maxInFlightClientWritesPerSlot {
+		return newWriteBackpressureError(slot, record.inFlightClientWrites, n.maxInFlightClientWritesPerSlot)
+	}
+	record.inFlightClientWrites++
+	n.replicas[slot] = record
+	n.inFlightClientWrites++
+	return nil
+}
+
+func (n *Node) releaseClientWrite(slot int) {
+	record, ok := n.replicas[slot]
+	if !ok {
+		if n.inFlightClientWrites > 0 {
+			n.inFlightClientWrites--
+		}
+		return
+	}
+	if record.inFlightClientWrites > 0 {
+		record.inFlightClientWrites--
+	}
+	n.replicas[slot] = record
+	if n.inFlightClientWrites > 0 {
+		n.inFlightClientWrites--
+	}
+}
+
+func (n *Node) admitCatchup() error {
+	if n.maxConcurrentCatchups > 0 && n.inFlightCatchups >= n.maxConcurrentCatchups {
+		return newCatchupBackpressureError(n.inFlightCatchups, n.maxConcurrentCatchups)
+	}
+	n.inFlightCatchups++
+	return nil
+}
+
+func (n *Node) releaseCatchup() {
+	if n.inFlightCatchups > 0 {
+		n.inFlightCatchups--
+	}
+}
+
+func (n *Node) bufferedReplicaMessagesForNode() int {
+	total := 0
+	for _, record := range n.replicas {
+		total += len(record.bufferedForwards) + len(record.bufferedCommits)
+	}
+	return total
 }
 
 func (n *Node) commitLocalSequence(ctx context.Context, slot int, sequence uint64) error {
@@ -1302,7 +1498,10 @@ func (n *Node) bufferFutureForward(record replicaRecord, req ForwardWriteRequest
 		return record, fmt.Errorf("%w: slot %d sequence %d buffered forward conflict", ErrProtocolConflict, req.Operation.Slot, req.Operation.Sequence)
 	}
 	if n.totalBufferedMessages(record) >= n.maxBufferedReplicaMessagesPerSlot {
-		return record, fmt.Errorf("%w: slot %d buffered message count exceeded %d", ErrBufferedMessageLimit, req.Operation.Slot, n.maxBufferedReplicaMessagesPerSlot)
+		return record, newReplicaBackpressureError(req.Operation.Slot, n.totalBufferedMessages(record), n.maxBufferedReplicaMessagesPerSlot)
+	}
+	if n.maxBufferedReplicaMessagesPerNode > 0 && n.bufferedReplicaMessagesForNode() >= n.maxBufferedReplicaMessagesPerNode {
+		return record, newReplicaBackpressureError(req.Operation.Slot, n.bufferedReplicaMessagesForNode(), n.maxBufferedReplicaMessagesPerNode)
 	}
 	record.bufferedForwards[req.Operation.Sequence] = cloneForwardRequest(req)
 	return record, nil
@@ -1317,7 +1516,10 @@ func (n *Node) bufferFutureCommit(record replicaRecord, req CommitWriteRequest) 
 		return record, fmt.Errorf("%w: slot %d sequence %d buffered commit conflict", ErrProtocolConflict, req.Slot, req.Sequence)
 	}
 	if n.totalBufferedMessages(record) >= n.maxBufferedReplicaMessagesPerSlot {
-		return record, fmt.Errorf("%w: slot %d buffered message count exceeded %d", ErrBufferedMessageLimit, req.Slot, n.maxBufferedReplicaMessagesPerSlot)
+		return record, newReplicaBackpressureError(req.Slot, n.totalBufferedMessages(record), n.maxBufferedReplicaMessagesPerSlot)
+	}
+	if n.maxBufferedReplicaMessagesPerNode > 0 && n.bufferedReplicaMessagesForNode() >= n.maxBufferedReplicaMessagesPerNode {
+		return record, newReplicaBackpressureError(req.Slot, n.bufferedReplicaMessagesForNode(), n.maxBufferedReplicaMessagesPerNode)
 	}
 	record.bufferedCommits[req.Sequence] = cloneCommitRequest(req)
 	return record, nil
