@@ -13,6 +13,10 @@ var (
 	ErrUnknownReplica            = errors.New("unknown storage replica")
 	ErrInvalidTransition         = errors.New("invalid storage replica transition")
 	ErrSnapshotSourceUnavailable = errors.New("storage snapshot source unavailable")
+	ErrWriteRejected             = errors.New("storage write rejected")
+	ErrSequenceMismatch          = errors.New("storage sequence mismatch")
+	ErrPeerMismatch              = errors.New("storage peer mismatch")
+	ErrStateMismatch             = errors.New("storage state mismatch")
 )
 
 type Config struct {
@@ -26,6 +30,11 @@ type Backend interface {
 	DeleteReplica(slot int) error
 	Snapshot(slot int) (Snapshot, error)
 	InstallSnapshot(slot int, snap Snapshot) error
+	StagePut(slot int, sequence uint64, key string, value string) error
+	StageDelete(slot int, sequence uint64, key string) error
+	CommitSequence(slot int, sequence uint64) error
+	CommittedSnapshot(slot int) (Snapshot, error)
+	StagedSequences(slot int) ([]uint64, error)
 }
 
 type CoordinatorClient interface {
@@ -36,6 +45,39 @@ type CoordinatorClient interface {
 
 type ReplicationTransport interface {
 	FetchSnapshot(ctx context.Context, fromNodeID string, slot int) (Snapshot, error)
+	ForwardWrite(ctx context.Context, toNodeID string, req ForwardWriteRequest) error
+	CommitWrite(ctx context.Context, toNodeID string, req CommitWriteRequest) error
+}
+
+type OperationKind string
+
+const (
+	OperationKindPut    OperationKind = "put"
+	OperationKindDelete OperationKind = "delete"
+)
+
+type WriteOperation struct {
+	Slot     int
+	Sequence uint64
+	Kind     OperationKind
+	Key      string
+	Value    string
+}
+
+type ForwardWriteRequest struct {
+	Operation  WriteOperation
+	FromNodeID string
+}
+
+type CommitWriteRequest struct {
+	Slot       int
+	Sequence   uint64
+	FromNodeID string
+}
+
+type CommitResult struct {
+	Slot     int
+	Sequence uint64
 }
 
 type ReplicaState string
@@ -108,8 +150,10 @@ type UpdateChainPeersCommand struct {
 }
 
 type replicaRecord struct {
-	assignment ReplicaAssignment
-	state      ReplicaState
+	assignment               ReplicaAssignment
+	state                    ReplicaState
+	nextSequence             uint64
+	highestCommittedSequence uint64
 }
 
 type Node struct {
@@ -163,8 +207,9 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 	}()
 
 	record := replicaRecord{
-		assignment: cloneAssignment(cmd.Assignment),
-		state:      ReplicaStatePending,
+		assignment:   cloneAssignment(cmd.Assignment),
+		state:        ReplicaStatePending,
+		nextSequence: 1,
 	}
 	n.replicas[cmd.Assignment.Slot] = record
 
@@ -259,6 +304,133 @@ func (n *Node) ReportHeartbeat(ctx context.Context) error {
 	return nil
 }
 
+func (n *Node) SubmitPut(ctx context.Context, slot int, key string, value string) (CommitResult, error) {
+	return n.submitWrite(ctx, slot, OperationKindPut, key, value)
+}
+
+func (n *Node) SubmitDelete(ctx context.Context, slot int, key string) (CommitResult, error) {
+	return n.submitWrite(ctx, slot, OperationKindDelete, key, "")
+}
+
+func (n *Node) HandleForwardWrite(ctx context.Context, req ForwardWriteRequest) error {
+	record, err := n.activeReplicaRecord(req.Operation.Slot)
+	if err != nil {
+		return err
+	}
+	if record.assignment.Peers.PredecessorNodeID == "" || record.assignment.Peers.PredecessorNodeID != req.FromNodeID {
+		return fmt.Errorf(
+			"%w: slot %d expected predecessor %q, got %q",
+			ErrPeerMismatch,
+			req.Operation.Slot,
+			record.assignment.Peers.PredecessorNodeID,
+			req.FromNodeID,
+		)
+	}
+	if req.Operation.Sequence != record.nextSequence {
+		return fmt.Errorf(
+			"%w: slot %d expected sequence %d, got %d",
+			ErrSequenceMismatch,
+			req.Operation.Slot,
+			record.nextSequence,
+			req.Operation.Sequence,
+		)
+	}
+	if err := n.stageOperation(req.Operation); err != nil {
+		return err
+	}
+
+	record.nextSequence++
+	n.replicas[req.Operation.Slot] = record
+
+	if record.assignment.Peers.SuccessorNodeID == "" {
+		if err := n.commitLocalSequence(req.Operation.Slot, req.Operation.Sequence); err != nil {
+			return err
+		}
+		if record.assignment.Peers.PredecessorNodeID != "" {
+			if err := n.repl.CommitWrite(ctx, record.assignment.Peers.PredecessorNodeID, CommitWriteRequest{
+				Slot:       req.Operation.Slot,
+				Sequence:   req.Operation.Sequence,
+				FromNodeID: n.nodeID,
+			}); err != nil {
+				return fmt.Errorf("err in n.repl.CommitWrite: %w", err)
+			}
+		}
+		return nil
+	}
+
+	if err := n.repl.ForwardWrite(ctx, record.assignment.Peers.SuccessorNodeID, ForwardWriteRequest{
+		Operation:  cloneWriteOperation(req.Operation),
+		FromNodeID: n.nodeID,
+	}); err != nil {
+		return fmt.Errorf("err in n.repl.ForwardWrite: %w", err)
+	}
+	return nil
+}
+
+func (n *Node) HandleCommitWrite(ctx context.Context, req CommitWriteRequest) error {
+	record, err := n.activeReplicaRecord(req.Slot)
+	if err != nil {
+		return err
+	}
+	if record.assignment.Peers.SuccessorNodeID == "" || record.assignment.Peers.SuccessorNodeID != req.FromNodeID {
+		return fmt.Errorf(
+			"%w: slot %d expected successor %q, got %q",
+			ErrPeerMismatch,
+			req.Slot,
+			record.assignment.Peers.SuccessorNodeID,
+			req.FromNodeID,
+		)
+	}
+	if req.Sequence != record.highestCommittedSequence+1 {
+		return fmt.Errorf(
+			"%w: slot %d expected commit sequence %d, got %d",
+			ErrSequenceMismatch,
+			req.Slot,
+			record.highestCommittedSequence+1,
+			req.Sequence,
+		)
+	}
+	if err := n.commitLocalSequence(req.Slot, req.Sequence); err != nil {
+		return err
+	}
+
+	record = n.replicas[req.Slot]
+	if record.assignment.Peers.PredecessorNodeID != "" {
+		if err := n.repl.CommitWrite(ctx, record.assignment.Peers.PredecessorNodeID, CommitWriteRequest{
+			Slot:       req.Slot,
+			Sequence:   req.Sequence,
+			FromNodeID: n.nodeID,
+		}); err != nil {
+			return fmt.Errorf("err in n.repl.CommitWrite: %w", err)
+		}
+	}
+	return nil
+}
+
+func (n *Node) CommittedSnapshot(slot int) (Snapshot, error) {
+	snapshot, err := n.backend.CommittedSnapshot(slot)
+	if err != nil {
+		return nil, fmt.Errorf("err in n.backend.CommittedSnapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (n *Node) StagedSequences(slot int) ([]uint64, error) {
+	sequences, err := n.backend.StagedSequences(slot)
+	if err != nil {
+		return nil, fmt.Errorf("err in n.backend.StagedSequences: %w", err)
+	}
+	return sequences, nil
+}
+
+func (n *Node) HighestCommittedSequence(slot int) (uint64, error) {
+	record, ok := n.replicas[slot]
+	if !ok {
+		return 0, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+	}
+	return record.highestCommittedSequence, nil
+}
+
 func (n *Node) State() NodeState {
 	state := NodeState{
 		NodeID:   n.nodeID,
@@ -313,4 +485,113 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneWriteOperation(operation WriteOperation) WriteOperation {
+	return WriteOperation{
+		Slot:     operation.Slot,
+		Sequence: operation.Sequence,
+		Kind:     operation.Kind,
+		Key:      operation.Key,
+		Value:    operation.Value,
+	}
+}
+
+func (n *Node) submitWrite(
+	ctx context.Context,
+	slot int,
+	kind OperationKind,
+	key string,
+	value string,
+) (CommitResult, error) {
+	record, err := n.activeReplicaRecord(slot)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	if record.assignment.Role != ReplicaRoleHead && record.assignment.Role != ReplicaRoleSingle {
+		return CommitResult{}, fmt.Errorf(
+			"%w: slot %d role %q cannot accept writes",
+			ErrWriteRejected,
+			slot,
+			record.assignment.Role,
+		)
+	}
+
+	operation := WriteOperation{
+		Slot:     slot,
+		Sequence: record.nextSequence,
+		Kind:     kind,
+		Key:      key,
+		Value:    value,
+	}
+	if err := n.stageOperation(operation); err != nil {
+		return CommitResult{}, err
+	}
+
+	record.nextSequence++
+	n.replicas[slot] = record
+
+	switch record.assignment.Role {
+	case ReplicaRoleSingle:
+		if err := n.commitLocalSequence(slot, operation.Sequence); err != nil {
+			return CommitResult{}, err
+		}
+	case ReplicaRoleHead:
+		if record.assignment.Peers.SuccessorNodeID == "" {
+			return CommitResult{}, fmt.Errorf("%w: slot %d head has no successor", ErrStateMismatch, slot)
+		}
+		if err := n.repl.ForwardWrite(ctx, record.assignment.Peers.SuccessorNodeID, ForwardWriteRequest{
+			Operation:  cloneWriteOperation(operation),
+			FromNodeID: n.nodeID,
+		}); err != nil {
+			return CommitResult{}, fmt.Errorf("err in n.repl.ForwardWrite: %w", err)
+		}
+		if n.replicas[slot].highestCommittedSequence < operation.Sequence {
+			return CommitResult{}, fmt.Errorf(
+				"%w: slot %d sequence %d was not committed before forward returned",
+				ErrStateMismatch,
+				slot,
+				operation.Sequence,
+			)
+		}
+	}
+
+	return CommitResult{Slot: slot, Sequence: operation.Sequence}, nil
+}
+
+func (n *Node) activeReplicaRecord(slot int) (replicaRecord, error) {
+	record, ok := n.replicas[slot]
+	if !ok {
+		return replicaRecord{}, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+	}
+	if record.state != ReplicaStateActive {
+		return replicaRecord{}, fmt.Errorf("%w: slot %d is %q", ErrWriteRejected, slot, record.state)
+	}
+	return record, nil
+}
+
+func (n *Node) stageOperation(operation WriteOperation) error {
+	switch operation.Kind {
+	case OperationKindPut:
+		if err := n.backend.StagePut(operation.Slot, operation.Sequence, operation.Key, operation.Value); err != nil {
+			return fmt.Errorf("err in n.backend.StagePut: %w", err)
+		}
+	case OperationKindDelete:
+		if err := n.backend.StageDelete(operation.Slot, operation.Sequence, operation.Key); err != nil {
+			return fmt.Errorf("err in n.backend.StageDelete: %w", err)
+		}
+	default:
+		return fmt.Errorf("%w: unsupported operation kind %q", ErrInvalidConfig, operation.Kind)
+	}
+	return nil
+}
+
+func (n *Node) commitLocalSequence(slot int, sequence uint64) error {
+	if err := n.backend.CommitSequence(slot, sequence); err != nil {
+		return fmt.Errorf("err in n.backend.CommitSequence: %w", err)
+	}
+	record := n.replicas[slot]
+	record.highestCommittedSequence = sequence
+	n.replicas[slot] = record
+	return nil
 }

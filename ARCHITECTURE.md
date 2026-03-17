@@ -156,11 +156,9 @@ This is intended for future coordinator service integration and liveness monitor
 
 The code now has the core interfaces and in-memory implementations, but it does not yet have:
 
-- a coordinator server API that issues storage commands
 - a real network transport
 - a durable storage backend
 - client read/write execution
-- full steady-state chain replication protocol
 
 So the current shape is:
 

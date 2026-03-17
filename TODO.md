@@ -15,5 +15,5 @@
 - [ ] Add node liveness detection and heartbeat-driven reconfiguration policy, including suspect/dead timeouts and automatic coordinator actions.
 - [ ] Add real network transports for coordinator control-plane traffic and storage-node replication traffic.
 - [ ] Implement storage-node persistence and restart/recovery semantics.
-- [ ] Implement the steady-state chain replication protocol between storage nodes.
+- [x] Implement the steady-state chain replication protocol between storage nodes.
 - [ ] Implement client-facing read/write execution and routing.
