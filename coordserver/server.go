@@ -16,6 +16,7 @@ import (
 var (
 	ErrUnknownNode          = errors.New("unknown coordinator server node")
 	ErrDispatchFailed       = errors.New("coordinator server dispatch failed")
+	ErrDispatchTimeout      = errors.New("coordinator server dispatch timed out or was canceled")
 	ErrUnexpectedProgress   = errors.New("unexpected coordinator server progress")
 	ErrConflictingPending   = errors.New("conflicting coordinator server pending work")
 	ErrStateMismatch        = errors.New("coordinator server state mismatch")
@@ -77,6 +78,8 @@ type Clock interface {
 type ServerConfig struct {
 	LivenessPolicy LivenessPolicy
 	Clock          Clock
+	DispatchTimeout        time.Duration
+	RecoveryCommandTimeout time.Duration
 }
 
 type Server struct {
@@ -92,7 +95,14 @@ type Server struct {
 	lastRecoveryReports    map[string]storage.NodeRecoveryReport
 	livenessPolicy         LivenessPolicy
 	clock                  Clock
+	dispatchTimeout        time.Duration
+	recoveryCommandTimeout time.Duration
 }
+
+const (
+	defaultDispatchTimeout        = 5 * time.Second
+	defaultRecoveryCommandTimeout = 5 * time.Second
+)
 
 func Open(ctx context.Context, store coordruntime.Store, nodes map[string]StorageNodeClient) (*Server, error) {
 	return OpenWithConfig(ctx, store, nodes, ServerConfig{})
@@ -128,9 +138,17 @@ func OpenWithConfig(
 		lastRecoveryReports: map[string]storage.NodeRecoveryReport{},
 		livenessPolicy: cfg.LivenessPolicy,
 		clock:          cfg.Clock,
+		dispatchTimeout:        cfg.DispatchTimeout,
+		recoveryCommandTimeout: cfg.RecoveryCommandTimeout,
 	}
 	if server.clock == nil {
 		server.clock = realClock{}
+	}
+	if server.dispatchTimeout == 0 {
+		server.dispatchTimeout = defaultDispatchTimeout
+	}
+	if server.recoveryCommandTimeout == 0 {
+		server.recoveryCommandTimeout = defaultRecoveryCommandTimeout
 	}
 	server.syncViewsFromRuntime()
 	server.rebuildRoutingSnapshot()
@@ -597,7 +615,12 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 	if err != nil {
 		return fmt.Errorf("err in assignmentForNode(add): %w", err)
 	}
-	if err := client.AddReplicaAsTail(ctx, storage.AddReplicaAsTailCommand{Assignment: addAssignment}); err != nil {
+	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+	defer cancel()
+	if err := client.AddReplicaAsTail(dispatchCtx, storage.AddReplicaAsTailCommand{Assignment: addAssignment}); err != nil {
+		if isContextTimeoutOrCancel(err) {
+			return fmt.Errorf("%w: err in node[%q].AddReplicaAsTail: %w", ErrDispatchTimeout, addedNodeID, err)
+		}
 		return fmt.Errorf("%w: err in node[%q].AddReplicaAsTail: %v", ErrDispatchFailed, addedNodeID, err)
 	}
 	s.pending[slotPlan.Slot] = PendingWork{
@@ -619,7 +642,13 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 		if err != nil {
 			return fmt.Errorf("err in assignmentForNode(update append): %w", err)
 		}
-		if err := client.UpdateChainPeers(ctx, storage.UpdateChainPeersCommand{Assignment: assignment}); err != nil {
+		updateCtx, updateCancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+		err = client.UpdateChainPeers(updateCtx, storage.UpdateChainPeersCommand{Assignment: assignment})
+		updateCancel()
+		if err != nil {
+			if isContextTimeoutOrCancel(err) {
+				return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %w", ErrDispatchTimeout, nodeID, err)
+			}
 			return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %v", ErrDispatchFailed, nodeID, err)
 		}
 	}
@@ -653,7 +682,13 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 		if err != nil {
 			return fmt.Errorf("err in assignmentForNode(update leaving): %w", err)
 		}
-		if err := client.UpdateChainPeers(ctx, storage.UpdateChainPeersCommand{Assignment: assignment}); err != nil {
+		updateCtx, updateCancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+		err = client.UpdateChainPeers(updateCtx, storage.UpdateChainPeersCommand{Assignment: assignment})
+		updateCancel()
+		if err != nil {
+			if isContextTimeoutOrCancel(err) {
+				return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %w", ErrDispatchTimeout, nodeID, err)
+			}
 			return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %v", ErrDispatchFailed, nodeID, err)
 		}
 	}
@@ -662,7 +697,12 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 	if !ok {
 		return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, leavingNodeID)
 	}
-	if err := client.MarkReplicaLeaving(ctx, storage.MarkReplicaLeavingCommand{Slot: slotPlan.Slot}); err != nil {
+	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+	defer cancel()
+	if err := client.MarkReplicaLeaving(dispatchCtx, storage.MarkReplicaLeavingCommand{Slot: slotPlan.Slot}); err != nil {
+		if isContextTimeoutOrCancel(err) {
+			return fmt.Errorf("%w: err in node[%q].MarkReplicaLeaving: %w", ErrDispatchTimeout, leavingNodeID, err)
+		}
 		return fmt.Errorf("%w: err in node[%q].MarkReplicaLeaving: %v", ErrDispatchFailed, leavingNodeID, err)
 	}
 	s.pending[slotPlan.Slot] = PendingWork{
@@ -683,7 +723,12 @@ func (s *Server) resumeRecoveredReplica(
 	if !ok {
 		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
 	}
-	if err := client.ResumeRecoveredReplica(ctx, storage.ResumeRecoveredReplicaCommand{Assignment: assignment}); err != nil {
+	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
+	defer cancel()
+	if err := client.ResumeRecoveredReplica(dispatchCtx, storage.ResumeRecoveredReplicaCommand{Assignment: assignment}); err != nil {
+		if isContextTimeoutOrCancel(err) {
+			return fmt.Errorf("%w: err in node[%q].ResumeRecoveredReplica: %w", ErrDispatchTimeout, nodeID, err)
+		}
 		return fmt.Errorf("%w: err in node[%q].ResumeRecoveredReplica: %v", ErrRecoveryFailed, nodeID, err)
 	}
 	s.clearUnavailable(nodeID, assignment.Slot)
@@ -703,10 +748,15 @@ func (s *Server) recoverReplica(
 	if _, ok := s.nodes[sourceNodeID]; !ok {
 		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, sourceNodeID)
 	}
-	if err := client.RecoverReplica(ctx, storage.RecoverReplicaCommand{
+	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
+	defer cancel()
+	if err := client.RecoverReplica(dispatchCtx, storage.RecoverReplicaCommand{
 		Assignment:   assignment,
 		SourceNodeID: sourceNodeID,
 	}); err != nil {
+		if isContextTimeoutOrCancel(err) {
+			return fmt.Errorf("%w: err in node[%q].RecoverReplica: %w", ErrDispatchTimeout, nodeID, err)
+		}
 		return fmt.Errorf("%w: err in node[%q].RecoverReplica: %v", ErrRecoveryFailed, nodeID, err)
 	}
 	s.clearUnavailable(nodeID, assignment.Slot)
@@ -718,7 +768,12 @@ func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot i
 	if !ok {
 		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
 	}
-	if err := client.DropRecoveredReplica(ctx, storage.DropRecoveredReplicaCommand{Slot: slot}); err != nil {
+	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
+	defer cancel()
+	if err := client.DropRecoveredReplica(dispatchCtx, storage.DropRecoveredReplicaCommand{Slot: slot}); err != nil {
+		if isContextTimeoutOrCancel(err) {
+			return fmt.Errorf("%w: err in node[%q].DropRecoveredReplica: %w", ErrDispatchTimeout, nodeID, err)
+		}
 		return fmt.Errorf("%w: err in node[%q].DropRecoveredReplica: %v", ErrRecoveryFailed, nodeID, err)
 	}
 	s.clearUnavailable(nodeID, slot)
@@ -1147,7 +1202,29 @@ func validateServerConfig(cfg ServerConfig) error {
 		cfg.LivenessPolicy.DeadAfter < cfg.LivenessPolicy.SuspectAfter {
 		return fmt.Errorf("%w: dead timeout must be >= suspect timeout", ErrInvalidServerConfig)
 	}
+	if cfg.DispatchTimeout < 0 {
+		return fmt.Errorf("%w: dispatch timeout must be >= 0", ErrInvalidServerConfig)
+	}
+	if cfg.RecoveryCommandTimeout < 0 {
+		return fmt.Errorf("%w: recovery command timeout must be >= 0", ErrInvalidServerConfig)
+	}
 	return nil
+}
+
+func deriveDeadlineContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if time.Until(deadline) <= timeout {
+			return ctx, func() {}
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func isContextTimeoutOrCancel(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 type realClock struct{}

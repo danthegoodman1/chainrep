@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 )
 
 var (
@@ -20,11 +21,13 @@ var (
 	ErrProtocolConflict          = errors.New("storage replica protocol conflict")
 	ErrBufferedMessageLimit      = errors.New("storage buffered replica message limit exceeded")
 	ErrRoutingMismatch           = errors.New("storage routing mismatch")
+	ErrWriteTimeout              = errors.New("storage write wait timed out or was canceled")
 )
 
 type Config struct {
-	NodeID                           string
+	NodeID                            string
 	MaxBufferedReplicaMessagesPerSlot int
+	WriteCommitTimeout                time.Duration
 }
 
 type Snapshot map[string]string
@@ -292,7 +295,10 @@ type Node struct {
 	repl                             ReplicationTransport
 	replicas                         map[int]replicaRecord
 	maxBufferedReplicaMessagesPerSlot int
+	writeCommitTimeout               time.Duration
 }
+
+const defaultWriteCommitTimeout = 5 * time.Second
 
 func NewNode(cfg Config, backend Backend, coord CoordinatorClient, repl ReplicationTransport) (*Node, error) {
 	return OpenNode(cfg, backend, NewInMemoryLocalStateStore(), coord, repl)
@@ -310,6 +316,9 @@ func OpenNode(
 	}
 	if cfg.MaxBufferedReplicaMessagesPerSlot < 0 {
 		return nil, fmt.Errorf("%w: max buffered replica messages per slot must be >= 0", ErrInvalidConfig)
+	}
+	if cfg.WriteCommitTimeout < 0 {
+		return nil, fmt.Errorf("%w: write commit timeout must be >= 0", ErrInvalidConfig)
 	}
 	if backend == nil {
 		return nil, fmt.Errorf("%w: backend must not be nil", ErrInvalidConfig)
@@ -332,9 +341,13 @@ func OpenNode(
 		repl:                             repl,
 		replicas:                         make(map[int]replicaRecord),
 		maxBufferedReplicaMessagesPerSlot: cfg.MaxBufferedReplicaMessagesPerSlot,
+		writeCommitTimeout:               cfg.WriteCommitTimeout,
 	}
 	if node.maxBufferedReplicaMessagesPerSlot == 0 {
 		node.maxBufferedReplicaMessagesPerSlot = 64
+	}
+	if node.writeCommitTimeout == 0 {
+		node.writeCommitTimeout = defaultWriteCommitTimeout
 	}
 
 	persisted, err := node.local.LoadNode(context.Background(), cfg.NodeID)
@@ -1038,12 +1051,17 @@ func (n *Node) awaitWriteCompletion(ctx context.Context, slot int, sequence uint
 	if n.writeCommitted(slot, sequence) {
 		return nil
 	}
+	waitCtx, cancel := withDefaultTimeout(ctx, n.writeCommitTimeout)
+	defer cancel()
 	if waiter, ok := n.repl.(interface {
 		AwaitWriteCommit(ctx context.Context, check func() bool) error
 	}); ok {
-		if err := waiter.AwaitWriteCommit(ctx, func() bool {
+		if err := waiter.AwaitWriteCommit(waitCtx, func() bool {
 			return n.writeCommitted(slot, sequence)
 		}); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return fmt.Errorf("%w: err in repl.AwaitWriteCommit: %w", ErrWriteTimeout, err)
+			}
 			return fmt.Errorf("err in repl.AwaitWriteCommit: %w", err)
 		}
 	}
@@ -1056,6 +1074,18 @@ func (n *Node) awaitWriteCompletion(ctx context.Context, slot int, sequence uint
 		)
 	}
 	return nil
+}
+
+func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if time.Until(deadline) <= timeout {
+			return ctx, func() {}
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (n *Node) writeCommitted(slot int, sequence uint64) bool {

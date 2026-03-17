@@ -431,6 +431,11 @@ func (t *QueuedInMemoryReplicationTransport) CommitWrite(_ context.Context, toNo
 
 func (t *QueuedInMemoryReplicationTransport) AwaitWriteCommit(ctx context.Context, check func() bool) error {
 	for !check() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if len(t.queue) == 0 {
 			return fmt.Errorf("%w: replication queue drained before write completed", ErrStateMismatch)
 		}
