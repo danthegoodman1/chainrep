@@ -108,7 +108,12 @@ func TestDeadTransitionTriggersRepairAndDoesNotDuplicate(t *testing.T) {
 	if got, want := server.Liveness()["b"].State, coordruntime.NodeLivenessStateDead; got != want {
 		t.Fatalf("dead state = %q, want %q", got, want)
 	}
-	if got, want := server.Pending()[0], (PendingWork{Slot: 0, NodeID: "d", Kind: pendingKindReady}); !reflect.DeepEqual(got, want) {
+	if got, want := server.Pending()[0], (PendingWork{
+		Slot:        0,
+		NodeID:      "d",
+		Kind:        pendingKindReady,
+		SlotVersion: server.Current().SlotVersions[0],
+	}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("pending repair = %#v, want %#v", got, want)
 	}
 

@@ -152,6 +152,51 @@ func TestQueuedTransportWaitsForExplicitCommitAndPreservesStaging(t *testing.T) 
 	}
 }
 
+func TestQueuedTransportDuplicateMessagesStillConverge(t *testing.T) {
+	ctx := context.Background()
+	nodes, _, transport := setupActiveChainWithQueuedTransport(t, 9, []string{"head", "mid", "tail"})
+
+	var duplicatedForward bool
+	var duplicatedCommit bool
+	transport.SetBeforeDeliver(func(msg QueuedReplicationMessage) {
+		switch {
+		case msg.Forward != nil && msg.ToNodeID == "mid" && !duplicatedForward:
+			duplicatedForward = true
+			cloned := cloneForwardRequest(*msg.Forward)
+			transport.queue = append([]QueuedReplicationMessage{{
+				ToNodeID: msg.ToNodeID,
+				Forward:  &cloned,
+			}}, transport.queue...)
+		case msg.Commit != nil && msg.ToNodeID == "head" && !duplicatedCommit:
+			duplicatedCommit = true
+			cloned := cloneCommitRequest(*msg.Commit)
+			transport.queue = append([]QueuedReplicationMessage{{
+				ToNodeID: msg.ToNodeID,
+				Commit:   &cloned,
+			}}, transport.queue...)
+		}
+	})
+
+	result, err := nodes["head"].SubmitPut(ctx, 9, "k", "v")
+	if err != nil {
+		t.Fatalf("SubmitPut returned error: %v", err)
+	}
+	if got, want := result, (CommitResult{Slot: 9, Sequence: 1}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commit result = %#v, want %#v", got, want)
+	}
+	assertCommittedStateEqual(t, nodes, 9, Snapshot{"k": "v"}, 1)
+	if got, want := transport.Pending(), 1; got != want {
+		t.Fatalf("pending queued messages before duplicate drain = %d, want %d", got, want)
+	}
+	if err := transport.DeliverAll(ctx); err != nil {
+		t.Fatalf("DeliverAll returned error: %v", err)
+	}
+	assertCommittedStateEqual(t, nodes, 9, Snapshot{"k": "v"}, 1)
+	if got := transport.Pending(); got != 0 {
+		t.Fatalf("pending queued messages after duplicate drain = %d, want 0", got)
+	}
+}
+
 func TestQueuedTransportDropLeavesWriteStagedAndUncommitted(t *testing.T) {
 	ctx := context.Background()
 	nodes, _, transport := setupActiveChainWithQueuedTransport(t, 6, []string{"head", "tail"})
@@ -205,34 +250,28 @@ func TestPipelineStagesLaterWritesBeforeEarlierCommitAndCommitsInOrder(t *testin
 		t.Fatalf("staged sequences = %v, want %v", got, want)
 	}
 
-	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 2, FromNodeID: "tail"}); err == nil {
-		t.Fatal("HandleCommitWrite(seq=2) unexpectedly succeeded before seq=1")
-	} else if !errors.Is(err, ErrSequenceMismatch) {
-		t.Fatalf("error = %v, want sequence mismatch", err)
+	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 2, FromNodeID: "tail"}); err != nil {
+		t.Fatalf("HandleCommitWrite(seq=2) returned error: %v", err)
+	}
+	if got, want := mustBufferedCommitSequences(t, node, 5), []uint64{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("buffered commit sequences = %v, want %v", got, want)
 	}
 
 	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 1, FromNodeID: "tail"}); err != nil {
 		t.Fatalf("HandleCommitWrite(seq=1) returned error: %v", err)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k1": "v1"}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("committed snapshot after seq1 = %v, want %v", got, want)
-	}
-	if got, want := mustNodeStagedSequences(t, node, 5), []uint64{2}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("staged sequences after seq1 = %v, want %v", got, want)
-	}
-
-	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 2, FromNodeID: "tail"}); err != nil {
-		t.Fatalf("HandleCommitWrite(seq=2) returned error: %v", err)
-	}
 	if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k1": "v1", "k2": "v2"}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("committed snapshot after seq2 = %v, want %v", got, want)
+		t.Fatalf("committed snapshot after drained buffered commits = %v, want %v", got, want)
 	}
 	if got := mustNodeStagedSequences(t, node, 5); len(got) != 0 {
-		t.Fatalf("staged sequences after seq2 = %v, want empty", got)
+		t.Fatalf("staged sequences after drained buffered commits = %v, want empty", got)
+	}
+	if got := mustBufferedCommitSequences(t, node, 5); len(got) != 0 {
+		t.Fatalf("buffered commit sequences after seq1 = %v, want empty", got)
 	}
 }
 
-func TestOutOfOrderForwardAndCommitRequestsAreRejected(t *testing.T) {
+func TestOutOfOrderForwardAndCommitRequestsAreBufferedAndDrained(t *testing.T) {
 	ctx := context.Background()
 	transport := &scriptedTransport{}
 	backend := NewInMemoryBackend()
@@ -248,10 +287,11 @@ func TestOutOfOrderForwardAndCommitRequestsAreRejected(t *testing.T) {
 	if err := node.HandleForwardWrite(ctx, ForwardWriteRequest{
 		Operation:  WriteOperation{Slot: 5, Sequence: 2, Kind: OperationKindPut, Key: "k", Value: "v"},
 		FromNodeID: "head",
-	}); err == nil {
-		t.Fatal("HandleForwardWrite(seq=2) unexpectedly succeeded")
-	} else if !errors.Is(err, ErrSequenceMismatch) {
-		t.Fatalf("error = %v, want sequence mismatch", err)
+	}); err != nil {
+		t.Fatalf("HandleForwardWrite(seq=2) returned error: %v", err)
+	}
+	if got, want := mustBufferedForwardSequences(t, node, 5), []uint64{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("buffered forward sequences = %v, want %v", got, want)
 	}
 
 	if err := node.HandleForwardWrite(ctx, ForwardWriteRequest{
@@ -260,11 +300,199 @@ func TestOutOfOrderForwardAndCommitRequestsAreRejected(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("HandleForwardWrite(seq=1) returned error: %v", err)
 	}
-	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 2, FromNodeID: "tail"}); err == nil {
-		t.Fatal("HandleCommitWrite(seq=2) unexpectedly succeeded")
-	} else if !errors.Is(err, ErrSequenceMismatch) {
-		t.Fatalf("error = %v, want sequence mismatch", err)
+	if got, want := mustNodeStagedSequences(t, node, 5), []uint64{1, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged sequences after buffered forward drain = %v, want %v", got, want)
 	}
+	if got := mustBufferedForwardSequences(t, node, 5); len(got) != 0 {
+		t.Fatalf("buffered forward sequences after drain = %v, want empty", got)
+	}
+
+	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 2, FromNodeID: "tail"}); err != nil {
+		t.Fatalf("HandleCommitWrite(seq=2) returned error: %v", err)
+	}
+	if got, want := mustBufferedCommitSequences(t, node, 5), []uint64{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("buffered commit sequences = %v, want %v", got, want)
+	}
+	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 1, FromNodeID: "tail"}); err != nil {
+		t.Fatalf("HandleCommitWrite(seq=1) returned error: %v", err)
+	}
+	if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("committed snapshot after commit drain = %v, want %v", got, want)
+	}
+}
+
+func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("duplicate staged forward is idempotent and does not refanout", func(t *testing.T) {
+		transport := &scriptedTransport{}
+		backend := NewInMemoryBackend()
+		node := mustNewNode(t, Config{NodeID: "mid"}, backend, NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 5, ReplicaAssignment{
+			Slot:         5,
+			ChainVersion: 1,
+			Role:         ReplicaRoleMiddle,
+			Peers:        ChainPeers{PredecessorNodeID: "head", SuccessorNodeID: "tail"},
+		})
+		req := ForwardWriteRequest{
+			Operation:  WriteOperation{Slot: 5, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v"},
+			FromNodeID: "head",
+		}
+		if err := node.HandleForwardWrite(ctx, req); err != nil {
+			t.Fatalf("HandleForwardWrite returned error: %v", err)
+		}
+		if err := node.HandleForwardWrite(ctx, req); err != nil {
+			t.Fatalf("duplicate HandleForwardWrite returned error: %v", err)
+		}
+		if got, want := len(transport.forwards), 1; got != want {
+			t.Fatalf("downstream forward count = %d, want %d", got, want)
+		}
+		if got, want := mustNodeStagedSequences(t, node, 5), []uint64{1}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("staged sequences = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("duplicate committed forward is idempotent", func(t *testing.T) {
+		transport := &scriptedTransport{}
+		backend := NewInMemoryBackend()
+		node := mustNewNode(t, Config{NodeID: "tail"}, backend, NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 5, ReplicaAssignment{
+			Slot:         5,
+			ChainVersion: 1,
+			Role:         ReplicaRoleTail,
+			Peers:        ChainPeers{PredecessorNodeID: "head"},
+		})
+		req := ForwardWriteRequest{
+			Operation:  WriteOperation{Slot: 5, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v"},
+			FromNodeID: "head",
+		}
+		if err := node.HandleForwardWrite(ctx, req); err != nil {
+			t.Fatalf("HandleForwardWrite returned error: %v", err)
+		}
+		if err := node.HandleForwardWrite(ctx, req); err != nil {
+			t.Fatalf("duplicate HandleForwardWrite returned error: %v", err)
+		}
+		if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+			t.Fatalf("committed snapshot = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("conflicting duplicate forward is rejected", func(t *testing.T) {
+		transport := &scriptedTransport{}
+		backend := NewInMemoryBackend()
+		node := mustNewNode(t, Config{NodeID: "tail"}, backend, NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 5, ReplicaAssignment{
+			Slot:         5,
+			ChainVersion: 1,
+			Role:         ReplicaRoleTail,
+			Peers:        ChainPeers{PredecessorNodeID: "head"},
+		})
+		first := ForwardWriteRequest{
+			Operation:  WriteOperation{Slot: 5, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v1"},
+			FromNodeID: "head",
+		}
+		if err := node.HandleForwardWrite(ctx, first); err != nil {
+			t.Fatalf("HandleForwardWrite returned error: %v", err)
+		}
+		second := first
+		second.Operation.Value = "v2"
+		if err := node.HandleForwardWrite(ctx, second); err == nil {
+			t.Fatal("conflicting duplicate forward unexpectedly succeeded")
+		} else if !errors.Is(err, ErrProtocolConflict) {
+			t.Fatalf("error = %v, want protocol conflict", err)
+		}
+	})
+
+	t.Run("duplicate committed ack is idempotent", func(t *testing.T) {
+		nodes, _, _ := setupActiveChain(t, 5, []string{"head", "tail"})
+		if _, err := nodes["head"].SubmitPut(ctx, 5, "k", "v"); err != nil {
+			t.Fatalf("SubmitPut returned error: %v", err)
+		}
+		req := CommitWriteRequest{Slot: 5, Sequence: 1, FromNodeID: "tail"}
+		if err := nodes["head"].HandleCommitWrite(ctx, req); err != nil {
+			t.Fatalf("duplicate HandleCommitWrite returned error: %v", err)
+		}
+		if got, want := mustHighestCommitted(t, nodes["head"], 5), uint64(1); got != want {
+			t.Fatalf("highest committed = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("conflicting duplicate commit is rejected", func(t *testing.T) {
+		nodes, _, _ := setupActiveChain(t, 5, []string{"head", "tail"})
+		if _, err := nodes["head"].SubmitPut(ctx, 5, "k", "v"); err != nil {
+			t.Fatalf("SubmitPut returned error: %v", err)
+		}
+		if err := nodes["head"].HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 1, FromNodeID: "wrong"}); err == nil {
+			t.Fatal("conflicting duplicate commit unexpectedly succeeded")
+		} else if !errors.Is(err, ErrProtocolConflict) {
+			t.Fatalf("error = %v, want protocol conflict", err)
+		}
+	})
+
+	t.Run("buffer overflow rejects future messages", func(t *testing.T) {
+		transport := &scriptedTransport{}
+		backend := NewInMemoryBackend()
+		node := mustNewNode(t, Config{
+			NodeID:                           "mid",
+			MaxBufferedReplicaMessagesPerSlot: 1,
+		}, backend, NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 5, ReplicaAssignment{
+			Slot:         5,
+			ChainVersion: 1,
+			Role:         ReplicaRoleMiddle,
+			Peers:        ChainPeers{PredecessorNodeID: "head", SuccessorNodeID: "tail"},
+		})
+		if err := node.HandleForwardWrite(ctx, ForwardWriteRequest{
+			Operation:  WriteOperation{Slot: 5, Sequence: 2, Kind: OperationKindPut, Key: "k2", Value: "v2"},
+			FromNodeID: "head",
+		}); err != nil {
+			t.Fatalf("HandleForwardWrite(seq=2) returned error: %v", err)
+		}
+		if err := node.HandleCommitWrite(ctx, CommitWriteRequest{
+			Slot: 5, Sequence: 2, FromNodeID: "tail",
+		}); err == nil {
+			t.Fatal("HandleCommitWrite(seq=2) unexpectedly succeeded with full buffer")
+		} else if !errors.Is(err, ErrBufferedMessageLimit) {
+			t.Fatalf("error = %v, want buffered message limit", err)
+		}
+	})
+
+	t.Run("duplicates older than retained forward history are rejected", func(t *testing.T) {
+		transport := &scriptedTransport{}
+		backend := NewInMemoryBackend()
+		node := mustNewNode(t, Config{
+			NodeID:                            "tail",
+			MaxBufferedReplicaMessagesPerSlot: 1,
+		}, backend, NewInMemoryCoordinatorClient(), transport)
+		mustActivateReplica(t, node, 5, ReplicaAssignment{
+			Slot:         5,
+			ChainVersion: 1,
+			Role:         ReplicaRoleTail,
+			Peers:        ChainPeers{PredecessorNodeID: "head"},
+		})
+		for _, req := range []ForwardWriteRequest{
+			{
+				Operation:  WriteOperation{Slot: 5, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v1"},
+				FromNodeID: "head",
+			},
+			{
+				Operation:  WriteOperation{Slot: 5, Sequence: 2, Kind: OperationKindPut, Key: "k", Value: "v2"},
+				FromNodeID: "head",
+			},
+		} {
+			if err := node.HandleForwardWrite(ctx, req); err != nil {
+				t.Fatalf("HandleForwardWrite(seq=%d) returned error: %v", req.Operation.Sequence, err)
+			}
+		}
+		if err := node.HandleForwardWrite(ctx, ForwardWriteRequest{
+			Operation:  WriteOperation{Slot: 5, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v1"},
+			FromNodeID: "head",
+		}); err == nil {
+			t.Fatal("old duplicate HandleForwardWrite unexpectedly succeeded")
+		} else if !errors.Is(err, ErrSequenceMismatch) {
+			t.Fatalf("error = %v, want sequence mismatch", err)
+		}
+	})
 }
 
 func TestWriteValidationAndDownstreamFailure(t *testing.T) {
@@ -702,6 +930,24 @@ func mustNodeStagedSequences(t *testing.T, node *Node, slot int) []uint64 {
 	sequences, err := node.StagedSequences(slot)
 	if err != nil {
 		t.Fatalf("StagedSequences returned error: %v", err)
+	}
+	return sequences
+}
+
+func mustBufferedForwardSequences(t *testing.T, node *Node, slot int) []uint64 {
+	t.Helper()
+	sequences, err := node.BufferedForwardSequences(slot)
+	if err != nil {
+		t.Fatalf("BufferedForwardSequences returned error: %v", err)
+	}
+	return sequences
+}
+
+func mustBufferedCommitSequences(t *testing.T, node *Node, slot int) []uint64 {
+	t.Helper()
+	sequences, err := node.BufferedCommitSequences(slot)
+	if err != nil {
+		t.Fatalf("BufferedCommitSequences returned error: %v", err)
 	}
 	return sequences
 }

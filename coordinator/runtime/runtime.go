@@ -20,12 +20,26 @@ var (
 )
 
 type State struct {
-	Version         uint64
-	LastLogIndex    uint64
-	Cluster         coordinator.ClusterState
-	SlotVersions    map[int]uint64
+	Version          uint64
+	LastLogIndex     uint64
+	Cluster          coordinator.ClusterState
+	SlotVersions     map[int]uint64
+	CompletedProgressBySlot map[int][]CompletedProgressRecord
 	NodeLivenessByID map[string]NodeLivenessRecord
-	AppliedCommands map[string]AppliedCommand
+	AppliedCommands  map[string]AppliedCommand
+}
+
+type CompletedProgressKind string
+
+const (
+	CompletedProgressKindReady   CompletedProgressKind = "ready"
+	CompletedProgressKindRemoved CompletedProgressKind = "removed"
+)
+
+type CompletedProgressRecord struct {
+	NodeID      string
+	Kind        CompletedProgressKind
+	SlotVersion uint64
 }
 
 type NodeLivenessState string
@@ -44,13 +58,14 @@ type NodeLivenessRecord struct {
 }
 
 type AppliedCommand struct {
-	Command      Command
-	Version      uint64
-	LastLogIndex uint64
-	Cluster      coordinator.ClusterState
-	SlotVersions map[int]uint64
-	NodeLivenessByID map[string]NodeLivenessRecord
-	Plan         *coordinator.ReconfigurationPlan
+	Command                Command
+	Version                uint64
+	LastLogIndex           uint64
+	Cluster                coordinator.ClusterState
+	SlotVersions           map[int]uint64
+	CompletedProgressBySlot map[int][]CompletedProgressRecord
+	NodeLivenessByID       map[string]NodeLivenessRecord
+	Plan                   *coordinator.ReconfigurationPlan
 }
 
 type CommandKind string
@@ -458,30 +473,33 @@ func (r *Runtime) nextStateForApplied(
 	next.LastLogIndex = logIndex
 	next.Cluster = cloneClusterState(cluster)
 	next.SlotVersions = nextSlotVersions(next.SlotVersions, next.Version, cmd.Kind, cluster, plan)
+	next.CompletedProgressBySlot = nextCompletedProgress(next.CompletedProgressBySlot, next.SlotVersions, cmd)
 	next.NodeLivenessByID = nextNodeLiveness(next.NodeLivenessByID, cmd)
 	if next.AppliedCommands == nil {
 		next.AppliedCommands = make(map[string]AppliedCommand)
 	}
 	next.AppliedCommands[cmd.ID] = AppliedCommand{
-		Command:      cloneCommand(cmd),
-		Version:      next.Version,
-		LastLogIndex: logIndex,
-		Cluster:      cloneClusterState(cluster),
-		SlotVersions: cloneSlotVersions(next.SlotVersions),
-		NodeLivenessByID: cloneNodeLivenessMap(next.NodeLivenessByID),
-		Plan:         clonePlan(plan),
+		Command:                 cloneCommand(cmd),
+		Version:                 next.Version,
+		LastLogIndex:            logIndex,
+		Cluster:                 cloneClusterState(cluster),
+		SlotVersions:            cloneSlotVersions(next.SlotVersions),
+		CompletedProgressBySlot: cloneCompletedProgressMap(next.CompletedProgressBySlot),
+		NodeLivenessByID:        cloneNodeLivenessMap(next.NodeLivenessByID),
+		Plan:                    clonePlan(plan),
 	}
 	return next
 }
 
 func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 	snapshot := State{
-		Version:         applied.Version,
-		LastLogIndex:    applied.LastLogIndex,
-		Cluster:         cloneClusterState(applied.Cluster),
-		SlotVersions:    cloneSlotVersions(applied.SlotVersions),
+		Version:                applied.Version,
+		LastLogIndex:           applied.LastLogIndex,
+		Cluster:                cloneClusterState(applied.Cluster),
+		SlotVersions:           cloneSlotVersions(applied.SlotVersions),
+		CompletedProgressBySlot: cloneCompletedProgressMap(applied.CompletedProgressBySlot),
 		NodeLivenessByID: cloneNodeLivenessMap(applied.NodeLivenessByID),
-		AppliedCommands: make(map[string]AppliedCommand),
+		AppliedCommands:        make(map[string]AppliedCommand),
 	}
 	for id, existing := range r.state.AppliedCommands {
 		if existing.Version <= applied.Version {
@@ -493,9 +511,10 @@ func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 
 func zeroState() State {
 	return State{
-		SlotVersions:      map[int]uint64{},
-		NodeLivenessByID:  map[string]NodeLivenessRecord{},
-		AppliedCommands:   map[string]AppliedCommand{},
+		SlotVersions:            map[int]uint64{},
+		CompletedProgressBySlot: map[int][]CompletedProgressRecord{},
+		NodeLivenessByID:        map[string]NodeLivenessRecord{},
+		AppliedCommands:         map[string]AppliedCommand{},
 	}
 }
 
@@ -505,12 +524,13 @@ func isInitialized(state State) bool {
 
 func cloneState(state State) State {
 	cloned := State{
-		Version:         state.Version,
-		LastLogIndex:    state.LastLogIndex,
-		Cluster:         cloneClusterState(state.Cluster),
-		SlotVersions:    cloneSlotVersions(state.SlotVersions),
+		Version:                state.Version,
+		LastLogIndex:           state.LastLogIndex,
+		Cluster:                cloneClusterState(state.Cluster),
+		SlotVersions:           cloneSlotVersions(state.SlotVersions),
+		CompletedProgressBySlot: cloneCompletedProgressMap(state.CompletedProgressBySlot),
 		NodeLivenessByID: cloneNodeLivenessMap(state.NodeLivenessByID),
-		AppliedCommands: make(map[string]AppliedCommand, len(state.AppliedCommands)),
+		AppliedCommands:        make(map[string]AppliedCommand, len(state.AppliedCommands)),
 	}
 	for id, applied := range state.AppliedCommands {
 		cloned.AppliedCommands[id] = cloneAppliedCommand(applied)
@@ -520,13 +540,14 @@ func cloneState(state State) State {
 
 func cloneAppliedCommand(applied AppliedCommand) AppliedCommand {
 	return AppliedCommand{
-		Command:      cloneCommand(applied.Command),
-		Version:      applied.Version,
-		LastLogIndex: applied.LastLogIndex,
-		Cluster:      cloneClusterState(applied.Cluster),
-		SlotVersions: cloneSlotVersions(applied.SlotVersions),
-		NodeLivenessByID: cloneNodeLivenessMap(applied.NodeLivenessByID),
-		Plan:         clonePlan(applied.Plan),
+		Command:                 cloneCommand(applied.Command),
+		Version:                 applied.Version,
+		LastLogIndex:            applied.LastLogIndex,
+		Cluster:                 cloneClusterState(applied.Cluster),
+		SlotVersions:            cloneSlotVersions(applied.SlotVersions),
+		CompletedProgressBySlot: cloneCompletedProgressMap(applied.CompletedProgressBySlot),
+		NodeLivenessByID:        cloneNodeLivenessMap(applied.NodeLivenessByID),
+		Plan:                    clonePlan(applied.Plan),
 	}
 }
 
@@ -559,6 +580,49 @@ func cloneSlotVersions(slotVersions map[int]uint64) map[int]uint64 {
 	cloned := make(map[int]uint64, len(slotVersions))
 	for slot, version := range slotVersions {
 		cloned[slot] = version
+	}
+	return cloned
+}
+
+const completedProgressHistoryLimit = 8
+
+func nextCompletedProgress(
+	current map[int][]CompletedProgressRecord,
+	slotVersions map[int]uint64,
+	cmd Command,
+) map[int][]CompletedProgressRecord {
+	next := cloneCompletedProgressMap(current)
+	if cmd.Kind != CommandKindProgress || cmd.Progress == nil {
+		return next
+	}
+
+	var kind CompletedProgressKind
+	switch cmd.Progress.Event.Kind {
+	case coordinator.EventKindReplicaBecameActive:
+		kind = CompletedProgressKindReady
+	case coordinator.EventKindReplicaRemoved:
+		kind = CompletedProgressKindRemoved
+	default:
+		return next
+	}
+
+	slot := cmd.Progress.Event.Slot
+	record := CompletedProgressRecord{
+		NodeID:      cmd.Progress.Event.NodeID,
+		Kind:        kind,
+		SlotVersion: slotVersions[slot],
+	}
+	next[slot] = append(next[slot], record)
+	if len(next[slot]) > completedProgressHistoryLimit {
+		next[slot] = append([]CompletedProgressRecord(nil), next[slot][len(next[slot])-completedProgressHistoryLimit:]...)
+	}
+	return next
+}
+
+func cloneCompletedProgressMap(current map[int][]CompletedProgressRecord) map[int][]CompletedProgressRecord {
+	cloned := make(map[int][]CompletedProgressRecord, len(current))
+	for slot, records := range current {
+		cloned[slot] = append([]CompletedProgressRecord(nil), records...)
 	}
 	return cloned
 }

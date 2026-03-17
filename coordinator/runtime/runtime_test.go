@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -395,7 +396,55 @@ func TestReconfigureAndApplyProgressPersistAndRecover(t *testing.T) {
 	if got := reopened.Current(); !reflect.DeepEqual(got, state) {
 		t.Fatalf("recovered state mismatch\nrecovered=%#v\nwant=%#v", got, state)
 	}
+	records := reopened.Current().CompletedProgressBySlot[slot]
+	if got, want := len(records), 1; got != want {
+		t.Fatalf("completed progress record count = %d, want %d", got, want)
+	}
+	if got, want := records[0], (CompletedProgressRecord{
+		NodeID:      joiningNode,
+		Kind:        CompletedProgressKindReady,
+		SlotVersion: reopened.Current().SlotVersions[slot],
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("completed progress record = %#v, want %#v", got, want)
+	}
 	assertCoordinatorStateValid(t, reopened.Current().Cluster)
+}
+
+func TestCompletedProgressHistoryPrunesToBoundedWindow(t *testing.T) {
+	current := map[int][]CompletedProgressRecord{}
+	slotVersions := map[int]uint64{7: 0}
+	for i := 1; i <= completedProgressHistoryLimit+2; i++ {
+		slotVersions[7] = uint64(i)
+		current = nextCompletedProgress(current, slotVersions, Command{
+			Kind: CommandKindProgress,
+			Progress: &ProgressCommand{
+				Event: coordinator.Event{
+					Kind:   coordinator.EventKindReplicaBecameActive,
+					Slot:   7,
+					NodeID: fmt.Sprintf("node-%d", i),
+				},
+			},
+		})
+	}
+
+	records := current[7]
+	if got, want := len(records), completedProgressHistoryLimit; got != want {
+		t.Fatalf("completed progress history length = %d, want %d", got, want)
+	}
+	if got, want := records[0], (CompletedProgressRecord{
+		NodeID:      "node-3",
+		Kind:        CompletedProgressKindReady,
+		SlotVersion: 3,
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oldest retained record = %#v, want %#v", got, want)
+	}
+	if got, want := records[len(records)-1], (CompletedProgressRecord{
+		NodeID:      "node-10",
+		Kind:        CompletedProgressKindReady,
+		SlotVersion: 10,
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("newest retained record = %#v, want %#v", got, want)
+	}
 }
 
 func TestCheckpointPrunesAppliedCommandsAndPreservesRecovery(t *testing.T) {

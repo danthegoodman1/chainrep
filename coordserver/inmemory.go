@@ -69,6 +69,24 @@ func (a *InMemoryNodeAdapter) PendingProgress() int {
 	return len(a.progressQueue)
 }
 
+func (a *InMemoryNodeAdapter) DuplicateProgressAt(index int) error {
+	if index < 0 || index >= len(a.progressQueue) {
+		return fmt.Errorf("%w: progress queue index %d", ErrStateMismatch, index)
+	}
+	a.progressQueue = append(a.progressQueue, cloneQueuedProgressReport(a.progressQueue[index]))
+	return nil
+}
+
+func (a *InMemoryNodeAdapter) MoveProgressToFront(index int) error {
+	if index < 0 || index >= len(a.progressQueue) {
+		return fmt.Errorf("%w: progress queue index %d", ErrStateMismatch, index)
+	}
+	report := a.progressQueue[index]
+	copy(a.progressQueue[1:index+1], a.progressQueue[0:index])
+	a.progressQueue[0] = report
+	return nil
+}
+
 func (a *InMemoryNodeAdapter) DeliverNextProgress(ctx context.Context) error {
 	if len(a.progressQueue) == 0 || a.sink == nil {
 		return nil
@@ -98,6 +116,21 @@ func (a *InMemoryNodeAdapter) DeliverAllProgress(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func cloneQueuedProgressReport(report queuedProgressReport) queuedProgressReport {
+	cloned := queuedProgressReport{
+		kind:   report.kind,
+		slot:   report.slot,
+		status: report.status,
+	}
+	if report.kind == queuedProgressReportRecovered {
+		cloned.recovery = storage.NodeRecoveryReport{
+			NodeID:   report.recovery.NodeID,
+			Replicas: append([]storage.RecoveredReplica(nil), report.recovery.Replicas...),
+		}
+	}
+	return cloned
 }
 
 func (a *InMemoryNodeAdapter) Node() *storage.Node {

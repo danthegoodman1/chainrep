@@ -445,8 +445,40 @@ func (t *QueuedInMemoryReplicationTransport) Pending() int {
 	return len(t.queue)
 }
 
+func (t *QueuedInMemoryReplicationTransport) PendingMessages() []QueuedReplicationMessage {
+	return append([]QueuedReplicationMessage(nil), t.queue...)
+}
+
 func (t *QueuedInMemoryReplicationTransport) DropNext() {
 	t.dropNextWrite = true
+}
+
+func (t *QueuedInMemoryReplicationTransport) DuplicateAt(index int) error {
+	if index < 0 || index >= len(t.queue) {
+		return fmt.Errorf("%w: queued message index %d", ErrStateMismatch, index)
+	}
+	msg := t.queue[index]
+	dup := QueuedReplicationMessage{ToNodeID: msg.ToNodeID}
+	if msg.Forward != nil {
+		cloned := cloneForwardRequest(*msg.Forward)
+		dup.Forward = &cloned
+	}
+	if msg.Commit != nil {
+		cloned := cloneCommitRequest(*msg.Commit)
+		dup.Commit = &cloned
+	}
+	t.queue = append(t.queue, dup)
+	return nil
+}
+
+func (t *QueuedInMemoryReplicationTransport) MoveToFront(index int) error {
+	if index < 0 || index >= len(t.queue) {
+		return fmt.Errorf("%w: queued message index %d", ErrStateMismatch, index)
+	}
+	msg := t.queue[index]
+	copy(t.queue[1:index+1], t.queue[0:index])
+	t.queue[0] = msg
+	return nil
 }
 
 func (t *QueuedInMemoryReplicationTransport) SetBeforeDeliver(hook func(QueuedReplicationMessage)) {
