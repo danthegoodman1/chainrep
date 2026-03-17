@@ -4,6 +4,7 @@
 - [x] Build deterministic coordinator reconfiguration and recovery planning.
 - [x] Add coordinator spec, hardening, simulation, and benchmark coverage.
 - [x] Add durable coordinator runtime with WAL, checkpointing, and recovery.
+- [ ] Add coordinator high-availability and failover semantics, including leader election or single-writer failover around the durable coordinator runtime. Can do similar to https://github.com/danthegoodman1/pg_lease where multiple replicas check if they can take the lease
 - [x] Define the storage node API and state model.
 - [x] Add a coordinator transport interface for control-plane communication.
 - [x] Add a storage replication transport interface for node-to-node communication.
