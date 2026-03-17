@@ -250,7 +250,7 @@ func seedServerBootstrap(
 	}
 	for _, chain := range state.Chains {
 		for _, replica := range chain.Replicas {
-			assignment, err := assignmentForNode(chain, replica.NodeID, 1)
+			assignment, err := assignmentForNode(chain, state.NodesByID, replica.NodeID, 1)
 			if err != nil {
 				t.Fatalf("assignmentForNode returned error: %v", err)
 			}

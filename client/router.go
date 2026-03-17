@@ -106,7 +106,7 @@ func (r *Router) getWithSnapshot(
 	if !route.Readable || route.TailNodeID == "" {
 		return storage.ReadResult{}, fmt.Errorf("%w: slot %d is not readable", ErrNoRoute, route.Slot)
 	}
-	result, err := r.transport.Get(ctx, route.TailNodeID, storage.ClientGetRequest{
+	result, err := r.transport.Get(ctx, routeTarget(route.TailEndpoint, route.TailNodeID), storage.ClientGetRequest{
 		Slot:                 route.Slot,
 		Key:                  key,
 		ExpectedChainVersion: route.ChainVersion,
@@ -137,7 +137,7 @@ func (r *Router) putWithSnapshot(
 	if !route.Writable || route.HeadNodeID == "" {
 		return storage.CommitResult{}, fmt.Errorf("%w: slot %d is not writable", ErrNoRoute, route.Slot)
 	}
-	result, err := r.transport.Put(ctx, route.HeadNodeID, storage.ClientPutRequest{
+	result, err := r.transport.Put(ctx, routeTarget(route.HeadEndpoint, route.HeadNodeID), storage.ClientPutRequest{
 		Slot:                 route.Slot,
 		Key:                  key,
 		Value:                value,
@@ -168,7 +168,7 @@ func (r *Router) deleteWithSnapshot(
 	if !route.Writable || route.HeadNodeID == "" {
 		return storage.CommitResult{}, fmt.Errorf("%w: slot %d is not writable", ErrNoRoute, route.Slot)
 	}
-	result, err := r.transport.Delete(ctx, route.HeadNodeID, storage.ClientDeleteRequest{
+	result, err := r.transport.Delete(ctx, routeTarget(route.HeadEndpoint, route.HeadNodeID), storage.ClientDeleteRequest{
 		Slot:                 route.Slot,
 		Key:                  key,
 		ExpectedChainVersion: route.ChainVersion,
@@ -199,6 +199,13 @@ func routeForKey(snapshot *coordserver.RoutingSnapshot, key string) (coordserver
 func isRoutingMismatch(err error) bool {
 	var mismatch *storage.RoutingMismatchError
 	return errors.As(err, &mismatch)
+}
+
+func routeTarget(endpoint string, fallbackNodeID string) string {
+	if endpoint != "" {
+		return endpoint
+	}
+	return fallbackNodeID
 }
 
 func cloneSnapshot(snapshot coordserver.RoutingSnapshot) coordserver.RoutingSnapshot {

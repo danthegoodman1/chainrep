@@ -144,6 +144,7 @@ Methods:
 
 - read-only snapshot of current slot routes for clients
 - exposes per-slot chain version plus the current active head and tail
+- includes concrete head/tail RPC endpoints so clients can talk directly to storage nodes without a separate directory lookup
 - marks a slot non-writable while a `joining` replica exists, because the current implementation does not stream live writes into catching-up replicas
 
 ### In `client`
@@ -171,7 +172,7 @@ Each hosted replica has:
 
 - a slot
 - chain metadata
-- predecessor/successor information
+- predecessor/successor information, including the transport target distributed by the coordinator
 - a local lifecycle state
 
 Current replica lifecycle states:
@@ -184,6 +185,17 @@ Current replica lifecycle states:
 - `removed`
 
 ## Current Integration Flow
+
+## Current Network Transport
+
+The repository now has a real gRPC transport layer in addition to the in-memory reference transports.
+
+- one coordinator gRPC server hosts routing snapshot, admin membership RPCs, liveness evaluation, and storage-node progress/report callbacks
+- one storage-node gRPC server hosts client data RPCs, coordinator-issued lifecycle commands, and replica replication RPCs
+- storage-node RPC endpoints are part of coordinator node metadata and are treated as the transport target for that node
+- routing snapshots expose concrete head/tail endpoints directly
+- catch-up snapshot transfer uses streaming gRPC rather than one large unary response
+- typed storage-domain errors such as routing mismatch, ambiguous write, and backpressure are preserved across gRPC boundaries with structured status details
 
 ### Tail add / join
 
@@ -240,14 +252,17 @@ The code now has the core interfaces plus:
 
 - in-memory reference implementations
 - a local durable Pebble-backed storage backend and local metadata store
+- a real gRPC transport layer for coordinator, storage-node, replication, and client traffic
 
 It still does not yet have:
 
-- a real network transport
+- transport security
+- coordinator HA/failover
+- broader observability and ops surfaces
 
 So the current shape is:
 
 - coordinator decides
 - storage executes
 - clients route using coordinator snapshots
-- interfaces sit between them so tests can run entirely in memory and production transports can be added later
+- the same interfaces can run either entirely in memory or over real gRPC depending on the harness or deployment

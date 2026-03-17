@@ -13,7 +13,7 @@
 - [x] Add a durable or interface-stabilized local storage backend beyond the in-memory KV model.
 - [x] Add the coordinator server that issues storage-node commands and consumes storage-node progress.
 - [x] Add node liveness detection and heartbeat-driven reconfiguration policy, including suspect/dead timeouts and automatic coordinator actions.
-- [ ] Add real network transports for coordinator control-plane traffic and storage-node replication traffic.
+- [x] Add real network transports for coordinator control-plane traffic and storage-node replication traffic.
 - [x] Audit and harden behavior that currently assumes synchronous in-memory transport delivery, especially dispatch ordering, progress timing, and write ack propagation.
 - [x] Implement storage-node persistence and restart/recovery semantics.
 - [x] Implement the steady-state chain replication protocol between storage nodes.
@@ -23,6 +23,7 @@
 - [x] Add timeout/cancellation enforcement for externally-coupled operations, especially head write commit waiting and coordinator-to-storage command dispatch.
 - [x] Remove internal context.Background persistence calls in storage and thread caller/context-derived deadlines through local metadata and recovery paths.
 - [ ] Add observability and ops surfaces: metrics, structured logs, health/admin endpoints, and repair visibility.
+- [ ] Add transport security for client/control/data-plane RPCs: TLS or mTLS, authentication/authorization, and certificate rotation/trust management.
 - [x] Add backpressure and resource controls for replication, catch-up, and client write paths.
 - [x] Add fault-injected async transport tests for delay, drop, duplicate, and reorder behavior.
 - [x] Define and test crash-consistency guarantees for the durable storage backend and local metadata store.

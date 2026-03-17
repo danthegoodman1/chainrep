@@ -1,0 +1,354 @@
+package grpcx
+
+import (
+	"context"
+	"errors"
+	"net"
+
+	"github.com/danthegoodman1/chainrep/coordinator"
+	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
+	"github.com/danthegoodman1/chainrep/coordserver"
+	"github.com/danthegoodman1/chainrep/storage"
+	grpcproto "github.com/danthegoodman1/chainrep/proto/chainrep/v1"
+	"google.golang.org/grpc"
+)
+
+type CoordinatorGRPCServer struct {
+	grpcproto.UnimplementedCoordinatorServiceServer
+	server *coordserver.Server
+	grpc   *grpc.Server
+	lis    net.Listener
+}
+
+func NewCoordinatorGRPCServer(server *coordserver.Server) *CoordinatorGRPCServer {
+	s := &CoordinatorGRPCServer{
+		server: server,
+		grpc:   grpc.NewServer(),
+	}
+	grpcproto.RegisterCoordinatorServiceServer(s.grpc, s)
+	return s
+}
+
+func (s *CoordinatorGRPCServer) Serve(lis net.Listener) error {
+	s.lis = lis
+	return s.grpc.Serve(lis)
+}
+
+func (s *CoordinatorGRPCServer) Close() error {
+	if s.grpc != nil {
+		s.grpc.Stop()
+	}
+	if s.lis != nil {
+		return s.lis.Close()
+	}
+	return nil
+}
+
+func (s *CoordinatorGRPCServer) Bootstrap(ctx context.Context, req *grpcproto.BootstrapRequest) (*grpcproto.ServerState, error) {
+	nodes := make([]coordinator.Node, 0, len(req.Nodes))
+	for _, node := range req.Nodes {
+		nodes = append(nodes, fromProtoNode(node))
+	}
+	state, err := s.server.Bootstrap(ctx, coordruntime.Command{
+		ID:              req.CommandId,
+		ExpectedVersion: req.ExpectedVersion,
+		Kind:            coordruntime.CommandKindBootstrap,
+		Bootstrap: &coordruntime.BootstrapCommand{
+			Config: coordinator.Config{
+				SlotCount:         int(req.SlotCount),
+				ReplicationFactor: int(req.ReplicationFactor),
+			},
+			Nodes: nodes,
+		},
+	})
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoServerState(state), nil
+}
+
+func (s *CoordinatorGRPCServer) AddNode(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
+	return s.applyMembership(ctx, coordinator.EventKindAddNode, req)
+}
+
+func (s *CoordinatorGRPCServer) BeginDrainNode(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
+	return s.applyMembership(ctx, coordinator.EventKindBeginDrainNode, req)
+}
+
+func (s *CoordinatorGRPCServer) MarkNodeDead(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
+	return s.applyMembership(ctx, coordinator.EventKindMarkNodeDead, req)
+}
+
+func (s *CoordinatorGRPCServer) applyMembership(
+	ctx context.Context,
+	kind coordinator.EventKind,
+	req *grpcproto.MembershipMutationRequest,
+) (*grpcproto.ServerState, error) {
+	state, err := mapMembershipMethod(kind, s.server, ctx, coordruntime.Command{
+		ID:              req.CommandId,
+		ExpectedVersion: req.ExpectedVersion,
+		Kind:            coordruntime.CommandKindReconfigure,
+		Reconfigure: &coordruntime.ReconfigureCommand{
+			Policy: coordinator.ReconfigurationPolicy{
+				MaxChangedChains: int(req.MaxChangedChains),
+			},
+			Events: []coordinator.Event{{
+				Kind:   kind,
+				Node:   fromProtoNode(req.Node),
+				NodeID: req.NodeId,
+			}},
+		},
+	})
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoServerState(state), nil
+}
+
+func mapMembershipMethod(
+	kind coordinator.EventKind,
+	server *coordserver.Server,
+	ctx context.Context,
+	cmd coordruntime.Command,
+) (coordruntime.State, error) {
+	switch kind {
+	case coordinator.EventKindAddNode:
+		return server.AddNode(ctx, cmd)
+	case coordinator.EventKindBeginDrainNode:
+		return server.BeginDrainNode(ctx, cmd)
+	case coordinator.EventKindMarkNodeDead:
+		return server.MarkNodeDead(ctx, cmd)
+	default:
+		return coordruntime.State{}, errors.New("unsupported membership method")
+	}
+}
+
+func (s *CoordinatorGRPCServer) RoutingSnapshot(ctx context.Context, _ *grpcproto.RoutingSnapshotRequest) (*grpcproto.RoutingSnapshotResponse, error) {
+	snapshot, err := s.server.RoutingSnapshot(ctx)
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoRoutingSnapshot(snapshot), nil
+}
+
+func (s *CoordinatorGRPCServer) ReportReplicaReady(ctx context.Context, req *grpcproto.ReplicaReadyReport) (*grpcproto.ServerState, error) {
+	state, err := s.server.ReportReplicaReady(ctx, req.NodeId, int(req.Slot), req.CommandId)
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoServerState(state), nil
+}
+
+func (s *CoordinatorGRPCServer) ReportReplicaRemoved(ctx context.Context, req *grpcproto.ReplicaRemovedReport) (*grpcproto.ServerState, error) {
+	state, err := s.server.ReportReplicaRemoved(ctx, req.NodeId, int(req.Slot), req.CommandId)
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoServerState(state), nil
+}
+
+func (s *CoordinatorGRPCServer) ReportNodeHeartbeat(ctx context.Context, req *grpcproto.NodeStatus) (*grpcproto.Empty, error) {
+	if err := s.server.ReportNodeHeartbeat(ctx, fromProtoNodeStatus(req)); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *CoordinatorGRPCServer) ReportNodeRecovered(ctx context.Context, req *grpcproto.NodeRecoveryReport) (*grpcproto.Empty, error) {
+	if err := s.server.ReportNodeRecovered(ctx, fromProtoNodeRecovery(req)); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *CoordinatorGRPCServer) EvaluateLiveness(ctx context.Context, _ *grpcproto.Empty) (*grpcproto.ServerState, error) {
+	if err := s.server.EvaluateLiveness(ctx); err != nil {
+		return nil, encodeError(err)
+	}
+	return protoServerState(s.server.Current()), nil
+}
+
+type StorageGRPCServer struct {
+	grpcproto.UnimplementedStorageServiceServer
+	node *storage.Node
+	grpc *grpc.Server
+	lis  net.Listener
+}
+
+func NewStorageGRPCServer(node *storage.Node) *StorageGRPCServer {
+	s := &StorageGRPCServer{
+		node: node,
+		grpc: grpc.NewServer(),
+	}
+	grpcproto.RegisterStorageServiceServer(s.grpc, s)
+	return s
+}
+
+func (s *StorageGRPCServer) Serve(lis net.Listener) error {
+	s.lis = lis
+	return s.grpc.Serve(lis)
+}
+
+func (s *StorageGRPCServer) Close() error {
+	if s.grpc != nil {
+		s.grpc.Stop()
+	}
+	if s.lis != nil {
+		return s.lis.Close()
+	}
+	return nil
+}
+
+func (s *StorageGRPCServer) Get(ctx context.Context, req *grpcproto.ClientGetRequest) (*grpcproto.ReadResult, error) {
+	result, err := s.node.HandleClientGet(ctx, storage.ClientGetRequest{
+		Slot:                 int(req.Slot),
+		Key:                  req.Key,
+		ExpectedChainVersion: req.ExpectedChainVersion,
+	})
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoReadResult(result), nil
+}
+
+func (s *StorageGRPCServer) Put(ctx context.Context, req *grpcproto.ClientPutRequest) (*grpcproto.CommitResult, error) {
+	result, err := s.node.HandleClientPut(ctx, storage.ClientPutRequest{
+		Slot:                 int(req.Slot),
+		Key:                  req.Key,
+		Value:                req.Value,
+		ExpectedChainVersion: req.ExpectedChainVersion,
+	})
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoCommitResult(result), nil
+}
+
+func (s *StorageGRPCServer) Delete(ctx context.Context, req *grpcproto.ClientDeleteRequest) (*grpcproto.CommitResult, error) {
+	result, err := s.node.HandleClientDelete(ctx, storage.ClientDeleteRequest{
+		Slot:                 int(req.Slot),
+		Key:                  req.Key,
+		ExpectedChainVersion: req.ExpectedChainVersion,
+	})
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoCommitResult(result), nil
+}
+
+func (s *StorageGRPCServer) AddReplicaAsTail(ctx context.Context, req *grpcproto.AddReplicaAsTailCommand) (*grpcproto.Empty, error) {
+	if err := s.node.AddReplicaAsTail(ctx, storage.AddReplicaAsTailCommand{Assignment: fromProtoAssignment(req.Assignment)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) ActivateReplica(ctx context.Context, req *grpcproto.ActivateReplicaCommand) (*grpcproto.Empty, error) {
+	if err := s.node.ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: int(req.Slot)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) MarkReplicaLeaving(ctx context.Context, req *grpcproto.MarkReplicaLeavingCommand) (*grpcproto.Empty, error) {
+	if err := s.node.MarkReplicaLeaving(ctx, storage.MarkReplicaLeavingCommand{Slot: int(req.Slot)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) RemoveReplica(ctx context.Context, req *grpcproto.RemoveReplicaCommand) (*grpcproto.Empty, error) {
+	if err := s.node.RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: int(req.Slot)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) UpdateChainPeers(ctx context.Context, req *grpcproto.UpdateChainPeersCommand) (*grpcproto.Empty, error) {
+	if err := s.node.UpdateChainPeers(ctx, storage.UpdateChainPeersCommand{Assignment: fromProtoAssignment(req.Assignment)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) ResumeRecoveredReplica(ctx context.Context, req *grpcproto.ResumeRecoveredReplicaCommand) (*grpcproto.Empty, error) {
+	if err := s.node.ResumeRecoveredReplica(ctx, storage.ResumeRecoveredReplicaCommand{Assignment: fromProtoAssignment(req.Assignment)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) RecoverReplica(ctx context.Context, req *grpcproto.RecoverReplicaCommand) (*grpcproto.Empty, error) {
+	if err := s.node.RecoverReplica(ctx, storage.RecoverReplicaCommand{
+		Assignment:   fromProtoAssignment(req.Assignment),
+		SourceNodeID: req.SourceNodeId,
+	}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) DropRecoveredReplica(ctx context.Context, req *grpcproto.DropRecoveredReplicaCommand) (*grpcproto.Empty, error) {
+	if err := s.node.DropRecoveredReplica(ctx, storage.DropRecoveredReplicaCommand{Slot: int(req.Slot)}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) ForwardWrite(ctx context.Context, req *grpcproto.ForwardWriteRequest) (*grpcproto.Empty, error) {
+	if err := s.node.HandleForwardWrite(ctx, storage.ForwardWriteRequest{
+		Operation: storage.WriteOperation{
+			Slot:     int(req.Operation.Slot),
+			Sequence: req.Operation.Sequence,
+			Kind:     storage.OperationKind(req.Operation.Kind),
+			Key:      req.Operation.Key,
+			Value:    req.Operation.Value,
+		},
+		FromNodeID: req.FromNodeId,
+	}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) CommitWrite(ctx context.Context, req *grpcproto.CommitWriteRequest) (*grpcproto.Empty, error) {
+	if err := s.node.HandleCommitWrite(ctx, storage.CommitWriteRequest{
+		Slot:       int(req.Slot),
+		Sequence:   req.Sequence,
+		FromNodeID: req.FromNodeId,
+	}); err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.Empty{}, nil
+}
+
+func (s *StorageGRPCServer) FetchSnapshot(req *grpcproto.FetchSnapshotRequest, stream grpcproto.StorageService_FetchSnapshotServer) error {
+	snapshot, err := s.node.CommittedSnapshot(int(req.Slot))
+	if err != nil {
+		return encodeError(err)
+	}
+	for _, entry := range protoSnapshot(snapshot) {
+		if err := stream.Send(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *StorageGRPCServer) FetchCommittedSequence(ctx context.Context, req *grpcproto.FetchCommittedSequenceRequest) (*grpcproto.FetchCommittedSequenceResponse, error) {
+	sequence, err := s.node.HighestCommittedSequence(int(req.Slot))
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return &grpcproto.FetchCommittedSequenceResponse{Sequence: sequence}, nil
+}
+
+func joinErrors(errs ...error) error {
+	var filtered []error
+	for _, err := range errs {
+		if err != nil {
+			filtered = append(filtered, err)
+		}
+	}
+	return errors.Join(filtered...)
+}

@@ -25,6 +25,7 @@ type Config struct {
 
 type Node struct {
 	ID             string
+	RPCAddress     string
 	FailureDomains map[string]string
 }
 
@@ -273,6 +274,7 @@ func normalizeNodes(nodes []Node) ([]Node, map[string]Node, []string, error) {
 
 		normalizedNode := Node{
 			ID:             node.ID,
+			RPCAddress:     strings.TrimSpace(node.RPCAddress),
 			FailureDomains: failureDomains,
 		}
 		normalized = append(normalized, normalizedNode)
@@ -321,6 +323,7 @@ func cloneAndValidateState(state ClusterState) (ClusterState, error) {
 	for id, node := range state.NodesByID {
 		cloned.NodesByID[id] = Node{
 			ID:             node.ID,
+			RPCAddress:     node.RPCAddress,
 			FailureDomains: cloneFailureDomains(node.FailureDomains),
 		}
 	}

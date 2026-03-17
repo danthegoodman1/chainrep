@@ -256,7 +256,9 @@ const (
 
 type ChainPeers struct {
 	PredecessorNodeID string
+	PredecessorTarget string
 	SuccessorNodeID   string
+	SuccessorTarget   string
 }
 
 type ReplicaAssignment struct {
@@ -527,7 +529,11 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 	n.replicas[cmd.Assignment.Slot] = record
 
 	if sourceNodeID := cmd.Assignment.Peers.PredecessorNodeID; sourceNodeID != "" {
-		snapshot, err := n.repl.FetchSnapshot(ctx, sourceNodeID, cmd.Assignment.Slot)
+		snapshot, err := n.repl.FetchSnapshot(
+			ctx,
+			peerTransportTarget(cmd.Assignment.Peers.PredecessorTarget, sourceNodeID),
+			cmd.Assignment.Slot,
+		)
 		if err != nil {
 			delete(n.replicas, cmd.Assignment.Slot)
 			return fmt.Errorf("err in n.repl.FetchSnapshot: %w", err)
@@ -536,7 +542,11 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 			delete(n.replicas, cmd.Assignment.Slot)
 			return fmt.Errorf("err in n.backend.InstallSnapshot: %w", err)
 		}
-		highestCommittedSequence, err := n.repl.FetchCommittedSequence(ctx, sourceNodeID, cmd.Assignment.Slot)
+		highestCommittedSequence, err := n.repl.FetchCommittedSequence(
+			ctx,
+			peerTransportTarget(cmd.Assignment.Peers.PredecessorTarget, sourceNodeID),
+			cmd.Assignment.Slot,
+		)
 		if err != nil {
 			delete(n.replicas, cmd.Assignment.Slot)
 			return fmt.Errorf("err in n.repl.FetchCommittedSequence: %w", err)
@@ -712,14 +722,22 @@ func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) er
 	if err := n.ensureBackendReplica(cmd.Assignment.Slot); err != nil {
 		return fmt.Errorf("err in n.ensureBackendReplica: %w", err)
 	}
-	snapshot, err := n.repl.FetchSnapshot(ctx, cmd.SourceNodeID, cmd.Assignment.Slot)
+	snapshot, err := n.repl.FetchSnapshot(
+		ctx,
+		peerTransportTarget(cmd.Assignment.Peers.PredecessorTarget, cmd.SourceNodeID),
+		cmd.Assignment.Slot,
+	)
 	if err != nil {
 		return fmt.Errorf("err in n.repl.FetchSnapshot: %w", err)
 	}
 	if err := n.backend.InstallSnapshot(cmd.Assignment.Slot, snapshot); err != nil {
 		return fmt.Errorf("err in n.backend.InstallSnapshot: %w", err)
 	}
-	highestCommittedSequence, err := n.repl.FetchCommittedSequence(ctx, cmd.SourceNodeID, cmd.Assignment.Slot)
+	highestCommittedSequence, err := n.repl.FetchCommittedSequence(
+		ctx,
+		peerTransportTarget(cmd.Assignment.Peers.PredecessorTarget, cmd.SourceNodeID),
+		cmd.Assignment.Slot,
+	)
 	if err != nil {
 		return fmt.Errorf("err in n.repl.FetchCommittedSequence: %w", err)
 	}
@@ -1013,7 +1031,9 @@ func cloneAssignment(assignment ReplicaAssignment) ReplicaAssignment {
 		Role:         assignment.Role,
 		Peers: ChainPeers{
 			PredecessorNodeID: assignment.Peers.PredecessorNodeID,
+			PredecessorTarget: assignment.Peers.PredecessorTarget,
 			SuccessorNodeID:   assignment.Peers.SuccessorNodeID,
+			SuccessorTarget:   assignment.Peers.SuccessorTarget,
 		},
 	}
 }
@@ -1034,6 +1054,13 @@ func cloneWriteOperation(operation WriteOperation) WriteOperation {
 		Key:      operation.Key,
 		Value:    operation.Value,
 	}
+}
+
+func peerTransportTarget(target string, fallbackNodeID string) string {
+	if target != "" {
+		return target
+	}
+	return fallbackNodeID
 }
 
 func (n *Node) submitWrite(
@@ -1093,7 +1120,7 @@ func (n *Node) submitWrite(
 		if record.assignment.Peers.SuccessorNodeID == "" {
 			return CommitResult{}, fmt.Errorf("%w: slot %d head has no successor", ErrStateMismatch, slot)
 		}
-		if err := n.repl.ForwardWrite(ctx, record.assignment.Peers.SuccessorNodeID, ForwardWriteRequest{
+		if err := n.repl.ForwardWrite(ctx, peerTransportTarget(record.assignment.Peers.SuccessorTarget, record.assignment.Peers.SuccessorNodeID), ForwardWriteRequest{
 			Operation:  cloneWriteOperation(operation),
 			FromNodeID: n.nodeID,
 		}); err != nil {
@@ -1386,7 +1413,7 @@ func (n *Node) applyForward(ctx context.Context, record replicaRecord, req Forwa
 		}
 		record = n.replicas[req.Operation.Slot]
 		if record.assignment.Peers.PredecessorNodeID != "" {
-			if err := n.repl.CommitWrite(ctx, record.assignment.Peers.PredecessorNodeID, CommitWriteRequest{
+			if err := n.repl.CommitWrite(ctx, peerTransportTarget(record.assignment.Peers.PredecessorTarget, record.assignment.Peers.PredecessorNodeID), CommitWriteRequest{
 				Slot:       req.Operation.Slot,
 				Sequence:   req.Operation.Sequence,
 				FromNodeID: n.nodeID,
@@ -1395,7 +1422,7 @@ func (n *Node) applyForward(ctx context.Context, record replicaRecord, req Forwa
 			}
 		}
 	} else {
-		if err := n.repl.ForwardWrite(ctx, record.assignment.Peers.SuccessorNodeID, ForwardWriteRequest{
+		if err := n.repl.ForwardWrite(ctx, peerTransportTarget(record.assignment.Peers.SuccessorTarget, record.assignment.Peers.SuccessorNodeID), ForwardWriteRequest{
 			Operation:  cloneWriteOperation(req.Operation),
 			FromNodeID: n.nodeID,
 		}); err != nil {
@@ -1422,7 +1449,7 @@ func (n *Node) applyCommit(ctx context.Context, record replicaRecord, req Commit
 	}
 	n.replicas[req.Slot] = record
 	if record.assignment.Peers.PredecessorNodeID != "" {
-		if err := n.repl.CommitWrite(ctx, record.assignment.Peers.PredecessorNodeID, CommitWriteRequest{
+		if err := n.repl.CommitWrite(ctx, peerTransportTarget(record.assignment.Peers.PredecessorTarget, record.assignment.Peers.PredecessorNodeID), CommitWriteRequest{
 			Slot:       req.Slot,
 			Sequence:   req.Sequence,
 			FromNodeID: n.nodeID,

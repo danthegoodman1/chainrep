@@ -44,18 +44,20 @@ const (
 )
 
 type PendingWork struct {
-	Slot      int
-	NodeID    string
-	Kind      pendingKind
+	Slot        int
+	NodeID      string
+	Kind        pendingKind
 	SlotVersion uint64
-	CommandID string
+	CommandID   string
 }
 
 type SlotRoute struct {
 	Slot         int
 	ChainVersion uint64
 	HeadNodeID   string
+	HeadEndpoint string
 	TailNodeID   string
+	TailEndpoint string
 	Writable     bool
 	Readable     bool
 }
@@ -76,10 +78,15 @@ type Clock interface {
 }
 
 type ServerConfig struct {
-	LivenessPolicy LivenessPolicy
-	Clock          Clock
+	LivenessPolicy         LivenessPolicy
+	Clock                  Clock
 	DispatchTimeout        time.Duration
 	RecoveryCommandTimeout time.Duration
+	NodeClientFactory      NodeClientFactory
+}
+
+type NodeClientFactory interface {
+	ClientForNode(node coordinator.Node) (StorageNodeClient, error)
 }
 
 type Server struct {
@@ -97,6 +104,7 @@ type Server struct {
 	clock                  Clock
 	dispatchTimeout        time.Duration
 	recoveryCommandTimeout time.Duration
+	nodeClientFactory      NodeClientFactory
 }
 
 const (
@@ -140,6 +148,7 @@ func OpenWithConfig(
 		clock:          cfg.Clock,
 		dispatchTimeout:        cfg.DispatchTimeout,
 		recoveryCommandTimeout: cfg.RecoveryCommandTimeout,
+		nodeClientFactory:      cfg.NodeClientFactory,
 	}
 	if server.clock == nil {
 		server.clock = realClock{}
@@ -185,6 +194,25 @@ func (s *Server) Pending() map[int]PendingWork {
 
 func (s *Server) RoutingSnapshot(_ context.Context) (RoutingSnapshot, error) {
 	return cloneRoutingSnapshot(s.routingSnapshot), nil
+}
+
+func (s *Server) clientForNodeID(nodeID string) (StorageNodeClient, error) {
+	if client, ok := s.nodes[nodeID]; ok {
+		return client, nil
+	}
+	if s.nodeClientFactory == nil {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownNode, nodeID)
+	}
+	node, ok := s.rt.Current().Cluster.NodesByID[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownNode, nodeID)
+	}
+	client, err := s.nodeClientFactory.ClientForNode(node)
+	if err != nil {
+		return nil, fmt.Errorf("err in s.nodeClientFactory.ClientForNode: %w", err)
+	}
+	s.nodes[nodeID] = client
+	return client, nil
 }
 
 func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
@@ -352,8 +380,10 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 }
 
 func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeStatus) error {
-	if _, ok := s.nodes[status.NodeID]; !ok {
+	if _, ok := s.rt.Current().Cluster.NodesByID[status.NodeID]; !ok {
+		if _, fallbackOK := s.nodes[status.NodeID]; !fallbackOK {
 		return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
+		}
 	}
 	current := s.rt.Current()
 	currentRecord, hadCurrentRecord := current.NodeLivenessByID[status.NodeID]
@@ -455,8 +485,10 @@ func (s *Server) EvaluateLiveness(ctx context.Context) error {
 }
 
 func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRecoveryReport) error {
-	if _, ok := s.nodes[report.NodeID]; !ok {
+	if _, ok := s.rt.Current().Cluster.NodesByID[report.NodeID]; !ok {
+		if _, fallbackOK := s.nodes[report.NodeID]; !fallbackOK {
 		return fmt.Errorf("%w: %q", ErrUnknownNode, report.NodeID)
+		}
 	}
 	if prior, ok := s.lastRecoveryReports[report.NodeID]; ok && reflect.DeepEqual(prior, report) && !s.nodeHasUnavailableSlots(report.NodeID) {
 		return nil
@@ -592,6 +624,7 @@ func (s *Server) dispatchPlan(ctx context.Context, chainVersion uint64, plan coo
 }
 
 func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, slotPlan coordinator.SlotPlan) error {
+	state := s.rt.Current()
 	addedNodeID := ""
 	replacedNodeID := ""
 	for _, step := range slotPlan.Steps {
@@ -604,14 +637,14 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 	if addedNodeID == "" {
 		return fmt.Errorf("%w: slot %d missing append target", ErrDispatchFailed, slotPlan.Slot)
 	}
-	client, ok := s.nodes[addedNodeID]
-	if !ok {
-		return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, addedNodeID)
+	client, err := s.clientForNodeID(addedNodeID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrDispatchFailed, err)
 	}
 	if existing, ok := s.pending[slotPlan.Slot]; ok && existing.NodeID != addedNodeID {
 		return fmt.Errorf("%w: slot %d already has pending work for node %q", ErrConflictingPending, slotPlan.Slot, existing.NodeID)
 	}
-	addAssignment, err := assignmentForNode(slotPlan.After, addedNodeID, chainVersion)
+	addAssignment, err := assignmentForNode(slotPlan.After, state.Cluster.NodesByID, addedNodeID, chainVersion)
 	if err != nil {
 		return fmt.Errorf("err in assignmentForNode(add): %w", err)
 	}
@@ -634,11 +667,11 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 	servingChain := activeServingChain(slotPlan.After)
 	updateNodes := activeAfterNodeIDs(servingChain, skipped)
 	for _, nodeID := range updateNodes {
-		client, ok := s.nodes[nodeID]
-		if !ok {
-			return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, nodeID)
+		client, err := s.clientForNodeID(nodeID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrDispatchFailed, err)
 		}
-		assignment, err := assignmentForNode(servingChain, nodeID, chainVersion)
+		assignment, err := assignmentForNode(servingChain, state.Cluster.NodesByID, nodeID, chainVersion)
 		if err != nil {
 			return fmt.Errorf("err in assignmentForNode(update append): %w", err)
 		}
@@ -657,6 +690,7 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 }
 
 func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, slotPlan coordinator.SlotPlan) error {
+	state := s.rt.Current()
 	leavingNodeID := ""
 	for _, step := range slotPlan.Steps {
 		if step.Kind == coordinator.StepKindMarkLeaving {
@@ -674,11 +708,11 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 	servingChain := activeServingChain(slotPlan.After)
 	updateNodes := activeAfterNodeIDs(servingChain, skipped)
 	for _, nodeID := range updateNodes {
-		client, ok := s.nodes[nodeID]
-		if !ok {
-			return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, nodeID)
+		client, err := s.clientForNodeID(nodeID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrDispatchFailed, err)
 		}
-		assignment, err := assignmentForNode(servingChain, nodeID, chainVersion)
+		assignment, err := assignmentForNode(servingChain, state.Cluster.NodesByID, nodeID, chainVersion)
 		if err != nil {
 			return fmt.Errorf("err in assignmentForNode(update leaving): %w", err)
 		}
@@ -693,9 +727,9 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 		}
 	}
 
-	client, ok := s.nodes[leavingNodeID]
-	if !ok {
-		return fmt.Errorf("%w: %w: %q", ErrDispatchFailed, ErrUnknownNode, leavingNodeID)
+	client, err := s.clientForNodeID(leavingNodeID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrDispatchFailed, err)
 	}
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
 	defer cancel()
@@ -719,9 +753,9 @@ func (s *Server) resumeRecoveredReplica(
 	nodeID string,
 	assignment storage.ReplicaAssignment,
 ) error {
-	client, ok := s.nodes[nodeID]
-	if !ok {
-		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
+	client, err := s.clientForNodeID(nodeID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
 	}
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
 	defer cancel()
@@ -741,11 +775,11 @@ func (s *Server) recoverReplica(
 	assignment storage.ReplicaAssignment,
 	sourceNodeID string,
 ) error {
-	client, ok := s.nodes[nodeID]
-	if !ok {
-		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
+	client, err := s.clientForNodeID(nodeID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
 	}
-	if _, ok := s.nodes[sourceNodeID]; !ok {
+	if _, ok := s.rt.Current().Cluster.NodesByID[sourceNodeID]; !ok {
 		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, sourceNodeID)
 	}
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
@@ -764,9 +798,9 @@ func (s *Server) recoverReplica(
 }
 
 func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot int) error {
-	client, ok := s.nodes[nodeID]
-	if !ok {
-		return fmt.Errorf("%w: %w: %q", ErrRecoveryFailed, ErrUnknownNode, nodeID)
+	client, err := s.clientForNodeID(nodeID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
 	}
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
 	defer cancel()
@@ -780,7 +814,12 @@ func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot i
 	return nil
 }
 
-func assignmentForNode(chain coordinator.Chain, nodeID string, chainVersion uint64) (storage.ReplicaAssignment, error) {
+func assignmentForNode(
+	chain coordinator.Chain,
+	nodesByID map[string]coordinator.Node,
+	nodeID string,
+	chainVersion uint64,
+) (storage.ReplicaAssignment, error) {
 	position := -1
 	for i, replica := range chain.Replicas {
 		if replica.NodeID == nodeID {
@@ -814,9 +853,11 @@ func assignmentForNode(chain coordinator.Chain, nodeID string, chainVersion uint
 	}
 	if position > 0 {
 		assignment.Peers.PredecessorNodeID = chain.Replicas[position-1].NodeID
+		assignment.Peers.PredecessorTarget = nodesByID[assignment.Peers.PredecessorNodeID].RPCAddress
 	}
 	if position+1 < len(chain.Replicas) {
 		assignment.Peers.SuccessorNodeID = chain.Replicas[position+1].NodeID
+		assignment.Peers.SuccessorTarget = nodesByID[assignment.Peers.SuccessorNodeID].RPCAddress
 	}
 	return assignment, nil
 }
@@ -860,8 +901,10 @@ func (s *Server) rebuildRoutingSnapshot() {
 			}
 			if route.HeadNodeID == "" {
 				route.HeadNodeID = replica.NodeID
+				route.HeadEndpoint = state.Cluster.NodesByID[replica.NodeID].RPCAddress
 			}
 			route.TailNodeID = replica.NodeID
+			route.TailEndpoint = state.Cluster.NodesByID[replica.NodeID].RPCAddress
 		}
 		if route.HeadNodeID != "" {
 			route.Writable = !chainHasReplicaState(chain, coordinator.ReplicaStateJoining)
@@ -935,9 +978,14 @@ func chainHasReplicaState(chain coordinator.Chain, want coordinator.ReplicaState
 	return false
 }
 
-func affectedPeerUpdateNodes(before coordinator.Chain, after coordinator.Chain, skipped map[string]bool) []string {
-	beforeAssignments := buildAssignmentMap(before)
-	afterAssignments := buildAssignmentMap(after)
+func affectedPeerUpdateNodes(
+	before coordinator.Chain,
+	after coordinator.Chain,
+	nodesByID map[string]coordinator.Node,
+	skipped map[string]bool,
+) []string {
+	beforeAssignments := buildAssignmentMap(before, nodesByID)
+	afterAssignments := buildAssignmentMap(after, nodesByID)
 
 	var nodeIDs []string
 	for nodeID, afterAssignment := range afterAssignments {
@@ -962,7 +1010,7 @@ type chainAssignment struct {
 	position int
 }
 
-func buildAssignmentMap(chain coordinator.Chain) map[string]chainAssignment {
+func buildAssignmentMap(chain coordinator.Chain, nodesByID map[string]coordinator.Node) map[string]chainAssignment {
 	assignments := make(map[string]chainAssignment, len(chain.Replicas))
 	for i, replica := range chain.Replicas {
 		role := storage.ReplicaRoleMiddle
@@ -985,9 +1033,11 @@ func buildAssignmentMap(chain coordinator.Chain) map[string]chainAssignment {
 		}
 		if i > 0 {
 			assignment.peers.PredecessorNodeID = chain.Replicas[i-1].NodeID
+			assignment.peers.PredecessorTarget = nodesByID[assignment.peers.PredecessorNodeID].RPCAddress
 		}
 		if i+1 < len(chain.Replicas) {
 			assignment.peers.SuccessorNodeID = chain.Replicas[i+1].NodeID
+			assignment.peers.SuccessorTarget = nodesByID[assignment.peers.SuccessorNodeID].RPCAddress
 		}
 		assignments[replica.NodeID] = assignment
 	}
@@ -1089,7 +1139,7 @@ func currentAssignmentForNode(
 		if replica.NodeID != nodeID {
 			continue
 		}
-		assignment, err := assignmentForNode(chain, nodeID, state.SlotVersions[slot])
+		assignment, err := assignmentForNode(chain, state.Cluster.NodesByID, nodeID, state.SlotVersions[slot])
 		if err != nil {
 			return storage.ReplicaAssignment{}, false
 		}
@@ -1105,7 +1155,7 @@ func assignedReplicasForNode(state coordruntime.State, nodeID string) map[int]st
 			if replica.NodeID != nodeID {
 				continue
 			}
-			assignment, err := assignmentForNode(chain, nodeID, state.SlotVersions[chain.Slot])
+			assignment, err := assignmentForNode(chain, state.Cluster.NodesByID, nodeID, state.SlotVersions[chain.Slot])
 			if err != nil {
 				continue
 			}

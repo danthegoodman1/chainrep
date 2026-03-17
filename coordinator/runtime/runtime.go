@@ -753,6 +753,7 @@ func cloneClusterState(state coordinator.ClusterState) coordinator.ClusterState 
 	for id, node := range state.NodesByID {
 		cloned.NodesByID[id] = coordinator.Node{
 			ID:             node.ID,
+			RPCAddress:     node.RPCAddress,
 			FailureDomains: cloneFailureDomains(node.FailureDomains),
 		}
 	}
@@ -779,6 +780,7 @@ func cloneNodes(nodes []coordinator.Node) []coordinator.Node {
 	for i, node := range nodes {
 		cloned[i] = coordinator.Node{
 			ID:             node.ID,
+			RPCAddress:     node.RPCAddress,
 			FailureDomains: cloneFailureDomains(node.FailureDomains),
 		}
 	}
@@ -796,7 +798,11 @@ func cloneEvents(events []coordinator.Event) []coordinator.Event {
 func cloneEvent(event coordinator.Event) coordinator.Event {
 	return coordinator.Event{
 		Kind:   event.Kind,
-		Node:   coordinator.Node{ID: event.Node.ID, FailureDomains: cloneFailureDomains(event.Node.FailureDomains)},
+		Node: coordinator.Node{
+			ID:             event.Node.ID,
+			RPCAddress:     event.Node.RPCAddress,
+			FailureDomains: cloneFailureDomains(event.Node.FailureDomains),
+		},
 		NodeID: event.NodeID,
 		Slot:   event.Slot,
 	}
