@@ -1,8 +1,18 @@
 # TODO
 
-- Define the coordinator service API and responsibilities.
-- Define the storage node API and state model.
-- Add a coordinator transport interface for control-plane communication.
-- Add a storage replication transport interface for node-to-node communication.
-- Build in-memory reference implementations for both transport layers.
-- Add end-to-end tests that run a coordinator plus several storage nodes without real networking.
+- [x] Build deterministic coordinator initial placement.
+- [x] Build deterministic coordinator reconfiguration and recovery planning.
+- [x] Add coordinator spec, hardening, simulation, and benchmark coverage.
+- [x] Add durable coordinator runtime with WAL, checkpointing, and recovery.
+- [ ] Define the coordinator service API and responsibilities.
+- [x] Define the storage node API and state model.
+- [x] Add a coordinator transport interface for control-plane communication.
+- [x] Add a storage replication transport interface for node-to-node communication.
+- [x] Build in-memory reference implementations for both transport layers.
+- [x] Add end-to-end tests that run a coordinator plus several storage nodes without real networking.
+- [ ] Add a durable or interface-stabilized local storage backend beyond the in-memory KV model.
+- [ ] Add the coordinator server that issues storage-node commands and consumes storage-node progress.
+- [ ] Add real network transports for coordinator control-plane traffic and storage-node replication traffic.
+- [ ] Implement storage-node persistence and restart/recovery semantics.
+- [ ] Implement the steady-state chain replication protocol between storage nodes.
+- [ ] Implement client-facing read/write execution and routing.
