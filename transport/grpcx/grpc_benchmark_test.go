@@ -13,7 +13,7 @@ import (
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
 	"github.com/danthegoodman1/chainrep/coordserver"
 	"github.com/danthegoodman1/chainrep/storage"
-	pebblestore "github.com/danthegoodman1/chainrep/storage/pebble"
+	badgerstore "github.com/danthegoodman1/chainrep/storage/badger"
 	"github.com/danthegoodman1/chainrep/transport/grpcx"
 )
 
@@ -147,9 +147,9 @@ func newLocalhostGRPCBenchmarkHarness(tb testing.TB, replicationFactor int) *loc
 		clusterNodes = append(clusterNodes, clusterNode)
 
 		storePath := filepath.Join(tb.TempDir(), nodeID)
-		store, err := pebblestore.Open(storePath)
+		store, err := badgerstore.Open(storePath)
 		if err != nil {
-			tb.Fatalf("pebble.Open(%q) returned error: %v", storePath, err)
+			tb.Fatalf("badger.Open(%q) returned error: %v", storePath, err)
 		}
 		node, err := storage.OpenNode(
 			ctx,

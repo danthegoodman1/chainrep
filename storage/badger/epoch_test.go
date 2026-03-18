@@ -1,4 +1,4 @@
-package pebble
+package badger
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"github.com/danthegoodman1/chainrep/storage"
 )
 
-func TestPebbleNodePersistsHighestAcceptedCoordinatorEpoch(t *testing.T) {
+func TestBadgerNodePersistsHighestAcceptedCoordinatorEpoch(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)

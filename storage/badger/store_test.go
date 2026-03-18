@@ -1,4 +1,4 @@
-package pebble
+package badger
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 
 var errInjectedDurableWrite = errors.New("injected durable write failure")
 
-func TestPebbleBackendConformance(t *testing.T) {
+func TestBadgerBackendConformance(t *testing.T) {
 	storagetest.RunBackendSuite(t, func(t *testing.T) storage.Backend {
 		t.Helper()
 		store, err := Open(filepath.Join(t.TempDir(), "node.db"))
@@ -25,7 +25,7 @@ func TestPebbleBackendConformance(t *testing.T) {
 	})
 }
 
-func TestPebbleLocalStateStoreConformance(t *testing.T) {
+func TestBadgerLocalStateStoreConformance(t *testing.T) {
 	storagetest.RunLocalStateStoreSuite(t, func(t *testing.T) storage.LocalStateStore {
 		t.Helper()
 		store, err := Open(filepath.Join(t.TempDir(), "node.db"))
@@ -36,7 +36,7 @@ func TestPebbleLocalStateStoreConformance(t *testing.T) {
 	})
 }
 
-func TestPebbleCompletedOperationsSurviveReopen(t *testing.T) {
+func TestBadgerCompletedOperationsSurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)
@@ -131,7 +131,7 @@ func TestPebbleCompletedOperationsSurviveReopen(t *testing.T) {
 	}
 }
 
-func TestPebbleNodeRestartRecoveryAndClose(t *testing.T) {
+func TestBadgerNodeRestartRecoveryAndClose(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)
@@ -205,7 +205,7 @@ func TestPebbleNodeRestartRecoveryAndClose(t *testing.T) {
 	}
 }
 
-func TestPebbleOpenCleansStagedOperations(t *testing.T) {
+func TestBadgerOpenCleansStagedOperations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)
 	backend := store.Backend()
@@ -261,7 +261,7 @@ func TestPebbleOpenCleansStagedOperations(t *testing.T) {
 	}
 }
 
-func TestPebbleOpenCleanupFailureIsRetryable(t *testing.T) {
+func TestBadgerOpenCleanupFailureIsRetryable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)
 	backend := store.Backend()
@@ -297,7 +297,7 @@ func TestPebbleOpenCleanupFailureIsRetryable(t *testing.T) {
 	}
 }
 
-func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
+func TestBadgerFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	type durableMutationCase struct {
 		name    string
@@ -526,7 +526,7 @@ func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 	}
 }
 
-func TestPebbleNodeReopenDropsUncommittedForwardFailure(t *testing.T) {
+func TestBadgerNodeReopenDropsUncommittedForwardFailure(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)
@@ -606,7 +606,7 @@ func TestPebbleNodeReopenDropsUncommittedForwardFailure(t *testing.T) {
 	}
 }
 
-func TestPebbleNodeReopenIgnoresStagedRemnantsForRecovery(t *testing.T) {
+func TestBadgerNodeReopenIgnoresStagedRemnantsForRecovery(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "node.db")
 	store := mustOpenStore(t, path)

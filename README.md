@@ -2,7 +2,7 @@
 
 - Real gRPC transport between client, coordinator, and storage nodes
 - Coordinator HA via epoch-gated active/standby failover
-- Durable local Pebble-backed storage backend
+- Durable local Badger-backed storage backend
 - Conditional writes with per-object metadata
 - Optional TLS/mTLS security for gRPC transports
 - Read-only HTTP admin/health endpoints plus Prometheus metrics
@@ -38,10 +38,10 @@ It uses:
 - a real client router
 - real storage-node gRPC servers
 - real gRPC replication between nodes
-- real Pebble-backed storage on local temp directories
+- real Badger-backed storage on local temp directories
 
 These numbers are end-to-end client latencies on localhost through a production-style
-setup: router -> coordinator snapshot -> storage-node gRPC server(s) -> Pebble-backed
+setup: router -> coordinator snapshot -> storage-node gRPC server(s) -> Badger-backed
 storage, with replication over gRPC where applicable.
 
 Benchmark command:
@@ -52,13 +52,13 @@ go test ./transport/grpcx -run '^$' -bench BenchmarkClientLatencyGRPC_Localhost 
 
 Average results from 5 localhost benchmark runs on an Apple M3 Max on March 18, 2026, using the command above:
 
-- `single_replica_get`: `45,440 ns/op`, `9,578 B/op`, `167 allocs/op`
-- `single_replica_put`: `15,301,993 ns/op`, `11,246 B/op`, `201 allocs/op`
-- `three_replica_get`: `45,411 ns/op`, `9,577 B/op`, `167 allocs/op`
-- `three_replica_put`: `49,654,161 ns/op`, `53,488 B/op`, `887 allocs/op`
+- `single_replica_get`: `0.044 ms/op`, `10,656 B/op`, `186 allocs/op`
+- `single_replica_put`: `0.100 ms/op`, `13,976 B/op`, `291 allocs/op`
+- `three_replica_get`: `0.045 ms/op`, `10,657 B/op`, `186 allocs/op`
+- `three_replica_put`: `0.325 ms/op`, `58,215 B/op`, `1,118 allocs/op`
 
 These are reference localhost numbers for the current implementation, not SLOs or
-cross-machine production guarantees. They include real gRPC and Pebble storage costs,
-but not network latency, TLS, or multi-host deployment effects. The benchmark uses
-real Pebble-backed storage, but the measured read path is likely hot-cache behavior
-through Pebble and the OS page cache rather than cold disk-read latency.
+cross-machine production guarantees. They include real gRPC and durable local storage
+costs, but not network latency, TLS, or multi-host deployment effects. The benchmark
+uses real Badger-backed storage, but the measured read path is likely hot-cache behavior
+through Badger and the OS page cache rather than cold disk-read latency.
