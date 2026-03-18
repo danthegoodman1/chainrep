@@ -114,6 +114,10 @@ func (l *countingLocal) DeleteReplica(ctx context.Context, nodeID string, slot i
 	return l.owner.local.DeleteReplica(ctx, nodeID, slot)
 }
 
+func (l *countingLocal) SetHighestAcceptedCoordinatorEpoch(ctx context.Context, nodeID string, epoch uint64) error {
+	return l.owner.local.SetHighestAcceptedCoordinatorEpoch(ctx, nodeID, epoch)
+}
+
 func (l *countingLocal) Close() error {
 	return l.owner.Close()
 }

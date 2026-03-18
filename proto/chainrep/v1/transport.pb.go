@@ -892,6 +892,7 @@ type ReplicaReadyReport struct {
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Slot          int32                  `protobuf:"varint,2,opt,name=slot,proto3" json:"slot,omitempty"`
 	CommandId     string                 `protobuf:"bytes,3,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -947,11 +948,19 @@ func (x *ReplicaReadyReport) GetCommandId() string {
 	return ""
 }
 
+func (x *ReplicaReadyReport) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type ReplicaRemovedReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Slot          int32                  `protobuf:"varint,2,opt,name=slot,proto3" json:"slot,omitempty"`
 	CommandId     string                 `protobuf:"bytes,3,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1005,6 +1014,13 @@ func (x *ReplicaRemovedReport) GetCommandId() string {
 		return x.CommandId
 	}
 	return ""
+}
+
+func (x *ReplicaRemovedReport) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
 }
 
 type NodeStatus struct {
@@ -1342,6 +1358,7 @@ func (x *NodeRecoveryReport) GetReplicas() []*RecoveredReplica {
 type AddReplicaAsTailCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Assignment    *ReplicaAssignment     `protobuf:"bytes,1,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1383,9 +1400,17 @@ func (x *AddReplicaAsTailCommand) GetAssignment() *ReplicaAssignment {
 	return nil
 }
 
+func (x *AddReplicaAsTailCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type ActivateReplicaCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Slot          int32                  `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1427,9 +1452,17 @@ func (x *ActivateReplicaCommand) GetSlot() int32 {
 	return 0
 }
 
+func (x *ActivateReplicaCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type MarkReplicaLeavingCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Slot          int32                  `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1471,9 +1504,17 @@ func (x *MarkReplicaLeavingCommand) GetSlot() int32 {
 	return 0
 }
 
+func (x *MarkReplicaLeavingCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type RemoveReplicaCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Slot          int32                  `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1515,9 +1556,17 @@ func (x *RemoveReplicaCommand) GetSlot() int32 {
 	return 0
 }
 
+func (x *RemoveReplicaCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type UpdateChainPeersCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Assignment    *ReplicaAssignment     `protobuf:"bytes,1,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1559,9 +1608,17 @@ func (x *UpdateChainPeersCommand) GetAssignment() *ReplicaAssignment {
 	return nil
 }
 
+func (x *UpdateChainPeersCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type ResumeRecoveredReplicaCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Assignment    *ReplicaAssignment     `protobuf:"bytes,1,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1603,10 +1660,18 @@ func (x *ResumeRecoveredReplicaCommand) GetAssignment() *ReplicaAssignment {
 	return nil
 }
 
+func (x *ResumeRecoveredReplicaCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type RecoverReplicaCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Assignment    *ReplicaAssignment     `protobuf:"bytes,1,opt,name=assignment,proto3" json:"assignment,omitempty"`
 	SourceNodeId  string                 `protobuf:"bytes,2,opt,name=source_node_id,json=sourceNodeId,proto3" json:"source_node_id,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1655,9 +1720,17 @@ func (x *RecoverReplicaCommand) GetSourceNodeId() string {
 	return ""
 }
 
+func (x *RecoverReplicaCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type DropRecoveredReplicaCommand struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Slot          int32                  `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1695,6 +1768,13 @@ func (*DropRecoveredReplicaCommand) Descriptor() ([]byte, []int) {
 func (x *DropRecoveredReplicaCommand) GetSlot() int32 {
 	if x != nil {
 		return x.Slot
+	}
+	return 0
+}
+
+func (x *DropRecoveredReplicaCommand) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
 	}
 	return 0
 }
@@ -2807,6 +2887,50 @@ func (x *DomainErrorDetail) GetReason() string {
 	return ""
 }
 
+type NotLeaderDetail struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	LeaderEndpoint string                 `protobuf:"bytes,1,opt,name=leader_endpoint,json=leaderEndpoint,proto3" json:"leader_endpoint,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *NotLeaderDetail) Reset() {
+	*x = NotLeaderDetail{}
+	mi := &file_chainrep_v1_transport_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NotLeaderDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NotLeaderDetail) ProtoMessage() {}
+
+func (x *NotLeaderDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_chainrep_v1_transport_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NotLeaderDetail.ProtoReflect.Descriptor instead.
+func (*NotLeaderDetail) Descriptor() ([]byte, []int) {
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *NotLeaderDetail) GetLeaderEndpoint() string {
+	if x != nil {
+		return x.LeaderEndpoint
+	}
+	return ""
+}
+
 var File_chainrep_v1_transport_proto protoreflect.FileDescriptor
 
 const file_chainrep_v1_transport_proto_rawDesc = "" +
@@ -2871,17 +2995,19 @@ const file_chainrep_v1_transport_proto_rawDesc = "" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12\x1d\n" +
 	"\n" +
 	"slot_count\x18\x02 \x01(\x05R\tslotCount\x12,\n" +
-	"\x05slots\x18\x03 \x03(\v2\x16.chainrep.v1.SlotRouteR\x05slots\"`\n" +
+	"\x05slots\x18\x03 \x03(\v2\x16.chainrep.v1.SlotRouteR\x05slots\"v\n" +
 	"\x12ReplicaReadyReport\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
 	"\x04slot\x18\x02 \x01(\x05R\x04slot\x12\x1d\n" +
 	"\n" +
-	"command_id\x18\x03 \x01(\tR\tcommandId\"b\n" +
+	"command_id\x18\x03 \x01(\tR\tcommandId\x12\x14\n" +
+	"\x05epoch\x18\x04 \x01(\x04R\x05epoch\"x\n" +
 	"\x14ReplicaRemovedReport\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
 	"\x04slot\x18\x02 \x01(\x05R\x04slot\x12\x1d\n" +
 	"\n" +
-	"command_id\x18\x03 \x01(\tR\tcommandId\"\xbe\x01\n" +
+	"command_id\x18\x03 \x01(\tR\tcommandId\x12\x14\n" +
+	"\x05epoch\x18\x04 \x01(\x04R\x05epoch\"\xbe\x01\n" +
 	"\n" +
 	"NodeStatus\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12#\n" +
@@ -2909,32 +3035,40 @@ const file_chainrep_v1_transport_proto_rawDesc = "" +
 	"\x12has_committed_data\x18\x04 \x01(\bR\x10hasCommittedData\"h\n" +
 	"\x12NodeRecoveryReport\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x129\n" +
-	"\breplicas\x18\x02 \x03(\v2\x1d.chainrep.v1.RecoveredReplicaR\breplicas\"Y\n" +
+	"\breplicas\x18\x02 \x03(\v2\x1d.chainrep.v1.RecoveredReplicaR\breplicas\"o\n" +
 	"\x17AddReplicaAsTailCommand\x12>\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2\x1e.chainrep.v1.ReplicaAssignmentR\n" +
-	"assignment\",\n" +
+	"assignment\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"B\n" +
 	"\x16ActivateReplicaCommand\x12\x12\n" +
-	"\x04slot\x18\x01 \x01(\x05R\x04slot\"/\n" +
+	"\x04slot\x18\x01 \x01(\x05R\x04slot\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"E\n" +
 	"\x19MarkReplicaLeavingCommand\x12\x12\n" +
-	"\x04slot\x18\x01 \x01(\x05R\x04slot\"*\n" +
+	"\x04slot\x18\x01 \x01(\x05R\x04slot\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"@\n" +
 	"\x14RemoveReplicaCommand\x12\x12\n" +
-	"\x04slot\x18\x01 \x01(\x05R\x04slot\"Y\n" +
+	"\x04slot\x18\x01 \x01(\x05R\x04slot\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"o\n" +
 	"\x17UpdateChainPeersCommand\x12>\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2\x1e.chainrep.v1.ReplicaAssignmentR\n" +
-	"assignment\"_\n" +
+	"assignment\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"u\n" +
 	"\x1dResumeRecoveredReplicaCommand\x12>\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2\x1e.chainrep.v1.ReplicaAssignmentR\n" +
-	"assignment\"}\n" +
+	"assignment\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"\x93\x01\n" +
 	"\x15RecoverReplicaCommand\x12>\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2\x1e.chainrep.v1.ReplicaAssignmentR\n" +
 	"assignment\x12$\n" +
-	"\x0esource_node_id\x18\x02 \x01(\tR\fsourceNodeId\"1\n" +
+	"\x0esource_node_id\x18\x02 \x01(\tR\fsourceNodeId\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\"G\n" +
 	"\x1bDropRecoveredReplicaCommand\x12\x12\n" +
-	"\x04slot\x18\x01 \x01(\x05R\x04slot\"n\n" +
+	"\x04slot\x18\x01 \x01(\x05R\x04slot\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\"n\n" +
 	"\x10ClientGetRequest\x12\x12\n" +
 	"\x04slot\x18\x01 \x01(\x05R\x04slot\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x124\n" +
@@ -3020,7 +3154,9 @@ const file_chainrep_v1_transport_proto_rawDesc = "" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x12\n" +
 	"\x04slot\x18\x02 \x01(\x05R\x04slot\x12\x1a\n" +
 	"\bsequence\x18\x03 \x01(\x04R\bsequence\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason*\xc7\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\":\n" +
+	"\x0fNotLeaderDetail\x12'\n" +
+	"\x0fleader_endpoint\x18\x01 \x01(\tR\x0eleaderEndpoint*\xc7\x01\n" +
 	"\x12ComparisonOperator\x12#\n" +
 	"\x1fCOMPARISON_OPERATOR_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16COMPARISON_OPERATOR_EQ\x10\x01\x12\x1a\n" +
@@ -3069,7 +3205,7 @@ func file_chainrep_v1_transport_proto_rawDescGZIP() []byte {
 }
 
 var file_chainrep_v1_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_chainrep_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_chainrep_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_chainrep_v1_transport_proto_goTypes = []any{
 	(ComparisonOperator)(0),                // 0: chainrep.v1.ComparisonOperator
 	(*Empty)(nil),                          // 1: chainrep.v1.Empty
@@ -3118,6 +3254,7 @@ var file_chainrep_v1_transport_proto_goTypes = []any{
 	(*ConditionFailedDetail)(nil),          // 44: chainrep.v1.ConditionFailedDetail
 	(*BackpressureDetail)(nil),             // 45: chainrep.v1.BackpressureDetail
 	(*DomainErrorDetail)(nil),              // 46: chainrep.v1.DomainErrorDetail
+	(*NotLeaderDetail)(nil),                // 47: chainrep.v1.NotLeaderDetail
 }
 var file_chainrep_v1_transport_proto_depIdxs = []int32{
 	0,  // 0: chainrep.v1.VersionComparison.operator:type_name -> chainrep.v1.ComparisonOperator
@@ -3212,7 +3349,7 @@ func file_chainrep_v1_transport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainrep_v1_transport_proto_rawDesc), len(file_chainrep_v1_transport_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   46,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

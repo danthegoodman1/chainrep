@@ -162,7 +162,7 @@ func TestValidReadyAndRemovedProgressAdvanceStateAndDispatchNextStep(t *testing.
 		t.Fatalf("AddNode returned error: %v", err)
 	}
 
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
 	if got, want := nodes["d"].calls, []string{"add_tail:1", "update_peers:1"}; !reflect.DeepEqual(got, want) {
@@ -186,7 +186,7 @@ func TestValidReadyAndRemovedProgressAdvanceStateAndDispatchNextStep(t *testing.
 		t.Fatalf("pending[1] after ready = %#v, want %#v", got, want)
 	}
 
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, "removed-1"); err != nil {
+	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, "removed-1"); err != nil {
 		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
 	}
 	if _, exists := server.Pending()[1]; exists {
@@ -204,7 +204,7 @@ func TestUnexpectedAndDuplicateProgressAreRejected(t *testing.T) {
 	}
 	server := mustBootstrappedServer(t, ctx, mapToClient(nodes), 8, 3, "a", "b", "c")
 
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err == nil {
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err == nil {
 		t.Fatal("ReportReplicaReady unexpectedly succeeded")
 	} else if !errors.Is(err, ErrUnexpectedProgress) {
 		t.Fatalf("error = %v, want unexpected progress", err)
@@ -216,19 +216,19 @@ func TestUnexpectedAndDuplicateProgressAreRejected(t *testing.T) {
 	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
 		t.Fatalf("AddNode returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err != nil {
 		t.Fatalf("duplicate ReportReplicaReady returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, "removed-1"); err != nil {
+	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, "removed-1"); err != nil {
 		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, "removed-1"); err != nil {
+	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, "removed-1"); err != nil {
 		t.Fatalf("duplicate ReportReplicaRemoved returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaReady(ctx, "c", 1, "removed-1"); err == nil {
+	if _, err := server.ReportReplicaReady(ctx, "c", 1, 0, "removed-1"); err == nil {
 		t.Fatal("mismatched progress unexpectedly succeeded")
 	} else if !errors.Is(err, ErrUnexpectedProgress) {
 		t.Fatalf("error = %v, want unexpected progress", err)
@@ -254,18 +254,18 @@ func TestDuplicateProgressRemainsIdempotentAfterServerReopen(t *testing.T) {
 	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
 		t.Fatalf("AddNode returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, ""); err != nil {
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, ""); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, ""); err != nil {
+	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, ""); err != nil {
 		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
 	}
 
 	reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	if _, err := reopened.ReportReplicaReady(ctx, "d", 1, ""); err != nil {
+	if _, err := reopened.ReportReplicaReady(ctx, "d", 1, 0, ""); err != nil {
 		t.Fatalf("duplicate ReportReplicaReady after reopen returned error: %v", err)
 	}
-	if _, err := reopened.ReportReplicaRemoved(ctx, "c", 1, ""); err != nil {
+	if _, err := reopened.ReportReplicaRemoved(ctx, "c", 1, 0, ""); err != nil {
 		t.Fatalf("duplicate ReportReplicaRemoved after reopen returned error: %v", err)
 	}
 }
@@ -503,7 +503,7 @@ func TestRoutingSnapshotExcludesJoiningAndLeavingReplicas(t *testing.T) {
 		t.Fatalf("chain version during join = %d, want %d", got, want)
 	}
 
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, "ready-1"); err != nil {
+	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
 	snapshot, err = server.RoutingSnapshot(ctx)

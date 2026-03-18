@@ -33,6 +33,28 @@ The key packages are:
 - `coordserver`: synchronous coordinator service that dispatches storage-node commands, records heartbeats, and exposes routing snapshots to clients
 - `coordserver`: synchronous coordinator service that dispatches storage-node commands, durably tracks node liveness from heartbeats, automatically marks dead nodes, and exposes routing snapshots to clients
 
+### Coordinator HA
+
+The repository now also supports an active/standby coordinator mode.
+
+- leadership is represented by a monotonic `epoch`
+- one coordinator instance at a time holds the active lease for the current epoch
+- authoritative coordinator mutations are persisted through a shared HA store and are conditional on that epoch still being current
+- storage-node control commands also carry the coordinator epoch, and storage nodes persist the highest accepted epoch so stale control work is rejected even after restart
+- clients and storage nodes fail over across a configured list of coordinator RPC endpoints; non-leaders return typed `not leader` errors rather than proxying
+
+The shared HA store owns:
+
+- the current coordinator materialized state
+- the current lease holder and epoch
+- pending coordinator progress expectations
+- a durable outbox of storage-node control commands
+
+This lets a newly elected coordinator resume undispatched or unacknowledged control work deterministically after failover.
+
+The HA store contract and implementation guidance are documented in
+[HA_STORE.md](/Users/dangoodman/code/chainrep/HA_STORE.md).
+
 ### Storage
 
 The storage subsystem is the execution side.
@@ -211,6 +233,7 @@ The repository now has a real gRPC transport layer in addition to the in-memory 
 - routing snapshots expose concrete head/tail endpoints directly
 - catch-up snapshot transfer uses streaming gRPC rather than one large unary response
 - typed storage-domain errors such as routing mismatch, ambiguous write, and backpressure are preserved across gRPC boundaries with structured status details
+- coordinator admin and reporter clients support endpoint-list failover and retry on typed `not leader` responses or transport unavailability
 - transport security is optional in v1:
   - default zero-config transport remains insecure for local development
   - internal coordinator/storage RPCs can use mTLS with a shared cluster CA

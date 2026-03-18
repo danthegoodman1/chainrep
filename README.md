@@ -1,12 +1,14 @@
 # chainrep - Chain Replication in Go
 
 - Real gRPC transport between client, coordinator, and storage nodes
+- Coordinator HA via epoch-gated active/standby failover
 - Durable local Pebble-backed storage backend
 - Conditional writes with per-object metadata
 - Optional TLS/mTLS security for gRPC transports
 - Read-only HTTP admin/health endpoints plus Prometheus metrics
 
 - [Architecture](./ARCHITECTURE.md)
+- [Coordinator HA Store](./HA_STORE.md)
 - [Coordinator](./coordinator/README.md)
 - [Observability](./OBSERVABILITY.md)
 - [Security](./SECURITY.md)

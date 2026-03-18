@@ -114,7 +114,7 @@ func runQueuedRouterFaultHistory(t *testing.T) queuedRouterFaultHistory {
 		t.Fatalf("routing after dropped ready = %#v, want not writable", snapshot.Slots[1])
 	}
 
-	if err := h.adapters["d"].ReportReplicaReady(ctx, 1); err != nil {
+	if err := h.adapters["d"].ReportReplicaReady(ctx, 1, 0); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
 	if err := h.adapters["d"].DuplicateProgressAt(0); err != nil {

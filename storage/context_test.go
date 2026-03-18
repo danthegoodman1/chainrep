@@ -243,6 +243,14 @@ func (s *blockingLocalStateStore) DeleteReplica(ctx context.Context, nodeID stri
 	return s.inner.DeleteReplica(ctx, nodeID, slot)
 }
 
+func (s *blockingLocalStateStore) SetHighestAcceptedCoordinatorEpoch(ctx context.Context, nodeID string, epoch uint64) error {
+	if s.blockUpsert {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.inner.SetHighestAcceptedCoordinatorEpoch(ctx, nodeID, epoch)
+}
+
 func (s *blockingLocalStateStore) Close() error {
 	return s.inner.Close()
 }

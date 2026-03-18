@@ -211,7 +211,7 @@ func NewInMemoryCoordinatorClient() *InMemoryCoordinatorClient {
 	return &InMemoryCoordinatorClient{}
 }
 
-func (c *InMemoryCoordinatorClient) ReportReplicaReady(_ context.Context, slot int) error {
+func (c *InMemoryCoordinatorClient) ReportReplicaReady(_ context.Context, slot int, _ uint64) error {
 	if c.ReadyErr != nil {
 		return c.ReadyErr
 	}
@@ -219,7 +219,7 @@ func (c *InMemoryCoordinatorClient) ReportReplicaReady(_ context.Context, slot i
 	return nil
 }
 
-func (c *InMemoryCoordinatorClient) ReportReplicaRemoved(_ context.Context, slot int) error {
+func (c *InMemoryCoordinatorClient) ReportReplicaRemoved(_ context.Context, slot int, _ uint64) error {
 	if c.RemovedErr != nil {
 		return c.RemovedErr
 	}
@@ -298,6 +298,16 @@ func (s *InMemoryLocalStateStore) DeleteReplica(_ context.Context, nodeID string
 	}
 	state.Replicas = replicas
 	s.nodes[nodeID] = state
+	return nil
+}
+
+func (s *InMemoryLocalStateStore) SetHighestAcceptedCoordinatorEpoch(_ context.Context, nodeID string, epoch uint64) error {
+	state, ok := s.nodes[nodeID]
+	if !ok {
+		state = PersistedNodeState{NodeID: nodeID}
+	}
+	state.HighestAcceptedCoordinatorEpoch = epoch
+	s.nodes[nodeID] = clonePersistedNodeState(state)
 	return nil
 }
 
@@ -635,8 +645,9 @@ func cloneQueuedReplicationMessage(msg QueuedReplicationMessage) QueuedReplicati
 
 func clonePersistedNodeState(state PersistedNodeState) PersistedNodeState {
 	cloned := PersistedNodeState{
-		NodeID:   state.NodeID,
-		Replicas: make([]PersistedReplica, 0, len(state.Replicas)),
+		NodeID:                         state.NodeID,
+		HighestAcceptedCoordinatorEpoch: state.HighestAcceptedCoordinatorEpoch,
+		Replicas:                       make([]PersistedReplica, 0, len(state.Replicas)),
 	}
 	for _, replica := range state.Replicas {
 		cloned.Replicas = append(cloned.Replicas, clonePersistedReplica(replica))

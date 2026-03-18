@@ -78,7 +78,7 @@ func runQueuedProgressFaultHistory(t *testing.T) queuedProgressFaultHistory {
 		t.Fatalf("routing during undelivered ready = %#v, want readable", routing.Slots[1])
 	}
 
-	if err := h.adapters["d"].ReportReplicaReady(ctx, 1); err != nil {
+	if err := h.adapters["d"].ReportReplicaReady(ctx, 1, 0); err != nil {
 		t.Fatalf("ReportReplicaReady returned error: %v", err)
 	}
 	if err := h.adapters["d"].DuplicateProgressAt(0); err != nil {

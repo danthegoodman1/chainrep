@@ -137,6 +137,12 @@ type Runtime struct {
 	state State
 }
 
+type EvaluatedCommand struct {
+	Plan      *coordinator.ReconfigurationPlan
+	NextState State
+	Duplicate *AppliedCommand
+}
+
 func Open(ctx context.Context, store Store) (*Runtime, error) {
 	checkpoint, ok, err := store.LoadLatestCheckpoint(ctx)
 	if err != nil {
@@ -174,6 +180,33 @@ func Open(ctx context.Context, store Store) (*Runtime, error) {
 	}
 
 	return r, nil
+}
+
+func OpenInMemoryFromState(state State) *Runtime {
+	return &Runtime{
+		store: NewInMemoryStore(),
+		state: cloneState(state),
+	}
+}
+
+func EvaluateCommand(state State, cmd Command) (EvaluatedCommand, error) {
+	r := &Runtime{state: cloneState(state)}
+	cluster, plan, duplicate, err := r.executeCommand(cmd)
+	if err != nil {
+		return EvaluatedCommand{}, err
+	}
+	if duplicate != nil {
+		cloned := cloneAppliedCommand(*duplicate)
+		return EvaluatedCommand{
+			Plan:      clonePlan(cloned.Plan),
+			NextState: r.snapshotForApplied(cloned),
+			Duplicate: &cloned,
+		}, nil
+	}
+	return EvaluatedCommand{
+		Plan:      clonePlan(plan),
+		NextState: r.nextStateForApplied(state.LastLogIndex+1, cmd, cluster, plan),
+	}, nil
 }
 
 func (r *Runtime) Current() State {

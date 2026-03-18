@@ -3,6 +3,7 @@ package gologger
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"runtime"
 	"strconv"
@@ -49,11 +50,16 @@ func NewLogger() zerolog.Logger {
 
 	zerolog.TimestampFieldName = "time"
 
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	output := io.Writer(os.Stdout)
+	if logsDisabledForTests() {
+		output = io.Discard
+	}
+
+	logger := zerolog.New(output).With().Timestamp().Logger()
 
 	logger = logger.Hook(CallerHook{})
 
-	if os.Getenv("LOG_JSON") == "" {
+	if os.Getenv("LOG_JSON") == "" && !logsDisabledForTests() {
 		logger = logger.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	}
 	if os.Getenv("TRACE") == "1" {
@@ -65,6 +71,13 @@ func NewLogger() zerolog.Logger {
 	}
 
 	return logger
+}
+
+func logsDisabledForTests() bool {
+	if os.Getenv("CHAINREP_ENABLE_TEST_LOGS") == "1" {
+		return false
+	}
+	return strings.HasSuffix(os.Args[0], ".test")
 }
 
 type CallerHook struct{}

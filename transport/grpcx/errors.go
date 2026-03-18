@@ -100,6 +100,14 @@ func encodeError(err error) error {
 		return st.Err()
 	}
 
+	var notLeader *coordserver.NotLeaderError
+	if errors.As(err, &notLeader) {
+		st, _ := status.New(codes.FailedPrecondition, err.Error()).WithDetails(&grpcproto.NotLeaderDetail{
+			LeaderEndpoint: notLeader.LeaderEndpoint,
+		})
+		return st.Err()
+	}
+
 	if detail, ok := domainErrorDetail(err); ok {
 		st, _ := status.New(domainErrorCode(detail.Kind), err.Error()).WithDetails(detail)
 		return st.Err()
@@ -161,6 +169,8 @@ func decodeError(err error) error {
 			}
 		case *grpcproto.DomainErrorDetail:
 			return decodeDomainError(typed)
+		case *grpcproto.NotLeaderDetail:
+			return &coordserver.NotLeaderError{LeaderEndpoint: typed.LeaderEndpoint}
 		}
 	}
 	switch st.Code() {

@@ -19,6 +19,7 @@ const (
 type queuedProgressReport struct {
 	kind     queuedProgressReportKind
 	slot     int
+	epoch    uint64
 	status   storage.NodeStatus
 	recovery storage.NodeRecoveryReport
 }
@@ -141,10 +142,10 @@ func (a *InMemoryNodeAdapter) DeliverProgressAt(ctx context.Context, index int) 
 	a.progressQueue = append(a.progressQueue[:index], a.progressQueue[index+1:]...)
 	switch report.kind {
 	case queuedProgressReportReady:
-		_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, report.slot, "")
+		_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, report.slot, report.epoch, "")
 		return err
 	case queuedProgressReportRemoved:
-		_, err := a.sink.ReportReplicaRemoved(ctx, a.nodeID, report.slot, "")
+		_, err := a.sink.ReportReplicaRemoved(ctx, a.nodeID, report.slot, report.epoch, "")
 		return err
 	case queuedProgressReportHeartbeat:
 		return a.sink.ReportNodeHeartbeat(ctx, report.status)
@@ -168,6 +169,7 @@ func cloneQueuedProgressReport(report queuedProgressReport) queuedProgressReport
 	cloned := queuedProgressReport{
 		kind:   report.kind,
 		slot:   report.slot,
+		epoch:  report.epoch,
 		status: report.status,
 	}
 	if report.kind == queuedProgressReportRecovered {
@@ -215,7 +217,7 @@ func (a *InMemoryNodeAdapter) DropRecoveredReplica(ctx context.Context, cmd stor
 	return a.node.DropRecoveredReplica(ctx, cmd)
 }
 
-func (a *InMemoryNodeAdapter) ReportReplicaReady(ctx context.Context, slot int) error {
+func (a *InMemoryNodeAdapter) ReportReplicaReady(ctx context.Context, slot int, epoch uint64) error {
 	if a.sink == nil {
 		return nil
 	}
@@ -223,14 +225,15 @@ func (a *InMemoryNodeAdapter) ReportReplicaReady(ctx context.Context, slot int) 
 		a.progressQueue = append(a.progressQueue, queuedProgressReport{
 			kind: queuedProgressReportReady,
 			slot: slot,
+			epoch: epoch,
 		})
 		return nil
 	}
-	_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, slot, "")
+	_, err := a.sink.ReportReplicaReady(ctx, a.nodeID, slot, epoch, "")
 	return err
 }
 
-func (a *InMemoryNodeAdapter) ReportReplicaRemoved(ctx context.Context, slot int) error {
+func (a *InMemoryNodeAdapter) ReportReplicaRemoved(ctx context.Context, slot int, epoch uint64) error {
 	if a.sink == nil {
 		return nil
 	}
@@ -238,10 +241,11 @@ func (a *InMemoryNodeAdapter) ReportReplicaRemoved(ctx context.Context, slot int
 		a.progressQueue = append(a.progressQueue, queuedProgressReport{
 			kind: queuedProgressReportRemoved,
 			slot: slot,
+			epoch: epoch,
 		})
 		return nil
 	}
-	_, err := a.sink.ReportReplicaRemoved(ctx, a.nodeID, slot, "")
+	_, err := a.sink.ReportReplicaRemoved(ctx, a.nodeID, slot, epoch, "")
 	return err
 }
 

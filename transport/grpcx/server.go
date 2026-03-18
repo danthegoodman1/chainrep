@@ -174,7 +174,7 @@ func (s *CoordinatorGRPCServer) ReportReplicaReady(ctx context.Context, req *grp
 			return nil, encodeError(err)
 		}
 	}
-	state, err := s.server.ReportReplicaReady(ctx, req.NodeId, int(req.Slot), req.CommandId)
+	state, err := s.server.ReportReplicaReady(ctx, req.NodeId, int(req.Slot), req.Epoch, req.CommandId)
 	if err != nil {
 		return nil, encodeError(err)
 	}
@@ -187,7 +187,7 @@ func (s *CoordinatorGRPCServer) ReportReplicaRemoved(ctx context.Context, req *g
 			return nil, encodeError(err)
 		}
 	}
-	state, err := s.server.ReportReplicaRemoved(ctx, req.NodeId, int(req.Slot), req.CommandId)
+	state, err := s.server.ReportReplicaRemoved(ctx, req.NodeId, int(req.Slot), req.Epoch, req.CommandId)
 	if err != nil {
 		return nil, encodeError(err)
 	}
@@ -332,42 +332,51 @@ func (s *StorageGRPCServer) Delete(ctx context.Context, req *grpcproto.ClientDel
 }
 
 func (s *StorageGRPCServer) AddReplicaAsTail(ctx context.Context, req *grpcproto.AddReplicaAsTailCommand) (*grpcproto.Empty, error) {
-	if err := s.node.AddReplicaAsTail(ctx, storage.AddReplicaAsTailCommand{Assignment: fromProtoAssignment(req.Assignment)}); err != nil {
+	if err := s.node.AddReplicaAsTail(ctx, storage.AddReplicaAsTailCommand{
+		Assignment: fromProtoAssignment(req.Assignment),
+		Epoch:      req.Epoch,
+	}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil
 }
 
 func (s *StorageGRPCServer) ActivateReplica(ctx context.Context, req *grpcproto.ActivateReplicaCommand) (*grpcproto.Empty, error) {
-	if err := s.node.ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: int(req.Slot)}); err != nil {
+	if err := s.node.ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: int(req.Slot), Epoch: req.Epoch}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil
 }
 
 func (s *StorageGRPCServer) MarkReplicaLeaving(ctx context.Context, req *grpcproto.MarkReplicaLeavingCommand) (*grpcproto.Empty, error) {
-	if err := s.node.MarkReplicaLeaving(ctx, storage.MarkReplicaLeavingCommand{Slot: int(req.Slot)}); err != nil {
+	if err := s.node.MarkReplicaLeaving(ctx, storage.MarkReplicaLeavingCommand{Slot: int(req.Slot), Epoch: req.Epoch}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil
 }
 
 func (s *StorageGRPCServer) RemoveReplica(ctx context.Context, req *grpcproto.RemoveReplicaCommand) (*grpcproto.Empty, error) {
-	if err := s.node.RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: int(req.Slot)}); err != nil {
+	if err := s.node.RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: int(req.Slot), Epoch: req.Epoch}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil
 }
 
 func (s *StorageGRPCServer) UpdateChainPeers(ctx context.Context, req *grpcproto.UpdateChainPeersCommand) (*grpcproto.Empty, error) {
-	if err := s.node.UpdateChainPeers(ctx, storage.UpdateChainPeersCommand{Assignment: fromProtoAssignment(req.Assignment)}); err != nil {
+	if err := s.node.UpdateChainPeers(ctx, storage.UpdateChainPeersCommand{
+		Assignment: fromProtoAssignment(req.Assignment),
+		Epoch:      req.Epoch,
+	}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil
 }
 
 func (s *StorageGRPCServer) ResumeRecoveredReplica(ctx context.Context, req *grpcproto.ResumeRecoveredReplicaCommand) (*grpcproto.Empty, error) {
-	if err := s.node.ResumeRecoveredReplica(ctx, storage.ResumeRecoveredReplicaCommand{Assignment: fromProtoAssignment(req.Assignment)}); err != nil {
+	if err := s.node.ResumeRecoveredReplica(ctx, storage.ResumeRecoveredReplicaCommand{
+		Assignment: fromProtoAssignment(req.Assignment),
+		Epoch:      req.Epoch,
+	}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil
@@ -377,6 +386,7 @@ func (s *StorageGRPCServer) RecoverReplica(ctx context.Context, req *grpcproto.R
 	if err := s.node.RecoverReplica(ctx, storage.RecoverReplicaCommand{
 		Assignment:   fromProtoAssignment(req.Assignment),
 		SourceNodeID: req.SourceNodeId,
+		Epoch:        req.Epoch,
 	}); err != nil {
 		return nil, encodeError(err)
 	}
@@ -384,7 +394,7 @@ func (s *StorageGRPCServer) RecoverReplica(ctx context.Context, req *grpcproto.R
 }
 
 func (s *StorageGRPCServer) DropRecoveredReplica(ctx context.Context, req *grpcproto.DropRecoveredReplicaCommand) (*grpcproto.Empty, error) {
-	if err := s.node.DropRecoveredReplica(ctx, storage.DropRecoveredReplicaCommand{Slot: int(req.Slot)}); err != nil {
+	if err := s.node.DropRecoveredReplica(ctx, storage.DropRecoveredReplicaCommand{Slot: int(req.Slot), Epoch: req.Epoch}); err != nil {
 		return nil, encodeError(err)
 	}
 	return &grpcproto.Empty{}, nil

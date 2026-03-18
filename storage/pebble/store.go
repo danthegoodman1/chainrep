@@ -20,6 +20,7 @@ const (
 	keyCommittedData byte = 'c'
 	keyStagedOp      byte = 's'
 	keyLocalReplica  byte = 'l'
+	keyLocalNodeMeta byte = 'n'
 )
 
 const (
@@ -30,6 +31,7 @@ const (
 	opCommitSequence              = "commit_sequence"
 	opUpsertLocalReplica          = "upsert_local_replica"
 	opDeleteLocalReplica          = "delete_local_replica"
+	opSetLocalNodeMeta            = "set_local_node_meta"
 	opCleanupStagedOnOpen         = "cleanup_staged_on_open"
 )
 
@@ -356,6 +358,18 @@ func (b *Backend) StagedSequences(slot int) ([]uint64, error) {
 }
 
 func (l *LocalStore) LoadNode(_ context.Context, nodeID string) (storage.PersistedNodeState, error) {
+	state := storage.PersistedNodeState{
+		NodeID:   nodeID,
+		Replicas: make([]storage.PersistedReplica, 0),
+	}
+	if value, closer, err := l.owner.db.Get(localNodeMetaKey(nodeID)); err == nil {
+		if len(value) == 8 {
+			state.HighestAcceptedCoordinatorEpoch = binary.BigEndian.Uint64(value)
+		}
+		closer.Close()
+	} else if !errors.Is(err, cockroachpebble.ErrNotFound) {
+		return storage.PersistedNodeState{}, fmt.Errorf("err in db.Get(local node meta): %w", err)
+	}
 	prefix := localReplicaPrefix(nodeID)
 	iter, err := l.owner.db.NewIter(&cockroachpebble.IterOptions{
 		LowerBound: prefix,
@@ -365,10 +379,6 @@ func (l *LocalStore) LoadNode(_ context.Context, nodeID string) (storage.Persist
 		return storage.PersistedNodeState{}, fmt.Errorf("err in db.NewIter(local): %w", err)
 	}
 	defer iter.Close()
-	state := storage.PersistedNodeState{
-		NodeID:   nodeID,
-		Replicas: make([]storage.PersistedReplica, 0),
-	}
 	for iter.First(); iter.Valid(); iter.Next() {
 		var replica storage.PersistedReplica
 		if err := json.Unmarshal(iter.Value(), &replica); err != nil {
@@ -399,6 +409,13 @@ func (l *LocalStore) UpsertReplica(_ context.Context, nodeID string, replica sto
 func (l *LocalStore) DeleteReplica(_ context.Context, nodeID string, slot int) error {
 	if err := l.owner.deleteSync(localReplicaKey(nodeID, slot), opDeleteLocalReplica); err != nil && !errors.Is(err, cockroachpebble.ErrNotFound) {
 		return fmt.Errorf("err in owner.deleteSync(local replica): %w", err)
+	}
+	return nil
+}
+
+func (l *LocalStore) SetHighestAcceptedCoordinatorEpoch(_ context.Context, nodeID string, epoch uint64) error {
+	if err := l.owner.setSync(localNodeMetaKey(nodeID), encodeUint64(epoch), opSetLocalNodeMeta); err != nil {
+		return fmt.Errorf("err in owner.setSync(local node meta): %w", err)
 	}
 	return nil
 }
@@ -573,6 +590,15 @@ func localReplicaPrefix(nodeID string) []byte {
 
 func localReplicaKey(nodeID string, slot int) []byte {
 	return append(localReplicaPrefix(nodeID), encodeSlot(slot)...)
+}
+
+func localNodeMetaKey(nodeID string) []byte {
+	prefix := []byte{keyLocalNodeMeta}
+	length := make([]byte, 4)
+	binary.BigEndian.PutUint32(length, uint32(len(nodeID)))
+	prefix = append(prefix, length...)
+	prefix = append(prefix, []byte(nodeID)...)
+	return prefix
 }
 
 func encodeSlot(slot int) []byte {

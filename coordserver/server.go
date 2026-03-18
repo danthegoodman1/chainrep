@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
@@ -18,6 +19,7 @@ import (
 
 var (
 	ErrUnknownNode          = errors.New("unknown coordinator server node")
+	ErrNotLeader            = errors.New("coordinator server is not the active leader")
 	ErrDispatchFailed       = errors.New("coordinator server dispatch failed")
 	ErrDispatchTimeout      = errors.New("coordinator server dispatch timed out or was canceled")
 	ErrUnexpectedProgress   = errors.New("unexpected coordinator server progress")
@@ -27,6 +29,21 @@ var (
 	ErrRecoveryFailed       = errors.New("coordinator server recovery failed")
 	ErrInvalidServerConfig  = errors.New("invalid coordinator server config")
 )
+
+type NotLeaderError struct {
+	LeaderEndpoint string
+}
+
+func (e *NotLeaderError) Error() string {
+	if e == nil || e.LeaderEndpoint == "" {
+		return ErrNotLeader.Error()
+	}
+	return fmt.Sprintf("%s: leader=%s", ErrNotLeader, e.LeaderEndpoint)
+}
+
+func (e *NotLeaderError) Unwrap() error {
+	return ErrNotLeader
+}
 
 type StorageNodeClient interface {
 	AddReplicaAsTail(ctx context.Context, cmd storage.AddReplicaAsTailCommand) error
@@ -51,6 +68,7 @@ type PendingWork struct {
 	NodeID      string
 	Kind        pendingKind
 	SlotVersion uint64
+	Epoch       uint64
 	CommandID   string
 }
 
@@ -86,6 +104,7 @@ type ServerConfig struct {
 	DispatchTimeout        time.Duration
 	RecoveryCommandTimeout time.Duration
 	NodeClientFactory      NodeClientFactory
+	HA                     *HAConfig
 	Logger                 *zerolog.Logger
 	MetricsRegistry        *prometheus.Registry
 }
@@ -113,6 +132,9 @@ type Server struct {
 	logger                 zerolog.Logger
 	metrics                *serverMetrics
 	events                 *serverEventRecorder
+	ha                     *haController
+	closeOnce              sync.Once
+	closeCh                chan struct{}
 }
 
 const (
@@ -160,6 +182,7 @@ func OpenWithConfig(
 		logger:                 coordLoggerFromConfig(cfg.Logger),
 		metrics:                newServerMetrics(cfg.MetricsRegistry),
 		events:                 newServerEventRecorder(),
+		closeCh:                make(chan struct{}),
 	}
 	if server.clock == nil {
 		server.clock = realClock{}
@@ -172,10 +195,33 @@ func OpenWithConfig(
 	}
 	server.syncViewsFromRuntime()
 	server.rebuildRoutingSnapshot()
+	if cfg.HA != nil {
+		if err := server.enableHA(*cfg.HA); err != nil {
+			return nil, fmt.Errorf("err in server.enableHA: %w", err)
+		}
+	}
 	return server, nil
 }
 
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closeCh)
+		if s.ha != nil && s.ha.stop != nil {
+			close(s.ha.stop)
+			if s.ha.done != nil {
+				<-s.ha.done
+			}
+		}
+	})
+	return nil
+}
+
 func (s *Server) Current() coordruntime.State {
+	if s.ha != nil {
+		if snapshot, err := s.ha.cfg.Store.LoadSnapshot(context.Background()); err == nil {
+			s.syncFromHASnapshot(snapshot)
+		}
+	}
 	return s.rt.Current()
 }
 
@@ -203,7 +249,12 @@ func (s *Server) Pending() map[int]PendingWork {
 	return cloned
 }
 
-func (s *Server) RoutingSnapshot(_ context.Context) (RoutingSnapshot, error) {
+func (s *Server) RoutingSnapshot(ctx context.Context) (RoutingSnapshot, error) {
+	if s.ha != nil {
+		if err := s.ensureLeader(ctx); err != nil {
+			return RoutingSnapshot{}, err
+		}
+	}
 	return cloneRoutingSnapshot(s.routingSnapshot), nil
 }
 
@@ -227,6 +278,11 @@ func (s *Server) clientForNodeID(nodeID string) (StorageNodeClient, error) {
 }
 
 func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
+	if s.ha != nil {
+		return s.applyHAWithPlanner(ctx, nil, func(planner *Server) (coordruntime.State, error) {
+			return planner.Bootstrap(ctx, cmd)
+		})
+	}
 	defer s.refreshMetricGauges()
 	if cmd.Kind != coordruntime.CommandKindBootstrap || cmd.Bootstrap == nil {
 		err := fmt.Errorf("%w: bootstrap requires bootstrap command payload", ErrInvalidServerCommand)
@@ -248,18 +304,42 @@ func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coord
 }
 
 func (s *Server) AddNode(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
+	if s.ha != nil {
+		seed := []string{}
+		if cmd.Reconfigure != nil && len(cmd.Reconfigure.Events) > 0 {
+			seed = append(seed, cmd.Reconfigure.Events[0].Node.ID)
+		}
+		return s.applyHAWithPlanner(ctx, seed, func(planner *Server) (coordruntime.State, error) {
+			return planner.AddNode(ctx, cmd)
+		})
+	}
 	return s.applyMembershipMutation(ctx, cmd, coordinator.EventKindAddNode)
 }
 
 func (s *Server) BeginDrainNode(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
+	if s.ha != nil {
+		return s.applyHAWithPlanner(ctx, nil, func(planner *Server) (coordruntime.State, error) {
+			return planner.BeginDrainNode(ctx, cmd)
+		})
+	}
 	return s.applyMembershipMutation(ctx, cmd, coordinator.EventKindBeginDrainNode)
 }
 
 func (s *Server) MarkNodeDead(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
+	if s.ha != nil {
+		return s.applyHAWithPlanner(ctx, nil, func(planner *Server) (coordruntime.State, error) {
+			return planner.MarkNodeDead(ctx, cmd)
+		})
+	}
 	return s.applyMembershipMutation(ctx, cmd, coordinator.EventKindMarkNodeDead)
 }
 
-func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int, commandID string) (coordruntime.State, error) {
+func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int, epoch uint64, commandID string) (coordruntime.State, error) {
+	if s.ha != nil {
+		return s.applyHAWithPlanner(ctx, []string{nodeID}, func(planner *Server) (coordruntime.State, error) {
+			return planner.ReportReplicaReady(ctx, nodeID, slot, epoch, commandID)
+		})
+	}
 	defer s.refreshMetricGauges()
 	state := s.rt.Current()
 	slotVersion := state.SlotVersions[slot]
@@ -290,6 +370,14 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 			ErrUnexpectedProgress,
 			slotVersion,
 			pending.SlotVersion,
+		)
+	}
+	if pending.Epoch != 0 && epoch != 0 && pending.Epoch != epoch {
+		return coordruntime.State{}, fmt.Errorf(
+			"%w: ready report epoch %d does not match pending epoch %d",
+			ErrUnexpectedProgress,
+			epoch,
+			pending.Epoch,
 		)
 	}
 	if !slotContainsReplicaInState(state.Cluster, slot, nodeID, coordinator.ReplicaStateJoining) {
@@ -330,7 +418,12 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	return s.rt.Current(), nil
 }
 
-func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot int, commandID string) (coordruntime.State, error) {
+func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot int, epoch uint64, commandID string) (coordruntime.State, error) {
+	if s.ha != nil {
+		return s.applyHAWithPlanner(ctx, []string{nodeID}, func(planner *Server) (coordruntime.State, error) {
+			return planner.ReportReplicaRemoved(ctx, nodeID, slot, epoch, commandID)
+		})
+	}
 	defer s.refreshMetricGauges()
 	state := s.rt.Current()
 	slotVersion := state.SlotVersions[slot]
@@ -361,6 +454,14 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 			ErrUnexpectedProgress,
 			slotVersion,
 			pending.SlotVersion,
+		)
+	}
+	if pending.Epoch != 0 && epoch != 0 && pending.Epoch != epoch {
+		return coordruntime.State{}, fmt.Errorf(
+			"%w: removed report epoch %d does not match pending epoch %d",
+			ErrUnexpectedProgress,
+			epoch,
+			pending.Epoch,
 		)
 	}
 	if !slotContainsReplicaInState(state.Cluster, slot, nodeID, coordinator.ReplicaStateLeaving) {
@@ -403,6 +504,15 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 }
 
 func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeStatus) error {
+	if s.ha != nil {
+		_, err := s.applyHAWithPlanner(ctx, []string{status.NodeID}, func(planner *Server) (coordruntime.State, error) {
+			if err := planner.ReportNodeHeartbeat(ctx, status); err != nil {
+				return coordruntime.State{}, err
+			}
+			return planner.rt.Current(), nil
+		})
+		return err
+	}
 	if _, ok := s.rt.Current().Cluster.NodesByID[status.NodeID]; !ok {
 		if _, fallbackOK := s.nodes[status.NodeID]; !fallbackOK {
 			return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
@@ -443,6 +553,15 @@ func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeSta
 }
 
 func (s *Server) EvaluateLiveness(ctx context.Context) error {
+	if s.ha != nil {
+		_, err := s.applyHAWithPlanner(ctx, nil, func(planner *Server) (coordruntime.State, error) {
+			if err := planner.EvaluateLiveness(ctx); err != nil {
+				return coordruntime.State{}, err
+			}
+			return planner.rt.Current(), nil
+		})
+		return err
+	}
 	if s.livenessPolicy.SuspectAfter <= 0 || s.livenessPolicy.DeadAfter <= 0 {
 		return nil
 	}
@@ -521,6 +640,15 @@ func (s *Server) EvaluateLiveness(ctx context.Context) error {
 }
 
 func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRecoveryReport) error {
+	if s.ha != nil {
+		_, err := s.applyHAWithPlanner(ctx, []string{report.NodeID}, func(planner *Server) (coordruntime.State, error) {
+			if err := planner.ReportNodeRecovered(ctx, report); err != nil {
+				return coordruntime.State{}, err
+			}
+			return planner.rt.Current(), nil
+		})
+		return err
+	}
 	defer s.refreshMetricGauges()
 	if _, ok := s.rt.Current().Cluster.NodesByID[report.NodeID]; !ok {
 		if _, fallbackOK := s.nodes[report.NodeID]; !fallbackOK {
@@ -712,6 +840,7 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 		NodeID:      addedNodeID,
 		Kind:        pendingKindReady,
 		SlotVersion: chainVersion,
+		Epoch:       0,
 	}
 
 	skipped := map[string]bool{addedNodeID: true}
@@ -801,6 +930,7 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 		NodeID:      leavingNodeID,
 		Kind:        pendingKindRemoved,
 		SlotVersion: chainVersion,
+		Epoch:       0,
 	}
 	s.observeDispatchResult("mark_replica_leaving", start, nil)
 	s.observeRepair("mark_leaving_started", "success", leavingNodeID, ops.IntPtr(slotPlan.Slot), nil)
@@ -1331,6 +1461,20 @@ func validateServerConfig(cfg ServerConfig) error {
 	}
 	if cfg.RecoveryCommandTimeout < 0 {
 		return fmt.Errorf("%w: recovery command timeout must be >= 0", ErrInvalidServerConfig)
+	}
+	if cfg.HA != nil {
+		if cfg.HA.CoordinatorID == "" {
+			return fmt.Errorf("%w: ha coordinator id must not be empty", ErrInvalidServerConfig)
+		}
+		if cfg.HA.Store == nil {
+			return fmt.Errorf("%w: ha store must not be nil", ErrInvalidServerConfig)
+		}
+		if cfg.HA.LeaseTTL < 0 {
+			return fmt.Errorf("%w: ha lease ttl must be >= 0", ErrInvalidServerConfig)
+		}
+		if cfg.HA.RenewInterval < 0 {
+			return fmt.Errorf("%w: ha renew interval must be >= 0", ErrInvalidServerConfig)
+		}
 	}
 	return nil
 }

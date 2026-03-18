@@ -303,7 +303,7 @@ type updatingCoordinatorClient struct {
 	node *Node
 }
 
-func (c *updatingCoordinatorClient) ReportReplicaReady(ctx context.Context, slot int) error {
+func (c *updatingCoordinatorClient) ReportReplicaReady(ctx context.Context, slot int, _ uint64) error {
 	return c.node.UpdateChainPeers(ctx, UpdateChainPeersCommand{
 		Assignment: ReplicaAssignment{
 			Slot:         slot,
@@ -314,7 +314,7 @@ func (c *updatingCoordinatorClient) ReportReplicaReady(ctx context.Context, slot
 	})
 }
 
-func (c *updatingCoordinatorClient) ReportReplicaRemoved(context.Context, int) error {
+func (c *updatingCoordinatorClient) ReportReplicaRemoved(context.Context, int, uint64) error {
 	return nil
 }
 

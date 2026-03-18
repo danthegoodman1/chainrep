@@ -111,12 +111,13 @@ type LocalStateStore interface {
 	LoadNode(ctx context.Context, nodeID string) (PersistedNodeState, error)
 	UpsertReplica(ctx context.Context, nodeID string, replica PersistedReplica) error
 	DeleteReplica(ctx context.Context, nodeID string, slot int) error
+	SetHighestAcceptedCoordinatorEpoch(ctx context.Context, nodeID string, epoch uint64) error
 	Close() error
 }
 
 type CoordinatorClient interface {
-	ReportReplicaReady(ctx context.Context, slot int) error
-	ReportReplicaRemoved(ctx context.Context, slot int) error
+	ReportReplicaReady(ctx context.Context, slot int, epoch uint64) error
+	ReportReplicaRemoved(ctx context.Context, slot int, epoch uint64) error
 	ReportNodeRecovered(ctx context.Context, report NodeRecoveryReport) error
 	ReportNodeHeartbeat(ctx context.Context, status NodeStatus) error
 }
@@ -383,8 +384,9 @@ type PersistedReplica struct {
 }
 
 type PersistedNodeState struct {
-	NodeID   string
-	Replicas []PersistedReplica
+	NodeID                         string
+	HighestAcceptedCoordinatorEpoch uint64
+	Replicas                       []PersistedReplica
 }
 
 type RecoveredReplica struct {
@@ -401,35 +403,43 @@ type NodeRecoveryReport struct {
 
 type AddReplicaAsTailCommand struct {
 	Assignment ReplicaAssignment
+	Epoch      uint64
 }
 
 type ActivateReplicaCommand struct {
-	Slot int
+	Slot  int
+	Epoch uint64
 }
 
 type MarkReplicaLeavingCommand struct {
-	Slot int
+	Slot  int
+	Epoch uint64
 }
 
 type RemoveReplicaCommand struct {
-	Slot int
+	Slot  int
+	Epoch uint64
 }
 
 type UpdateChainPeersCommand struct {
 	Assignment ReplicaAssignment
+	Epoch      uint64
 }
 
 type ResumeRecoveredReplicaCommand struct {
 	Assignment ReplicaAssignment
+	Epoch      uint64
 }
 
 type RecoverReplicaCommand struct {
 	Assignment   ReplicaAssignment
 	SourceNodeID string
+	Epoch        uint64
 }
 
 type DropRecoveredReplicaCommand struct {
-	Slot int
+	Slot  int
+	Epoch uint64
 }
 
 type replicaRecord struct {
@@ -471,6 +481,7 @@ type Node struct {
 	clock                             Clock
 	inFlightClientWrites              int
 	inFlightCatchups                  int
+	highestAcceptedCoordinatorEpoch   uint64
 	closeErr                          error
 	closed                            bool
 	logger                            zerolog.Logger
@@ -570,6 +581,7 @@ func OpenNode(
 	if err != nil {
 		return nil, fmt.Errorf("err in node.local.LoadNode: %w", err)
 	}
+	node.highestAcceptedCoordinatorEpoch = persisted.HighestAcceptedCoordinatorEpoch
 	for _, replica := range persisted.Replicas {
 		record := replicaRecord{
 			assignment:               cloneAssignment(replica.Assignment),
@@ -601,6 +613,9 @@ func OpenNode(
 
 func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand) error {
 	start := time.Now()
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	if cmd.Assignment.Slot < 0 {
 		err := fmt.Errorf("%w: slot must be >= 0", ErrInvalidConfig)
 		n.events.record(n.logger, zerolog.ErrorLevel, "add_replica_failed", "storage add replica as tail failed", ops.IntPtr(cmd.Assignment.Slot), nil, nil, cmd.Assignment.Peers.PredecessorNodeID, "", err)
@@ -690,6 +705,9 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 }
 
 func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) error {
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, ok := n.replicas[cmd.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
@@ -697,7 +715,7 @@ func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) 
 	if record.state != ReplicaStateCatchingUp {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Slot, record.state)
 	}
-	if err := n.coord.ReportReplicaReady(ctx, cmd.Slot); err != nil {
+	if err := n.coord.ReportReplicaReady(ctx, cmd.Slot, n.highestAcceptedCoordinatorEpoch); err != nil {
 		return fmt.Errorf("err in n.coord.ReportReplicaReady: %w", err)
 	}
 
@@ -713,6 +731,9 @@ func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) 
 }
 
 func (n *Node) MarkReplicaLeaving(ctx context.Context, cmd MarkReplicaLeavingCommand) error {
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, ok := n.replicas[cmd.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
@@ -732,6 +753,9 @@ func (n *Node) MarkReplicaLeaving(ctx context.Context, cmd MarkReplicaLeavingCom
 }
 
 func (n *Node) RemoveReplica(ctx context.Context, cmd RemoveReplicaCommand) error {
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, ok := n.replicas[cmd.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
@@ -752,7 +776,7 @@ func (n *Node) RemoveReplica(ctx context.Context, cmd RemoveReplicaCommand) erro
 			return fmt.Errorf("err in n.local.DeleteReplica: %w", err)
 		}
 	}
-	if err := n.coord.ReportReplicaRemoved(ctx, cmd.Slot); err != nil {
+	if err := n.coord.ReportReplicaRemoved(ctx, cmd.Slot, n.highestAcceptedCoordinatorEpoch); err != nil {
 		return fmt.Errorf("err in n.coord.ReportReplicaRemoved: %w", err)
 	}
 
@@ -763,6 +787,9 @@ func (n *Node) RemoveReplica(ctx context.Context, cmd RemoveReplicaCommand) erro
 }
 
 func (n *Node) UpdateChainPeers(ctx context.Context, cmd UpdateChainPeersCommand) error {
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, ok := n.replicas[cmd.Assignment.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Assignment.Slot)
@@ -813,6 +840,9 @@ func (n *Node) ReportRecoveredState(ctx context.Context) error {
 }
 
 func (n *Node) ResumeRecoveredReplica(ctx context.Context, cmd ResumeRecoveredReplicaCommand) error {
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, ok := n.replicas[cmd.Assignment.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Assignment.Slot)
@@ -837,6 +867,9 @@ func (n *Node) ResumeRecoveredReplica(ctx context.Context, cmd ResumeRecoveredRe
 
 func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) error {
 	start := time.Now()
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, exists := n.replicas[cmd.Assignment.Slot]
 	if exists && record.state != ReplicaStateRecovered {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
@@ -895,6 +928,9 @@ func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) er
 }
 
 func (n *Node) DropRecoveredReplica(ctx context.Context, cmd DropRecoveredReplicaCommand) error {
+	if err := n.acceptCoordinatorEpoch(ctx, cmd.Epoch); err != nil {
+		return err
+	}
 	record, ok := n.replicas[cmd.Slot]
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
@@ -2018,6 +2054,24 @@ func (n *Node) persistReplica(ctx context.Context, record replicaRecord) error {
 		return fmt.Errorf("err in n.local.UpsertReplica: %w", err)
 	}
 	return nil
+}
+
+func (n *Node) acceptCoordinatorEpoch(ctx context.Context, epoch uint64) error {
+	if epoch == 0 || epoch == n.highestAcceptedCoordinatorEpoch {
+		return nil
+	}
+	if epoch < n.highestAcceptedCoordinatorEpoch {
+		return fmt.Errorf("%w: coordinator epoch %d regresses highest accepted epoch %d", ErrWriteRejected, epoch, n.highestAcceptedCoordinatorEpoch)
+	}
+	if err := n.local.SetHighestAcceptedCoordinatorEpoch(ctx, n.nodeID, epoch); err != nil {
+		return fmt.Errorf("err in n.local.SetHighestAcceptedCoordinatorEpoch: %w", err)
+	}
+	n.highestAcceptedCoordinatorEpoch = epoch
+	return nil
+}
+
+func (n *Node) HighestAcceptedCoordinatorEpoch() uint64 {
+	return n.highestAcceptedCoordinatorEpoch
 }
 
 func (n *Node) ensureBackendReplica(slot int) error {

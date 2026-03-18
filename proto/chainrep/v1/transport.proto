@@ -95,12 +95,14 @@ message ReplicaReadyReport {
   string node_id = 1;
   int32 slot = 2;
   string command_id = 3;
+  uint64 epoch = 4;
 }
 
 message ReplicaRemovedReport {
   string node_id = 1;
   int32 slot = 2;
   string command_id = 3;
+  uint64 epoch = 4;
 }
 
 message NodeStatus {
@@ -139,35 +141,43 @@ message NodeRecoveryReport {
 
 message AddReplicaAsTailCommand {
   ReplicaAssignment assignment = 1;
+  uint64 epoch = 2;
 }
 
 message ActivateReplicaCommand {
   int32 slot = 1;
+  uint64 epoch = 2;
 }
 
 message MarkReplicaLeavingCommand {
   int32 slot = 1;
+  uint64 epoch = 2;
 }
 
 message RemoveReplicaCommand {
   int32 slot = 1;
+  uint64 epoch = 2;
 }
 
 message UpdateChainPeersCommand {
   ReplicaAssignment assignment = 1;
+  uint64 epoch = 2;
 }
 
 message ResumeRecoveredReplicaCommand {
   ReplicaAssignment assignment = 1;
+  uint64 epoch = 2;
 }
 
 message RecoverReplicaCommand {
   ReplicaAssignment assignment = 1;
   string source_node_id = 2;
+  uint64 epoch = 3;
 }
 
 message DropRecoveredReplicaCommand {
   int32 slot = 1;
+  uint64 epoch = 2;
 }
 
 message ClientGetRequest {
@@ -281,6 +291,10 @@ message DomainErrorDetail {
   int32 slot = 2;
   uint64 sequence = 3;
   string reason = 4;
+}
+
+message NotLeaderDetail {
+  string leader_endpoint = 1;
 }
 
 service CoordinatorService {
