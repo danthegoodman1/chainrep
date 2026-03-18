@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 
-	grpcproto "github.com/danthegoodman1/chainrep/proto/chainrep/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -32,12 +31,10 @@ type ClientTLSConfig struct {
 }
 
 type ServerTLSConfig struct {
-	CAFile                string
-	CertFile              string
-	KeyFile               string
-	ClientAuth            ClientAuthMode
-	CoordinatorIdentities []string
-	StorageNodeIdentities []string
+	CAFile     string
+	CertFile   string
+	KeyFile    string
+	ClientAuth ClientAuthMode
 }
 
 type rpcPlane string
@@ -51,8 +48,16 @@ const (
 )
 
 type rpcAuthorizer struct {
-	coordinatorIdentities map[string]struct{}
-	storageIdentities     map[string]struct{}
+}
+
+const (
+	peerRoleCoordinator = "coordinator"
+	peerRoleStorage     = "storage"
+)
+
+type peerIdentity struct {
+	role      string
+	logicalID string
 }
 
 func newClientTransportCredentials(cfg ClientTLSConfig) (credentials.TransportCredentials, error) {
@@ -155,21 +160,7 @@ func loadCertPool(path string) (*x509.CertPool, error) {
 }
 
 func newRPCAuthorizer(cfg ServerTLSConfig) *rpcAuthorizer {
-	return &rpcAuthorizer{
-		coordinatorIdentities: identitySet(cfg.CoordinatorIdentities),
-		storageIdentities:     identitySet(cfg.StorageNodeIdentities),
-	}
-}
-
-func identitySet(values []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		out[value] = struct{}{}
-	}
-	return out
+	return &rpcAuthorizer{}
 }
 
 func (a *rpcAuthorizer) unaryInterceptor(policy func(string) rpcPlane) grpc.UnaryServerInterceptor {
@@ -199,9 +190,9 @@ func (a *rpcAuthorizer) streamInterceptor(policy func(string) rpcPlane) grpc.Str
 func (a *rpcAuthorizer) authorizePlane(ctx context.Context, plane rpcPlane) error {
 	switch plane {
 	case rpcPlaneStorageControl:
-		return a.requireIdentityInSet(ctx, a.coordinatorIdentities, "coordinator identity required")
-	case rpcPlaneStorageReplica, rpcPlaneCoordinatorReport:
-		return a.requireIdentityInSet(ctx, a.storageIdentities, "storage-node identity required")
+		return a.requireRole(ctx, peerRoleCoordinator)
+	case rpcPlaneCoordinatorReport, rpcPlaneStorageReplica:
+		return a.requireRole(ctx, peerRoleStorage)
 	default:
 		return nil
 	}
@@ -212,65 +203,69 @@ func (a *rpcAuthorizer) requireStorageIdentityMatch(ctx context.Context, claimed
 	if err != nil {
 		return err
 	}
-	if _, ok := a.storageIdentities[identity]; !ok {
-		return status.Error(codes.PermissionDenied, "peer identity is not an authorized storage node")
+	if identity.role != peerRoleStorage {
+		return status.Error(codes.PermissionDenied, "storage identity required")
 	}
-	if claimed != "" && claimed != identity {
+	if claimed != "" && claimed != identity.logicalID {
 		return status.Error(codes.PermissionDenied, "peer identity does not match claimed node id")
 	}
 	return nil
 }
 
-func (a *rpcAuthorizer) requireIdentityInSet(ctx context.Context, allowed map[string]struct{}, missingMsg string) error {
+func (a *rpcAuthorizer) requireRole(ctx context.Context, role string) error {
 	identity, err := a.requireIdentity(ctx)
 	if err != nil {
 		return err
 	}
-	if len(allowed) == 0 {
-		return status.Error(codes.PermissionDenied, missingMsg)
-	}
-	if _, ok := allowed[identity]; !ok {
-		return status.Error(codes.PermissionDenied, "peer identity is not authorized for this rpc")
+	if identity.role != role {
+		return status.Error(codes.PermissionDenied, fmt.Sprintf("%s identity required", role))
 	}
 	return nil
 }
 
-func (a *rpcAuthorizer) requireIdentity(ctx context.Context) (string, error) {
+func (a *rpcAuthorizer) requireIdentity(ctx context.Context) (peerIdentity, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
-		return "", status.Error(codes.Unauthenticated, "missing peer context")
+		return peerIdentity{}, status.Error(codes.Unauthenticated, "missing peer context")
 	}
 	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
 	if !ok {
-		return "", status.Error(codes.Unauthenticated, "missing tls peer identity")
+		return peerIdentity{}, status.Error(codes.Unauthenticated, "missing tls peer identity")
 	}
 	if len(tlsInfo.State.VerifiedChains) == 0 || len(tlsInfo.State.PeerCertificates) == 0 {
-		return "", status.Error(codes.Unauthenticated, "client certificate required")
+		return peerIdentity{}, status.Error(codes.Unauthenticated, "client certificate required")
 	}
 	identity, err := certificateIdentity(tlsInfo.State.PeerCertificates[0])
 	if err != nil {
-		return "", status.Error(codes.PermissionDenied, err.Error())
+		return peerIdentity{}, status.Error(codes.PermissionDenied, err.Error())
 	}
 	return identity, nil
 }
 
-func certificateIdentity(cert *x509.Certificate) (string, error) {
+func certificateIdentity(cert *x509.Certificate) (peerIdentity, error) {
 	if cert == nil {
-		return "", errors.New("missing peer certificate")
+		return peerIdentity{}, errors.New("missing peer certificate")
 	}
-	if len(cert.DNSNames) > 0 && cert.DNSNames[0] != "" {
-		return cert.DNSNames[0], nil
+	if cert.Subject.CommonName == "" {
+		return peerIdentity{}, errors.New("peer certificate must use common name as role")
 	}
-	if len(cert.IPAddresses) > 0 {
-		return cert.IPAddresses[0].String(), nil
+	if cert.Subject.CommonName != peerRoleCoordinator && cert.Subject.CommonName != peerRoleStorage {
+		return peerIdentity{}, fmt.Errorf("peer certificate common name %q is not a supported role", cert.Subject.CommonName)
 	}
-	if len(cert.URIs) > 0 && cert.URIs[0] != nil {
-		return cert.URIs[0].String(), nil
+	if len(cert.DNSNames) == 0 || cert.DNSNames[0] == "" {
+		return peerIdentity{}, errors.New("peer certificate must use first dns san as logical identity")
 	}
-	if cert.Subject.CommonName != "" {
-		return cert.Subject.CommonName, nil
+	return peerIdentity{
+		role:      cert.Subject.CommonName,
+		logicalID: cert.DNSNames[0],
+	}, nil
+}
+
+func (p peerIdentity) String() string {
+	if p.logicalID == "" {
+		return p.role
 	}
-	return "", errors.New("peer certificate does not contain a usable identity")
+	return p.role + ":" + p.logicalID
 }
 
 func coordinatorRPCPlane(fullMethod string) rpcPlane {
@@ -303,24 +298,5 @@ func storageRPCPlane(fullMethod string) rpcPlane {
 		return rpcPlaneStorageReplica
 	default:
 		return rpcPlaneClientData
-	}
-}
-
-func claimNodeID(req any) string {
-	switch typed := req.(type) {
-	case *grpcproto.ReplicaReadyReport:
-		return typed.NodeId
-	case *grpcproto.ReplicaRemovedReport:
-		return typed.NodeId
-	case *grpcproto.NodeStatus:
-		return typed.NodeId
-	case *grpcproto.NodeRecoveryReport:
-		return typed.NodeId
-	case *grpcproto.ForwardWriteRequest:
-		return typed.FromNodeId
-	case *grpcproto.CommitWriteRequest:
-		return typed.FromNodeId
-	default:
-		return ""
 	}
 }

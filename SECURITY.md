@@ -12,7 +12,7 @@ Uses a simple cluster-CA model:
 - one CA signs coordinator and storage-node certificates
 - internal coordinator/storage RPCs use mTLS
 - client-facing RPCs use TLS, with optional client certificate verification
-- internal authorization is identity-bound, not CA-only trust
+- internal authorization is role- and identity-bound, not CA-only trust
 
 That means:
 
@@ -23,32 +23,58 @@ That means:
 
 ## Identity Rules
 
-The transport layer extracts peer identity from the certificate in this order:
+Internal transport authorization uses one simple certificate convention:
 
-1. first DNS SAN
-2. first IP SAN
-3. first URI SAN
-4. Common Name
+- `Common Name` is the peer role
+- first `DNS SAN` is the logical identity
 
-For predictable behavior, issue certificates with one logical DNS SAN first, for example:
+For v1, the supported internal roles are:
 
-- coordinator: `coordinator`
-- storage node `a`: `a`
-- storage node `b`: `b`
+- `CN=coordinator`
+- `CN=storage`
 
-If the RPC endpoint is reached by IP or hostname, also include the actual host/IP in SANs
- so normal TLS server verification succeeds.
+Examples:
+
+- coordinator cert:
+  - `CN=coordinator`
+  - first `DNS SAN=coordinator`
+- storage node `a` cert:
+  - `CN=storage`
+  - first `DNS SAN=a`
+- storage node `b` cert:
+  - `CN=storage`
+  - first `DNS SAN=b`
+
+The first DNS SAN should remain the logical identity used by the application.
+
+For stable certificates that do not need to change when hostnames or IPs change:
+
+- keep the first DNS SAN as the logical identity
+- set `ClientTLSConfig.ServerName` to a stable SAN value
+
+For example:
+
+- coordinator cert can use `DNS.1=coordinator`
+- storage-node cert can use `DNS.1=a` and `DNS.2=storage`
+- clients that talk to many storage nodes can use `ServerName: "storage"`
+
+That keeps application identity stable while avoiding IP-based certificate churn.
 
 ## RPC Authorization
 
 Internal authorization is enforced by RPC plane:
 
-- coordinator report RPCs accept authorized storage-node identities only
-- report payload `node_id` must match the authenticated storage-node identity
-- storage control RPCs accept authorized coordinator identities only
-- storage replication RPCs accept authorized storage-node identities only
-- replication `from_node_id` must match the authenticated storage-node identity
+- coordinator report RPCs require `CN=storage`
+- report payload `node_id` must match the authenticated storage-node logical identity
+- storage control RPCs require `CN=coordinator`
+- storage replication RPCs require `CN=storage`
+- replication `from_node_id` must match the authenticated storage-node logical identity
 - client/admin RPCs are client-facing and do not require an internal coordinator/storage identity
+
+There is no static transport-level allowlist of storage nodes. A valid storage certificate
+proves the caller is a storage node, and the RPC payload must still match that specific
+certificate identity. Existing coordinator membership checks and storage peer-state checks
+continue to reject unknown or unexpected node IDs.
 
 ## Configuration
 
@@ -69,8 +95,6 @@ Server-side config:
   - `disabled`
   - `verify-if-given`
   - `require-and-verify`
-- `CoordinatorIdentities`
-- `StorageNodeIdentities`
 
 Recommended defaults:
 
@@ -127,7 +151,6 @@ extendedKeyUsage = serverAuth,clientAuth
 
 [alt_names]
 DNS.1 = coordinator
-IP.1 = 127.0.0.1
 ```
 
 Issue the coordinator cert:
@@ -150,9 +173,31 @@ openssl x509 -req \
   -extfile coordinator.cnf
 ```
 
-Issue storage-node certs the same way, changing the logical DNS SAN to the node identity,
-for example `a`, `b`, or `c`, and including the actual host/IP SAN used for TLS server
-verification.
+Issue storage-node certs the same way, but with `CN=storage` and the first DNS SAN set to
+the logical node ID, for example `a`, `b`, or `c`.
+
+If you want one shared `ServerName` for all storage-node RPCs, add a second stable DNS SAN
+such as `storage`.
+
+For example, storage node `a` would use:
+
+```ini
+[req]
+distinguished_name = dn
+req_extensions = req_ext
+prompt = no
+
+[dn]
+CN = storage
+
+[req_ext]
+subjectAltName = @alt_names
+extendedKeyUsage = serverAuth,clientAuth
+
+[alt_names]
+DNS.1 = a
+DNS.2 = storage
+```
 
 ## Example Usage
 
@@ -160,12 +205,10 @@ Server:
 
 ```go
 service, err := grpcx.NewStorageGRPCServerWithTLS(node, &grpcx.ServerTLSConfig{
-    CAFile:                "ca.crt",
-    CertFile:              "storage-a.crt",
-    KeyFile:               "storage-a.key",
-    ClientAuth:            grpcx.ClientAuthModeVerifyIfGiven,
-    CoordinatorIdentities: []string{"coordinator"},
-    StorageNodeIdentities: []string{"a", "b", "c"},
+    CAFile:     "ca.crt",
+    CertFile:   "storage-a.crt",
+    KeyFile:    "storage-a.key",
+    ClientAuth: grpcx.ClientAuthModeVerifyIfGiven,
 })
 ```
 
@@ -173,9 +216,21 @@ Internal client:
 
 ```go
 pool, err := grpcx.NewConnPoolWithTLS(grpcx.ClientTLSConfig{
-    CAFile:   "ca.crt",
-    CertFile: "coordinator.crt",
-    KeyFile:  "coordinator.key",
+    CAFile:     "ca.crt",
+    CertFile:   "coordinator.crt",
+    KeyFile:    "coordinator.key",
+    ServerName: "storage",
+})
+```
+
+Storage-node internal client:
+
+```go
+pool, err := grpcx.NewConnPoolWithTLS(grpcx.ClientTLSConfig{
+    CAFile:     "ca.crt",
+    CertFile:   "storage-a.crt",
+    KeyFile:    "storage-a.key",
+    ServerName: "coordinator",
 })
 ```
 
@@ -183,7 +238,8 @@ External client with TLS only:
 
 ```go
 pool, err := grpcx.NewConnPoolWithTLS(grpcx.ClientTLSConfig{
-    CAFile: "ca.crt",
+    CAFile:     "ca.crt",
+    ServerName: "storage",
 })
 ```
 
