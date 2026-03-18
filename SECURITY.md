@@ -7,7 +7,7 @@ working without extra setup. For any non-trivial deployment, enable TLS.
 
 ## Model
 
-V1 uses a simple cluster-CA model:
+Uses a simple cluster-CA model:
 
 - one CA signs coordinator and storage-node certificates
 - internal coordinator/storage RPCs use mTLS
