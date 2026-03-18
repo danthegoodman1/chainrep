@@ -173,6 +173,61 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("outbox len after ack = %d, want 0", got)
 		}
 	})
+
+	t.Run("expired_leader_cannot_commit_without_takeover", func(t *testing.T) {
+		store := factory(t)
+		defer func() { _ = store.Close() }()
+
+		now := time.Unix(400, 0)
+		lease, leader, err := store.AcquireOrRenew(context.Background(), "coord-a", "leader-a", now, time.Second)
+		if err != nil {
+			t.Fatalf("AcquireOrRenew returned error: %v", err)
+		}
+		if !leader {
+			t.Fatal("coord-a did not become leader")
+		}
+
+		_, err = store.SaveSnapshot(context.Background(), lease, now.Add(2*time.Second), 0, coordserver.HASnapshot{})
+		if !errors.Is(err, coordserver.ErrNotLeader) {
+			t.Fatalf("expired SaveSnapshot error = %v, want ErrNotLeader", err)
+		}
+	})
+
+	t.Run("snapshot_conflict_rejects_stale_expected_version", func(t *testing.T) {
+		store := factory(t)
+		defer func() { _ = store.Close() }()
+
+		now := time.Unix(500, 0)
+		lease, leader, err := store.AcquireOrRenew(context.Background(), "coord-a", "leader-a", now, time.Second)
+		if err != nil {
+			t.Fatalf("AcquireOrRenew returned error: %v", err)
+		}
+		if !leader {
+			t.Fatal("coord-a did not become leader")
+		}
+
+		version, err := store.SaveSnapshot(context.Background(), lease, now.Add(100*time.Millisecond), 0, coordserver.HASnapshot{
+			Outbox: []coordserver.OutboxEntry{{
+				ID:        "outbox-1",
+				Epoch:     lease.Epoch,
+				NodeID:    "n1",
+				Slot:      1,
+				CommandID: "cmd-1",
+				Kind:      coordserver.OutboxCommandAddReplicaAsTail,
+			}},
+		})
+		if err != nil {
+			t.Fatalf("initial SaveSnapshot returned error: %v", err)
+		}
+		if got, want := version, uint64(1); got != want {
+			t.Fatalf("snapshot version = %d, want %d", got, want)
+		}
+
+		_, err = store.SaveSnapshot(context.Background(), lease, now.Add(200*time.Millisecond), 0, coordserver.HASnapshot{})
+		if !errors.Is(err, coordserver.ErrHASnapshotConflict) {
+			t.Fatalf("stale expected version SaveSnapshot error = %v, want ErrHASnapshotConflict", err)
+		}
+	})
 }
 
 func coordserverCloneSnapshot(snapshot coordserver.HASnapshot) coordserver.HASnapshot {

@@ -88,6 +88,65 @@ func TestCoordinatorFailoverClientsOverGRPC(t *testing.T) {
 	}
 }
 
+func TestCoordinatorFailoverClientsSkipUnavailableAndStandbyEndpoints(t *testing.T) {
+	ctx := context.Background()
+	clock := &haFakeClock{now: time.Unix(200, 0).UTC()}
+	haStore := coordserver.NewInMemoryHAStore()
+
+	leader := mustOpenHAServer(t, clock, haStore, "coord-a", "leader")
+	defer func() { _ = leader.server.Close() }()
+	defer func() { _ = leader.grpc.Close() }()
+
+	standby := mustOpenHAServer(t, clock, haStore, "coord-b", "standby")
+	defer func() { _ = standby.server.Close() }()
+	defer func() { _ = standby.grpc.Close() }()
+
+	if isLeader, err := leader.server.StepHA(ctx); err != nil {
+		t.Fatalf("leader StepHA returned error: %v", err)
+	} else if !isLeader {
+		t.Fatal("leader did not acquire initial lease")
+	}
+	if isLeader, err := standby.server.StepHA(ctx); err != nil {
+		t.Fatalf("standby StepHA returned error: %v", err)
+	} else if isLeader {
+		t.Fatal("standby unexpectedly acquired initial lease")
+	}
+
+	deadListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen(deadListener) returned error: %v", err)
+	}
+	deadAddress := deadListener.Addr().String()
+	_ = deadListener.Close()
+
+	pool := grpcx.NewConnPool()
+	t.Cleanup(func() { _ = pool.Close() })
+
+	admin := grpcx.NewCoordinatorAdminFailoverClient([]string{deadAddress, standby.address, leader.address}, pool)
+	reporter := grpcx.NewCoordinatorReporterFailoverClient("n1", []string{deadAddress, standby.address, leader.address}, pool)
+
+	if _, err := admin.Bootstrap(ctx, coordruntime.Command{
+		ID:              "bootstrap",
+		ExpectedVersion: 0,
+		Kind:            coordruntime.CommandKindBootstrap,
+		Bootstrap: &coordruntime.BootstrapCommand{
+			Config: coordinator.Config{SlotCount: 4, ReplicationFactor: 1},
+			Nodes: []coordinator.Node{{
+				ID:         "n1",
+				RPCAddress: "storage-n1",
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if err := reporter.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "n1", ReplicaCount: 3}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat returned error: %v", err)
+	}
+	if got := leader.server.Heartbeats()["n1"].ReplicaCount; got != 3 {
+		t.Fatalf("leader heartbeat replica count = %d, want 3", got)
+	}
+}
+
 type haServerHarness struct {
 	server  *coordserver.Server
 	grpc    *grpcx.CoordinatorGRPCServer

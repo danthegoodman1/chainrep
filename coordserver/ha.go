@@ -355,13 +355,6 @@ func (c *haPlanningNodeClient) DropRecoveredReplica(_ context.Context, cmd stora
 func rewriteSnapshotEpoch(snapshot HASnapshot, epoch uint64) (HASnapshot, bool) {
 	changed := false
 	cloned := cloneHASnapshot(snapshot)
-	for slot, pending := range cloned.Pending {
-		if pending.Epoch != epoch {
-			pending.Epoch = epoch
-			cloned.Pending[slot] = pending
-			changed = true
-		}
-	}
 	for i := range cloned.Outbox {
 		if cloned.Outbox[i].Epoch != epoch {
 			cloned.Outbox[i].Epoch = epoch

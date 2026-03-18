@@ -622,6 +622,11 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 		return err
 	}
 	if _, exists := n.replicas[cmd.Assignment.Slot]; exists {
+		existing := n.replicas[cmd.Assignment.Slot]
+		if reflect.DeepEqual(existing.assignment, cmd.Assignment) &&
+			existing.state != ReplicaStateRemoved {
+			return nil
+		}
 		err := fmt.Errorf("%w: slot %d", ErrReplicaExists, cmd.Assignment.Slot)
 		n.events.record(n.logger, zerolog.ErrorLevel, "add_replica_failed", "storage add replica as tail failed", ops.IntPtr(cmd.Assignment.Slot), ops.Uint64Ptr(cmd.Assignment.ChainVersion), nil, cmd.Assignment.Peers.PredecessorNodeID, "", err)
 		return err
@@ -738,6 +743,9 @@ func (n *Node) MarkReplicaLeaving(ctx context.Context, cmd MarkReplicaLeavingCom
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Slot)
 	}
+	if record.state == ReplicaStateLeaving || record.state == ReplicaStateRemoved {
+		return nil
+	}
 	if record.state != ReplicaStateActive {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Slot, record.state)
 	}
@@ -794,6 +802,9 @@ func (n *Node) UpdateChainPeers(ctx context.Context, cmd UpdateChainPeersCommand
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Assignment.Slot)
 	}
+	if reflect.DeepEqual(record.assignment, cmd.Assignment) {
+		return nil
+	}
 	record.assignment = cloneAssignment(cmd.Assignment)
 	n.replicas[cmd.Assignment.Slot] = record
 	if record.state != ReplicaStateRecovered {
@@ -847,6 +858,9 @@ func (n *Node) ResumeRecoveredReplica(ctx context.Context, cmd ResumeRecoveredRe
 	if !ok {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, cmd.Assignment.Slot)
 	}
+	if record.state == ReplicaStateActive && record.localDataPresent && reflect.DeepEqual(record.assignment, cmd.Assignment) {
+		return nil
+	}
 	if record.state != ReplicaStateRecovered {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
 	}
@@ -871,6 +885,9 @@ func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) er
 		return err
 	}
 	record, exists := n.replicas[cmd.Assignment.Slot]
+	if exists && record.state == ReplicaStateActive && reflect.DeepEqual(record.assignment, cmd.Assignment) {
+		return nil
+	}
 	if exists && record.state != ReplicaStateRecovered {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
 	}
