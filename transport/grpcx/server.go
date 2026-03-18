@@ -15,18 +15,42 @@ import (
 
 type CoordinatorGRPCServer struct {
 	grpcproto.UnimplementedCoordinatorServiceServer
-	server *coordserver.Server
-	grpc   *grpc.Server
-	lis    net.Listener
+	server     *coordserver.Server
+	grpc       *grpc.Server
+	lis        net.Listener
+	authorizer *rpcAuthorizer
 }
 
 func NewCoordinatorGRPCServer(server *coordserver.Server) *CoordinatorGRPCServer {
+	s, err := NewCoordinatorGRPCServerWithTLS(server, nil)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+func NewCoordinatorGRPCServerWithTLS(server *coordserver.Server, cfg *ServerTLSConfig) (*CoordinatorGRPCServer, error) {
+	var opts []grpc.ServerOption
+	authorizer := (*rpcAuthorizer)(nil)
+	if cfg != nil {
+		creds, err := newServerTransportCredentials(*cfg)
+		if err != nil {
+			return nil, err
+		}
+		authorizer = newRPCAuthorizer(*cfg)
+		opts = append(opts,
+			grpc.Creds(creds),
+			grpc.UnaryInterceptor(authorizer.unaryInterceptor(coordinatorRPCPlane)),
+			grpc.StreamInterceptor(authorizer.streamInterceptor(coordinatorRPCPlane)),
+		)
+	}
 	s := &CoordinatorGRPCServer{
-		server: server,
-		grpc:   grpc.NewServer(),
+		server:     server,
+		grpc:       grpc.NewServer(opts...),
+		authorizer: authorizer,
 	}
 	grpcproto.RegisterCoordinatorServiceServer(s.grpc, s)
-	return s
+	return s, nil
 }
 
 func (s *CoordinatorGRPCServer) Serve(lis net.Listener) error {
@@ -132,6 +156,11 @@ func (s *CoordinatorGRPCServer) RoutingSnapshot(ctx context.Context, _ *grpcprot
 }
 
 func (s *CoordinatorGRPCServer) ReportReplicaReady(ctx context.Context, req *grpcproto.ReplicaReadyReport) (*grpcproto.ServerState, error) {
+	if s.authorizer != nil {
+		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
+			return nil, encodeError(err)
+		}
+	}
 	state, err := s.server.ReportReplicaReady(ctx, req.NodeId, int(req.Slot), req.CommandId)
 	if err != nil {
 		return nil, encodeError(err)
@@ -140,6 +169,11 @@ func (s *CoordinatorGRPCServer) ReportReplicaReady(ctx context.Context, req *grp
 }
 
 func (s *CoordinatorGRPCServer) ReportReplicaRemoved(ctx context.Context, req *grpcproto.ReplicaRemovedReport) (*grpcproto.ServerState, error) {
+	if s.authorizer != nil {
+		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
+			return nil, encodeError(err)
+		}
+	}
 	state, err := s.server.ReportReplicaRemoved(ctx, req.NodeId, int(req.Slot), req.CommandId)
 	if err != nil {
 		return nil, encodeError(err)
@@ -148,6 +182,11 @@ func (s *CoordinatorGRPCServer) ReportReplicaRemoved(ctx context.Context, req *g
 }
 
 func (s *CoordinatorGRPCServer) ReportNodeHeartbeat(ctx context.Context, req *grpcproto.NodeStatus) (*grpcproto.Empty, error) {
+	if s.authorizer != nil {
+		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
+			return nil, encodeError(err)
+		}
+	}
 	if err := s.server.ReportNodeHeartbeat(ctx, fromProtoNodeStatus(req)); err != nil {
 		return nil, encodeError(err)
 	}
@@ -155,6 +194,11 @@ func (s *CoordinatorGRPCServer) ReportNodeHeartbeat(ctx context.Context, req *gr
 }
 
 func (s *CoordinatorGRPCServer) ReportNodeRecovered(ctx context.Context, req *grpcproto.NodeRecoveryReport) (*grpcproto.Empty, error) {
+	if s.authorizer != nil {
+		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
+			return nil, encodeError(err)
+		}
+	}
 	if err := s.server.ReportNodeRecovered(ctx, fromProtoNodeRecovery(req)); err != nil {
 		return nil, encodeError(err)
 	}
@@ -170,18 +214,42 @@ func (s *CoordinatorGRPCServer) EvaluateLiveness(ctx context.Context, _ *grpcpro
 
 type StorageGRPCServer struct {
 	grpcproto.UnimplementedStorageServiceServer
-	node *storage.Node
-	grpc *grpc.Server
-	lis  net.Listener
+	node       *storage.Node
+	grpc       *grpc.Server
+	lis        net.Listener
+	authorizer *rpcAuthorizer
 }
 
 func NewStorageGRPCServer(node *storage.Node) *StorageGRPCServer {
+	s, err := NewStorageGRPCServerWithTLS(node, nil)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+func NewStorageGRPCServerWithTLS(node *storage.Node, cfg *ServerTLSConfig) (*StorageGRPCServer, error) {
+	var opts []grpc.ServerOption
+	authorizer := (*rpcAuthorizer)(nil)
+	if cfg != nil {
+		creds, err := newServerTransportCredentials(*cfg)
+		if err != nil {
+			return nil, err
+		}
+		authorizer = newRPCAuthorizer(*cfg)
+		opts = append(opts,
+			grpc.Creds(creds),
+			grpc.UnaryInterceptor(authorizer.unaryInterceptor(storageRPCPlane)),
+			grpc.StreamInterceptor(authorizer.streamInterceptor(storageRPCPlane)),
+		)
+	}
 	s := &StorageGRPCServer{
-		node: node,
-		grpc: grpc.NewServer(),
+		node:       node,
+		grpc:       grpc.NewServer(opts...),
+		authorizer: authorizer,
 	}
 	grpcproto.RegisterStorageServiceServer(s.grpc, s)
-	return s
+	return s, nil
 }
 
 func (s *StorageGRPCServer) Serve(lis net.Listener) error {
@@ -298,6 +366,11 @@ func (s *StorageGRPCServer) DropRecoveredReplica(ctx context.Context, req *grpcp
 }
 
 func (s *StorageGRPCServer) ForwardWrite(ctx context.Context, req *grpcproto.ForwardWriteRequest) (*grpcproto.Empty, error) {
+	if s.authorizer != nil {
+		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.FromNodeId); err != nil {
+			return nil, encodeError(err)
+		}
+	}
 	if err := s.node.HandleForwardWrite(ctx, storage.ForwardWriteRequest{
 		Operation: storage.WriteOperation{
 			Slot:     int(req.Operation.Slot),
@@ -315,6 +388,11 @@ func (s *StorageGRPCServer) ForwardWrite(ctx context.Context, req *grpcproto.For
 }
 
 func (s *StorageGRPCServer) CommitWrite(ctx context.Context, req *grpcproto.CommitWriteRequest) (*grpcproto.Empty, error) {
+	if s.authorizer != nil {
+		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.FromNodeId); err != nil {
+			return nil, encodeError(err)
+		}
+	}
 	if err := s.node.HandleCommitWrite(ctx, storage.CommitWriteRequest{
 		Slot:       int(req.Slot),
 		Sequence:   req.Sequence,

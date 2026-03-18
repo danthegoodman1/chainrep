@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/danthegoodman1/chainrep/coordserver"
 	"github.com/danthegoodman1/chainrep/storage"
@@ -12,9 +13,36 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+var (
+	ErrTransportUnauthenticated  = errors.New("grpc transport unauthenticated")
+	ErrTransportPermissionDenied = errors.New("grpc transport permission denied")
+)
+
+type TransportAuthError struct {
+	Message string
+	Cause   error
+}
+
+func (e *TransportAuthError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return "grpc transport auth failure"
+}
+
+func (e *TransportAuthError) Unwrap() error {
+	return e.Cause
+}
+
 func encodeError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if _, ok := status.FromError(err); ok {
+		return err
 	}
 
 	var routing *storage.RoutingMismatchError
@@ -136,6 +164,10 @@ func decodeError(err error) error {
 		}
 	}
 	switch st.Code() {
+	case codes.PermissionDenied:
+		return &TransportAuthError{Message: st.Message(), Cause: ErrTransportPermissionDenied}
+	case codes.Unauthenticated:
+		return &TransportAuthError{Message: st.Message(), Cause: ErrTransportUnauthenticated}
 	case codes.DeadlineExceeded:
 		return context.DeadlineExceeded
 	case codes.Canceled:
@@ -217,5 +249,23 @@ func backpressureCause(resource storage.BackpressureResource) error {
 		return storage.ErrCatchupBackpressure
 	default:
 		return storage.ErrWriteBackpressure
+	}
+}
+
+func wrapDialError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "tls: certificate required"):
+		return &TransportAuthError{Message: message, Cause: ErrTransportUnauthenticated}
+	case strings.Contains(message, "tls: failed to verify certificate"),
+		strings.Contains(message, "unknown authority"),
+		strings.Contains(message, "remote error: tls"),
+		strings.Contains(message, "authentication handshake failed"):
+		return &TransportAuthError{Message: message, Cause: ErrTransportPermissionDenied}
+	default:
+		return err
 	}
 }

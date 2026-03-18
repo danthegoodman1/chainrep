@@ -6,6 +6,7 @@
 
 - [Architecture](./ARCHITECTURE.md)
 - [Coordinator](./coordinator/README.md)
+- [Security](./SECURITY.md)
 
 ## Performance Notes
 

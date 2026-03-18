@@ -19,10 +19,25 @@ import (
 type ConnPool struct {
 	mu    sync.Mutex
 	conns map[string]*grpc.ClientConn
+	creds grpc.DialOption
 }
 
 func NewConnPool() *ConnPool {
-	return &ConnPool{conns: map[string]*grpc.ClientConn{}}
+	return &ConnPool{
+		conns: map[string]*grpc.ClientConn{},
+		creds: grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}
+}
+
+func NewConnPoolWithTLS(cfg ClientTLSConfig) (*ConnPool, error) {
+	creds, err := newClientTransportCredentials(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("new client transport credentials: %w", err)
+	}
+	return &ConnPool{
+		conns: map[string]*grpc.ClientConn{},
+		creds: grpc.WithTransportCredentials(creds),
+	}, nil
 }
 
 func (p *ConnPool) DialContext(ctx context.Context, target string) (*grpc.ClientConn, error) {
@@ -40,12 +55,14 @@ func (p *ConnPool) DialContext(ctx context.Context, target string) (*grpc.Client
 	conn, err := grpc.DialContext(
 		ctx,
 		target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		p.creds,
 		grpc.WithContextDialer(dialer),
 		grpc.WithBlock(),
+		grpc.FailOnNonTempDialError(true),
+		grpc.WithReturnConnectionError(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, wrapDialError(err)
 	}
 
 	p.mu.Lock()

@@ -211,6 +211,11 @@ The repository now has a real gRPC transport layer in addition to the in-memory 
 - routing snapshots expose concrete head/tail endpoints directly
 - catch-up snapshot transfer uses streaming gRPC rather than one large unary response
 - typed storage-domain errors such as routing mismatch, ambiguous write, and backpressure are preserved across gRPC boundaries with structured status details
+- transport security is optional in v1:
+  - default zero-config transport remains insecure for local development
+  - internal coordinator/storage RPCs can use mTLS with a shared cluster CA
+  - client-facing RPCs can use TLS only or TLS with optional client cert verification
+  - internal authorization is identity-bound by RPC plane rather than trusting any CA-signed peer for every internal action
 
 ### Tail add / join
 
