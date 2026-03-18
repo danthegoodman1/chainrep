@@ -66,6 +66,10 @@ func (b *countingBackend) SetHighestCommittedSequence(slot int, sequence uint64)
 	return b.owner.backend.SetHighestCommittedSequence(slot, sequence)
 }
 
+func (b *countingBackend) ApplyCommitted(ctx context.Context, nodeID string, operation WriteOperation, persisted *PersistedReplica) error {
+	return b.owner.backend.ApplyCommitted(ctx, nodeID, operation, persisted)
+}
+
 func (b *countingBackend) StagePut(slot int, sequence uint64, key string, value string, metadata ObjectMetadata) error {
 	return b.owner.backend.StagePut(slot, sequence, key, value, metadata)
 }
@@ -96,6 +100,10 @@ func (b *countingBackend) StagedSequences(slot int) ([]uint64, error) {
 
 func (b *countingBackend) Close() error {
 	return b.owner.Close()
+}
+
+func (b *countingBackend) BindLocalStateStore(local LocalStateStore) {
+	b.owner.backend.BindLocalStateStore(local)
 }
 
 type countingLocal struct {

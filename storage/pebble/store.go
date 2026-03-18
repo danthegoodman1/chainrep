@@ -29,6 +29,7 @@ const (
 	opInstallSnapshot             = "install_snapshot"
 	opSetHighestCommittedSequence = "set_highest_committed_sequence"
 	opCommitSequence              = "commit_sequence"
+	opApplyCommitted              = "apply_committed"
 	opUpsertLocalReplica          = "upsert_local_replica"
 	opDeleteLocalReplica          = "delete_local_replica"
 	opSetLocalNodeMeta            = "set_local_node_meta"
@@ -61,9 +62,9 @@ type LocalStore struct {
 }
 
 type stagedValue struct {
-	Kind     storage.OperationKind `json:"kind"`
-	Key      string                `json:"key"`
-	Value    string                `json:"value"`
+	Kind     storage.OperationKind  `json:"kind"`
+	Key      string                 `json:"key"`
+	Value    string                 `json:"value"`
 	Metadata storage.ObjectMetadata `json:"metadata"`
 }
 
@@ -197,6 +198,63 @@ func (b *Backend) SetHighestCommittedSequence(slot int, sequence uint64) error {
 	}
 	if err := b.owner.commitBatch(batch, opSetHighestCommittedSequence); err != nil {
 		return fmt.Errorf("err in owner.commitBatch(set highest committed sequence): %w", err)
+	}
+	return nil
+}
+
+func (b *Backend) ApplyCommitted(_ context.Context, nodeID string, operation storage.WriteOperation, persisted *storage.PersistedReplica) error {
+	highestCommitted, err := b.HighestCommittedSequence(operation.Slot)
+	if err != nil {
+		return err
+	}
+	if operation.Sequence != highestCommitted+1 {
+		return fmt.Errorf(
+			"%w: slot %d expected commit sequence %d, got %d",
+			storage.ErrSequenceMismatch,
+			operation.Slot,
+			highestCommitted+1,
+			operation.Sequence,
+		)
+	}
+
+	batch := b.owner.db.NewBatch()
+	defer batch.Close()
+	switch operation.Kind {
+	case storage.OperationKindPut:
+		encoded, err := json.Marshal(storage.CommittedObject{
+			Value:    operation.Value,
+			Metadata: operation.Metadata,
+		})
+		if err != nil {
+			return fmt.Errorf("err in json.Marshal(committed put): %w", err)
+		}
+		if err := batch.Set(committedKey(operation.Slot, operation.Key), encoded, nil); err != nil {
+			return fmt.Errorf("err in batch.Set(committed put): %w", err)
+		}
+	case storage.OperationKindDelete:
+		if err := batch.Delete(committedKey(operation.Slot, operation.Key), nil); err != nil && !errors.Is(err, cockroachpebble.ErrNotFound) {
+			return fmt.Errorf("err in batch.Delete(committed delete): %w", err)
+		}
+	default:
+		return fmt.Errorf("%w: unsupported operation kind %q", storage.ErrInvalidConfig, operation.Kind)
+	}
+	if err := batch.Delete(stagedKey(operation.Slot, operation.Sequence), nil); err != nil && !errors.Is(err, cockroachpebble.ErrNotFound) {
+		return fmt.Errorf("err in batch.Delete(staged op): %w", err)
+	}
+	if err := batch.Set(replicaMetaKey(operation.Slot), encodeUint64(operation.Sequence), nil); err != nil {
+		return fmt.Errorf("err in batch.Set(replica meta): %w", err)
+	}
+	if persisted != nil {
+		encoded, err := json.Marshal(*persisted)
+		if err != nil {
+			return fmt.Errorf("err in json.Marshal(local replica): %w", err)
+		}
+		if err := batch.Set(localReplicaKey(nodeID, persisted.Assignment.Slot), encoded, nil); err != nil {
+			return fmt.Errorf("err in batch.Set(local replica): %w", err)
+		}
+	}
+	if err := b.owner.commitBatch(batch, opApplyCommitted); err != nil {
+		return fmt.Errorf("err in owner.commitBatch(apply committed): %w", err)
 	}
 	return nil
 }

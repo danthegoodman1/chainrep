@@ -21,12 +21,17 @@ type replicaData struct {
 
 type InMemoryBackend struct {
 	replicas map[int]*replicaData
+	local    LocalStateStore
 }
 
 func NewInMemoryBackend() *InMemoryBackend {
 	return &InMemoryBackend{
 		replicas: make(map[int]*replicaData),
 	}
+}
+
+func (b *InMemoryBackend) BindLocalStateStore(local LocalStateStore) {
+	b.local = local
 }
 
 func (b *InMemoryBackend) CreateReplica(slot int) error {
@@ -73,6 +78,41 @@ func (b *InMemoryBackend) SetHighestCommittedSequence(slot int, sequence uint64)
 	}
 	replica.highestCommitted = sequence
 	replica.staged = map[uint64]stagedOperation{}
+	return nil
+}
+
+func (b *InMemoryBackend) ApplyCommitted(ctx context.Context, nodeID string, operation WriteOperation, persisted *PersistedReplica) error {
+	replica, exists := b.replicas[operation.Slot]
+	if !exists {
+		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, operation.Slot)
+	}
+	if operation.Sequence != replica.highestCommitted+1 {
+		return fmt.Errorf(
+			"%w: slot %d expected commit sequence %d, got %d",
+			ErrSequenceMismatch,
+			operation.Slot,
+			replica.highestCommitted+1,
+			operation.Sequence,
+		)
+	}
+	switch operation.Kind {
+	case OperationKindPut:
+		replica.committed[operation.Key] = CommittedObject{
+			Value:    operation.Value,
+			Metadata: cloneObjectMetadata(operation.Metadata),
+		}
+	case OperationKindDelete:
+		delete(replica.committed, operation.Key)
+	default:
+		return fmt.Errorf("%w: unsupported operation kind %q", ErrInvalidConfig, operation.Kind)
+	}
+	delete(replica.staged, operation.Sequence)
+	replica.highestCommitted = operation.Sequence
+	if persisted != nil && b.local != nil {
+		if err := b.local.UpsertReplica(ctx, nodeID, *persisted); err != nil {
+			return fmt.Errorf("err in b.local.UpsertReplica: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -645,9 +685,9 @@ func cloneQueuedReplicationMessage(msg QueuedReplicationMessage) QueuedReplicati
 
 func clonePersistedNodeState(state PersistedNodeState) PersistedNodeState {
 	cloned := PersistedNodeState{
-		NodeID:                         state.NodeID,
+		NodeID:                          state.NodeID,
 		HighestAcceptedCoordinatorEpoch: state.HighestAcceptedCoordinatorEpoch,
-		Replicas:                       make([]PersistedReplica, 0, len(state.Replicas)),
+		Replicas:                        make([]PersistedReplica, 0, len(state.Replicas)),
 	}
 	for _, replica := range state.Replicas {
 		cloned.Replicas = append(cloned.Replicas, clonePersistedReplica(replica))
