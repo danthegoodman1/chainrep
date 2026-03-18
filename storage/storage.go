@@ -27,6 +27,7 @@ var (
 	ErrRoutingMismatch           = errors.New("storage routing mismatch")
 	ErrWriteTimeout              = errors.New("storage write wait timed out or was canceled")
 	ErrAmbiguousWrite            = errors.New("storage client write outcome is ambiguous")
+	ErrConditionFailed           = errors.New("storage write conditions not satisfied")
 )
 
 type Config struct {
@@ -37,9 +38,51 @@ type Config struct {
 	MaxBufferedReplicaMessagesPerSlot int
 	MaxConcurrentCatchups             int
 	WriteCommitTimeout                time.Duration
+	Clock                             Clock
 }
 
-type Snapshot map[string]string
+type Clock interface {
+	Now() time.Time
+}
+
+type ObjectMetadata struct {
+	Version   uint64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type CommittedObject struct {
+	Value    string
+	Metadata ObjectMetadata
+}
+
+type Snapshot map[string]CommittedObject
+
+type ComparisonOperator string
+
+const (
+	ComparisonOperatorEqual              ComparisonOperator = "eq"
+	ComparisonOperatorLessThan           ComparisonOperator = "lt"
+	ComparisonOperatorLessThanOrEqual    ComparisonOperator = "lte"
+	ComparisonOperatorGreaterThan        ComparisonOperator = "gt"
+	ComparisonOperatorGreaterThanOrEqual ComparisonOperator = "gte"
+)
+
+type VersionComparison struct {
+	Operator ComparisonOperator
+	Value    uint64
+}
+
+type TimeComparison struct {
+	Operator ComparisonOperator
+	Value    time.Time
+}
+
+type WriteConditions struct {
+	Exists    *bool
+	Version   *VersionComparison
+	UpdatedAt *TimeComparison
+}
 
 type Backend interface {
 	CreateReplica(slot int) error
@@ -47,11 +90,11 @@ type Backend interface {
 	Snapshot(slot int) (Snapshot, error)
 	InstallSnapshot(slot int, snap Snapshot) error
 	SetHighestCommittedSequence(slot int, sequence uint64) error
-	StagePut(slot int, sequence uint64, key string, value string) error
-	StageDelete(slot int, sequence uint64, key string) error
+	StagePut(slot int, sequence uint64, key string, value string, metadata ObjectMetadata) error
+	StageDelete(slot int, sequence uint64, key string, metadata ObjectMetadata) error
 	CommitSequence(slot int, sequence uint64) error
 	CommittedSnapshot(slot int) (Snapshot, error)
-	GetCommitted(slot int, key string) (string, bool, error)
+	GetCommitted(slot int, key string) (CommittedObject, bool, error)
 	HighestCommittedSequence(slot int) (uint64, error)
 	StagedSequences(slot int) ([]uint64, error)
 	Close() error
@@ -91,6 +134,7 @@ type WriteOperation struct {
 	Kind     OperationKind
 	Key      string
 	Value    string
+	Metadata ObjectMetadata
 }
 
 type ForwardWriteRequest struct {
@@ -104,11 +148,6 @@ type CommitWriteRequest struct {
 	FromNodeID string
 }
 
-type CommitResult struct {
-	Slot     int
-	Sequence uint64
-}
-
 type ClientGetRequest struct {
 	Slot                 int
 	Key                  string
@@ -120,12 +159,14 @@ type ClientPutRequest struct {
 	Key                  string
 	Value                string
 	ExpectedChainVersion uint64
+	Conditions           WriteConditions
 }
 
 type ClientDeleteRequest struct {
 	Slot                 int
 	Key                  string
 	ExpectedChainVersion uint64
+	Conditions           WriteConditions
 }
 
 type ReadResult struct {
@@ -133,6 +174,14 @@ type ReadResult struct {
 	ChainVersion uint64
 	Found        bool
 	Value        string
+	Metadata     *ObjectMetadata
+}
+
+type CommitResult struct {
+	Slot     int
+	Sequence uint64
+	Applied  bool
+	Metadata *ObjectMetadata
 }
 
 type AmbiguousWriteError struct {
@@ -140,6 +189,14 @@ type AmbiguousWriteError struct {
 	Kind                 OperationKind
 	ExpectedChainVersion uint64
 	Cause                error
+}
+
+type ConditionFailedError struct {
+	Slot                 int
+	Kind                 OperationKind
+	ExpectedChainVersion uint64
+	CurrentExists        bool
+	CurrentMetadata      *ObjectMetadata
 }
 
 type BackpressureResource string
@@ -197,6 +254,31 @@ func (e *AmbiguousWriteError) Unwrap() error {
 
 func (e *AmbiguousWriteError) Is(target error) bool {
 	return target == ErrAmbiguousWrite
+}
+
+func (e *ConditionFailedError) Error() string {
+	if e.CurrentExists && e.CurrentMetadata != nil {
+		return fmt.Sprintf(
+			"%s: %s on slot %d version %d failed against current version %d updated_at %s",
+			ErrConditionFailed,
+			e.Kind,
+			e.Slot,
+			e.ExpectedChainVersion,
+			e.CurrentMetadata.Version,
+			e.CurrentMetadata.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		)
+	}
+	return fmt.Sprintf(
+		"%s: %s on slot %d version %d failed against absent object",
+		ErrConditionFailed,
+		e.Kind,
+		e.Slot,
+		e.ExpectedChainVersion,
+	)
+}
+
+func (e *ConditionFailedError) Unwrap() error {
+	return ErrConditionFailed
 }
 
 type RoutingMismatchReason string
@@ -363,6 +445,7 @@ type replicaRecord struct {
 
 type pendingWrite struct {
 	completed bool
+	result    CommitResult
 }
 
 type Node struct {
@@ -378,6 +461,7 @@ type Node struct {
 	maxBufferedReplicaMessagesPerSlot int
 	maxConcurrentCatchups             int
 	writeCommitTimeout                time.Duration
+	clock                             Clock
 	inFlightClientWrites              int
 	inFlightCatchups                  int
 	closeErr                          error
@@ -385,6 +469,12 @@ type Node struct {
 }
 
 const defaultWriteCommitTimeout = 5 * time.Second
+
+type realClock struct{}
+
+func (realClock) Now() time.Time {
+	return time.Now()
+}
 
 func NewNode(
 	ctx context.Context,
@@ -451,12 +541,16 @@ func OpenNode(
 		maxBufferedReplicaMessagesPerSlot: cfg.MaxBufferedReplicaMessagesPerSlot,
 		maxConcurrentCatchups:             cfg.MaxConcurrentCatchups,
 		writeCommitTimeout:                cfg.WriteCommitTimeout,
+		clock:                             cfg.Clock,
 	}
 	if node.maxBufferedReplicaMessagesPerSlot == 0 {
 		node.maxBufferedReplicaMessagesPerSlot = 64
 	}
 	if node.writeCommitTimeout == 0 {
 		node.writeCommitTimeout = defaultWriteCommitTimeout
+	}
+	if node.clock == nil {
+		node.clock = realClock{}
 	}
 
 	persisted, err := node.local.LoadNode(ctx, cfg.NodeID)
@@ -796,11 +890,11 @@ func (n *Node) Close() error {
 }
 
 func (n *Node) SubmitPut(ctx context.Context, slot int, key string, value string) (CommitResult, error) {
-	return n.submitWrite(ctx, slot, OperationKindPut, key, value)
+	return n.submitWrite(ctx, slot, OperationKindPut, key, value, WriteConditions{})
 }
 
 func (n *Node) SubmitDelete(ctx context.Context, slot int, key string) (CommitResult, error) {
-	return n.submitWrite(ctx, slot, OperationKindDelete, key, "")
+	return n.submitWrite(ctx, slot, OperationKindDelete, key, "", WriteConditions{})
 }
 
 func (n *Node) HandleClientGet(_ context.Context, req ClientGetRequest) (ReadResult, error) {
@@ -818,24 +912,35 @@ func (n *Node) HandleClientGet(_ context.Context, req ClientGetRequest) (ReadRes
 		return ReadResult{}, newRoutingMismatch(req.Slot, req.ExpectedChainVersion, record, RoutingMismatchReasonWrongRole)
 	}
 
-	value, found, err := n.backend.GetCommitted(req.Slot, req.Key)
+	object, found, err := n.backend.GetCommitted(req.Slot, req.Key)
 	if err != nil {
 		return ReadResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", err)
 	}
-	return ReadResult{
+	result := ReadResult{
 		Slot:         req.Slot,
 		ChainVersion: record.assignment.ChainVersion,
 		Found:        found,
-		Value:        value,
-	}, nil
+	}
+	if found {
+		result.Value = object.Value
+		result.Metadata = cloneObjectMetadataPtr(&object.Metadata)
+	}
+	return result, nil
 }
 
 func (n *Node) HandleClientPut(ctx context.Context, req ClientPutRequest) (CommitResult, error) {
 	if err := n.validateClientWrite(req.Slot, req.ExpectedChainVersion); err != nil {
 		return CommitResult{}, err
 	}
-	result, err := n.submitWrite(ctx, req.Slot, OperationKindPut, req.Key, req.Value)
+	result, err := n.submitWrite(ctx, req.Slot, OperationKindPut, req.Key, req.Value, req.Conditions)
 	if err != nil {
+		if errors.Is(err, ErrConditionFailed) {
+			current, found, currentErr := n.backend.GetCommitted(req.Slot, req.Key)
+			if currentErr != nil {
+				return CommitResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", currentErr)
+			}
+			return CommitResult{}, newConditionFailedError(req.Slot, OperationKindPut, req.ExpectedChainVersion, found, current)
+		}
 		if isAmbiguousWriteCause(err) {
 			return CommitResult{}, newAmbiguousWriteError(req.Slot, OperationKindPut, req.ExpectedChainVersion, err)
 		}
@@ -848,8 +953,15 @@ func (n *Node) HandleClientDelete(ctx context.Context, req ClientDeleteRequest) 
 	if err := n.validateClientWrite(req.Slot, req.ExpectedChainVersion); err != nil {
 		return CommitResult{}, err
 	}
-	result, err := n.submitWrite(ctx, req.Slot, OperationKindDelete, req.Key, "")
+	result, err := n.submitWrite(ctx, req.Slot, OperationKindDelete, req.Key, "", req.Conditions)
 	if err != nil {
+		if errors.Is(err, ErrConditionFailed) {
+			current, found, currentErr := n.backend.GetCommitted(req.Slot, req.Key)
+			if currentErr != nil {
+				return CommitResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", currentErr)
+			}
+			return CommitResult{}, newConditionFailedError(req.Slot, OperationKindDelete, req.ExpectedChainVersion, found, current)
+		}
 		if isAmbiguousWriteCause(err) {
 			return CommitResult{}, newAmbiguousWriteError(req.Slot, OperationKindDelete, req.ExpectedChainVersion, err)
 		}
@@ -1040,8 +1152,8 @@ func cloneAssignment(assignment ReplicaAssignment) ReplicaAssignment {
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	cloned := make(Snapshot, len(snapshot))
-	for key, value := range snapshot {
-		cloned[key] = value
+	for key, object := range snapshot {
+		cloned[key] = cloneCommittedObject(object)
 	}
 	return cloned
 }
@@ -1053,7 +1165,31 @@ func cloneWriteOperation(operation WriteOperation) WriteOperation {
 		Kind:     operation.Kind,
 		Key:      operation.Key,
 		Value:    operation.Value,
+		Metadata: cloneObjectMetadata(operation.Metadata),
 	}
+}
+
+func cloneCommittedObject(object CommittedObject) CommittedObject {
+	return CommittedObject{
+		Value:    object.Value,
+		Metadata: cloneObjectMetadata(object.Metadata),
+	}
+}
+
+func cloneObjectMetadata(metadata ObjectMetadata) ObjectMetadata {
+	return ObjectMetadata{
+		Version:   metadata.Version,
+		CreatedAt: metadata.CreatedAt,
+		UpdatedAt: metadata.UpdatedAt,
+	}
+}
+
+func cloneObjectMetadataPtr(metadata *ObjectMetadata) *ObjectMetadata {
+	if metadata == nil {
+		return nil
+	}
+	cloned := cloneObjectMetadata(*metadata)
+	return &cloned
 }
 
 func peerTransportTarget(target string, fallbackNodeID string) string {
@@ -1063,12 +1199,29 @@ func peerTransportTarget(target string, fallbackNodeID string) string {
 	return fallbackNodeID
 }
 
+func (n *Node) nextObjectMetadata(found bool, current CommittedObject) ObjectMetadata {
+	now := n.clock.Now().UTC()
+	if !found {
+		return ObjectMetadata{
+			Version:   1,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+	return ObjectMetadata{
+		Version:   current.Metadata.Version + 1,
+		CreatedAt: current.Metadata.CreatedAt,
+		UpdatedAt: now,
+	}
+}
+
 func (n *Node) submitWrite(
 	ctx context.Context,
 	slot int,
 	kind OperationKind,
 	key string,
 	value string,
+	conditions WriteConditions,
 ) (CommitResult, error) {
 	record, err := n.activeReplicaRecord(slot)
 	if err != nil {
@@ -1081,6 +1234,16 @@ func (n *Node) submitWrite(
 			slot,
 			record.assignment.Role,
 		)
+	}
+	current, found, err := n.backend.GetCommitted(slot, key)
+	if err != nil {
+		return CommitResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", err)
+	}
+	if err := evaluateWriteConditions(conditions, found, current); err != nil {
+		return CommitResult{}, err
+	}
+	if kind == OperationKindDelete && !found {
+		return CommitResult{Slot: slot}, nil
 	}
 	if err := n.admitClientWrite(slot); err != nil {
 		return CommitResult{}, err
@@ -1101,12 +1264,20 @@ func (n *Node) submitWrite(
 		Kind:     kind,
 		Key:      key,
 		Value:    value,
+		Metadata: n.nextObjectMetadata(found, current),
 	}
 	if err := n.stageOperation(operation); err != nil {
 		return CommitResult{}, err
 	}
 	record = n.ensurePendingWrites(record)
-	record.pendingWrites[operation.Sequence] = pendingWrite{}
+	record.pendingWrites[operation.Sequence] = pendingWrite{
+		result: CommitResult{
+			Slot:     slot,
+			Sequence: operation.Sequence,
+			Applied:  true,
+			Metadata: cloneObjectMetadataPtr(&operation.Metadata),
+		},
+	}
 
 	record.nextSequence++
 	n.replicas[slot] = record
@@ -1133,7 +1304,12 @@ func (n *Node) submitWrite(
 
 	n.releaseClientWrite(slot)
 	releasedAdmission = true
-	return CommitResult{Slot: slot, Sequence: operation.Sequence}, nil
+	return CommitResult{
+		Slot:     slot,
+		Sequence: operation.Sequence,
+		Applied:  true,
+		Metadata: cloneObjectMetadataPtr(&operation.Metadata),
+	}, nil
 }
 
 func (n *Node) activeReplicaRecord(slot int) (replicaRecord, error) {
@@ -1150,11 +1326,11 @@ func (n *Node) activeReplicaRecord(slot int) (replicaRecord, error) {
 func (n *Node) stageOperation(operation WriteOperation) error {
 	switch operation.Kind {
 	case OperationKindPut:
-		if err := n.backend.StagePut(operation.Slot, operation.Sequence, operation.Key, operation.Value); err != nil {
+		if err := n.backend.StagePut(operation.Slot, operation.Sequence, operation.Key, operation.Value, operation.Metadata); err != nil {
 			return fmt.Errorf("err in n.backend.StagePut: %w", err)
 		}
 	case OperationKindDelete:
-		if err := n.backend.StageDelete(operation.Slot, operation.Sequence, operation.Key); err != nil {
+		if err := n.backend.StageDelete(operation.Slot, operation.Sequence, operation.Key, operation.Metadata); err != nil {
 			return fmt.Errorf("err in n.backend.StageDelete: %w", err)
 		}
 	default:
@@ -1210,8 +1386,79 @@ func newAmbiguousWriteError(
 	}
 }
 
+func newConditionFailedError(
+	slot int,
+	kind OperationKind,
+	expectedChainVersion uint64,
+	found bool,
+	current CommittedObject,
+) error {
+	var metadata *ObjectMetadata
+	if found {
+		metadata = cloneObjectMetadataPtr(&current.Metadata)
+	}
+	return &ConditionFailedError{
+		Slot:                 slot,
+		Kind:                 kind,
+		ExpectedChainVersion: expectedChainVersion,
+		CurrentExists:        found,
+		CurrentMetadata:      metadata,
+	}
+}
+
 func isAmbiguousWriteCause(err error) bool {
 	return errors.Is(err, ErrWriteTimeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+func evaluateWriteConditions(conditions WriteConditions, found bool, current CommittedObject) error {
+	if conditions.Exists != nil && found != *conditions.Exists {
+		return ErrConditionFailed
+	}
+	if conditions.Version != nil {
+		if !found || !compareUint64(current.Metadata.Version, *conditions.Version) {
+			return ErrConditionFailed
+		}
+	}
+	if conditions.UpdatedAt != nil {
+		if !found || !compareTime(current.Metadata.UpdatedAt, *conditions.UpdatedAt) {
+			return ErrConditionFailed
+		}
+	}
+	return nil
+}
+
+func compareUint64(current uint64, comparison VersionComparison) bool {
+	switch comparison.Operator {
+	case ComparisonOperatorEqual:
+		return current == comparison.Value
+	case ComparisonOperatorLessThan:
+		return current < comparison.Value
+	case ComparisonOperatorLessThanOrEqual:
+		return current <= comparison.Value
+	case ComparisonOperatorGreaterThan:
+		return current > comparison.Value
+	case ComparisonOperatorGreaterThanOrEqual:
+		return current >= comparison.Value
+	default:
+		return false
+	}
+}
+
+func compareTime(current time.Time, comparison TimeComparison) bool {
+	switch comparison.Operator {
+	case ComparisonOperatorEqual:
+		return current.Equal(comparison.Value)
+	case ComparisonOperatorLessThan:
+		return current.Before(comparison.Value)
+	case ComparisonOperatorLessThanOrEqual:
+		return current.Before(comparison.Value) || current.Equal(comparison.Value)
+	case ComparisonOperatorGreaterThan:
+		return current.After(comparison.Value)
+	case ComparisonOperatorGreaterThanOrEqual:
+		return current.After(comparison.Value) || current.Equal(comparison.Value)
+	default:
+		return false
+	}
 }
 
 func newWriteBackpressureError(slot int, current int, limit int) error {

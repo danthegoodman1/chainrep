@@ -2,6 +2,7 @@ package grpcx
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 	"github.com/danthegoodman1/chainrep/coordserver"
@@ -193,6 +194,8 @@ func fromProtoCommitResult(result *grpcproto.CommitResult) storage.CommitResult 
 	return storage.CommitResult{
 		Slot:     int(result.Slot),
 		Sequence: result.Sequence,
+		Applied:  result.Applied,
+		Metadata: fromProtoObjectMetadata(result.Metadata),
 	}
 }
 
@@ -200,6 +203,8 @@ func protoCommitResult(result storage.CommitResult) *grpcproto.CommitResult {
 	return &grpcproto.CommitResult{
 		Slot:     int32(result.Slot),
 		Sequence: result.Sequence,
+		Applied:  result.Applied,
+		Metadata: protoObjectMetadata(result.Metadata),
 	}
 }
 
@@ -209,6 +214,7 @@ func protoReadResult(result storage.ReadResult) *grpcproto.ReadResult {
 		ChainVersion: result.ChainVersion,
 		Found:        result.Found,
 		Value:        result.Value,
+		Metadata:     protoObjectMetadata(result.Metadata),
 	}
 }
 
@@ -221,13 +227,18 @@ func fromProtoReadResult(result *grpcproto.ReadResult) storage.ReadResult {
 		ChainVersion: result.ChainVersion,
 		Found:        result.Found,
 		Value:        result.Value,
+		Metadata:     fromProtoObjectMetadata(result.Metadata),
 	}
 }
 
 func protoSnapshot(snapshot storage.Snapshot) []*grpcproto.SnapshotEntry {
 	entries := make([]*grpcproto.SnapshotEntry, 0, len(snapshot))
-	for key, value := range snapshot {
-		entries = append(entries, &grpcproto.SnapshotEntry{Key: key, Value: value})
+	for key, object := range snapshot {
+		entries = append(entries, &grpcproto.SnapshotEntry{
+			Key:      key,
+			Value:    object.Value,
+			Metadata: protoObjectMetadata(&object.Metadata),
+		})
 	}
 	return entries
 }
@@ -238,7 +249,124 @@ func snapshotFromProtoEntries(entries []*grpcproto.SnapshotEntry) (storage.Snaps
 		if entry == nil {
 			return nil, fmt.Errorf("nil snapshot entry")
 		}
-		snapshot[entry.Key] = entry.Value
+		metadata := fromProtoObjectMetadata(entry.Metadata)
+		if metadata == nil {
+			return nil, fmt.Errorf("snapshot entry %q missing metadata", entry.Key)
+		}
+		snapshot[entry.Key] = storage.CommittedObject{
+			Value:    entry.Value,
+			Metadata: *metadata,
+		}
 	}
 	return snapshot, nil
+}
+
+func protoObjectMetadata(metadata *storage.ObjectMetadata) *grpcproto.ObjectMetadata {
+	if metadata == nil {
+		return nil
+	}
+	return &grpcproto.ObjectMetadata{
+		Version:           metadata.Version,
+		CreatedAtUnixNano: metadata.CreatedAt.UnixNano(),
+		UpdatedAtUnixNano: metadata.UpdatedAt.UnixNano(),
+	}
+}
+
+func fromProtoObjectMetadata(metadata *grpcproto.ObjectMetadata) *storage.ObjectMetadata {
+	if metadata == nil {
+		return nil
+	}
+	return &storage.ObjectMetadata{
+		Version:   metadata.Version,
+		CreatedAt: time.Unix(0, metadata.CreatedAtUnixNano).UTC(),
+		UpdatedAt: time.Unix(0, metadata.UpdatedAtUnixNano).UTC(),
+	}
+}
+
+func derefObjectMetadata(metadata *storage.ObjectMetadata) storage.ObjectMetadata {
+	if metadata == nil {
+		return storage.ObjectMetadata{}
+	}
+	return *metadata
+}
+
+func protoWriteConditions(conditions storage.WriteConditions) *grpcproto.WriteConditions {
+	result := &grpcproto.WriteConditions{}
+	if conditions.Exists != nil {
+		result.Exists = &grpcproto.BoolCondition{Value: *conditions.Exists}
+	}
+	if conditions.Version != nil {
+		result.Version = &grpcproto.VersionComparison{
+			Operator: protoComparisonOperator(conditions.Version.Operator),
+			Value:    conditions.Version.Value,
+		}
+	}
+	if conditions.UpdatedAt != nil {
+		result.UpdatedAt = &grpcproto.TimeComparison{
+			Operator: protoComparisonOperator(conditions.UpdatedAt.Operator),
+			UnixNano: conditions.UpdatedAt.Value.UnixNano(),
+		}
+	}
+	if result.Exists == nil && result.Version == nil && result.UpdatedAt == nil {
+		return nil
+	}
+	return result
+}
+
+func fromProtoWriteConditions(conditions *grpcproto.WriteConditions) storage.WriteConditions {
+	if conditions == nil {
+		return storage.WriteConditions{}
+	}
+	result := storage.WriteConditions{}
+	if conditions.Exists != nil {
+		value := conditions.Exists.Value
+		result.Exists = &value
+	}
+	if conditions.Version != nil {
+		result.Version = &storage.VersionComparison{
+			Operator: fromProtoComparisonOperator(conditions.Version.Operator),
+			Value:    conditions.Version.Value,
+		}
+	}
+	if conditions.UpdatedAt != nil {
+		result.UpdatedAt = &storage.TimeComparison{
+			Operator: fromProtoComparisonOperator(conditions.UpdatedAt.Operator),
+			Value:    time.Unix(0, conditions.UpdatedAt.UnixNano).UTC(),
+		}
+	}
+	return result
+}
+
+func protoComparisonOperator(operator storage.ComparisonOperator) grpcproto.ComparisonOperator {
+	switch operator {
+	case storage.ComparisonOperatorEqual:
+		return grpcproto.ComparisonOperator_COMPARISON_OPERATOR_EQ
+	case storage.ComparisonOperatorLessThan:
+		return grpcproto.ComparisonOperator_COMPARISON_OPERATOR_LT
+	case storage.ComparisonOperatorLessThanOrEqual:
+		return grpcproto.ComparisonOperator_COMPARISON_OPERATOR_LTE
+	case storage.ComparisonOperatorGreaterThan:
+		return grpcproto.ComparisonOperator_COMPARISON_OPERATOR_GT
+	case storage.ComparisonOperatorGreaterThanOrEqual:
+		return grpcproto.ComparisonOperator_COMPARISON_OPERATOR_GTE
+	default:
+		return grpcproto.ComparisonOperator_COMPARISON_OPERATOR_UNSPECIFIED
+	}
+}
+
+func fromProtoComparisonOperator(operator grpcproto.ComparisonOperator) storage.ComparisonOperator {
+	switch operator {
+	case grpcproto.ComparisonOperator_COMPARISON_OPERATOR_EQ:
+		return storage.ComparisonOperatorEqual
+	case grpcproto.ComparisonOperator_COMPARISON_OPERATOR_LT:
+		return storage.ComparisonOperatorLessThan
+	case grpcproto.ComparisonOperator_COMPARISON_OPERATOR_LTE:
+		return storage.ComparisonOperatorLessThanOrEqual
+	case grpcproto.ComparisonOperator_COMPARISON_OPERATOR_GT:
+		return storage.ComparisonOperatorGreaterThan
+	case grpcproto.ComparisonOperator_COMPARISON_OPERATOR_GTE:
+		return storage.ComparisonOperatorGreaterThanOrEqual
+	default:
+		return ""
+	}
 }

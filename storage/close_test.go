@@ -66,12 +66,12 @@ func (b *countingBackend) SetHighestCommittedSequence(slot int, sequence uint64)
 	return b.owner.backend.SetHighestCommittedSequence(slot, sequence)
 }
 
-func (b *countingBackend) StagePut(slot int, sequence uint64, key string, value string) error {
-	return b.owner.backend.StagePut(slot, sequence, key, value)
+func (b *countingBackend) StagePut(slot int, sequence uint64, key string, value string, metadata ObjectMetadata) error {
+	return b.owner.backend.StagePut(slot, sequence, key, value, metadata)
 }
 
-func (b *countingBackend) StageDelete(slot int, sequence uint64, key string) error {
-	return b.owner.backend.StageDelete(slot, sequence, key)
+func (b *countingBackend) StageDelete(slot int, sequence uint64, key string, metadata ObjectMetadata) error {
+	return b.owner.backend.StageDelete(slot, sequence, key, metadata)
 }
 
 func (b *countingBackend) CommitSequence(slot int, sequence uint64) error {
@@ -82,7 +82,7 @@ func (b *countingBackend) CommittedSnapshot(slot int) (Snapshot, error) {
 	return b.owner.backend.CommittedSnapshot(slot)
 }
 
-func (b *countingBackend) GetCommitted(slot int, key string) (string, bool, error) {
+func (b *countingBackend) GetCommitted(slot int, key string) (CommittedObject, bool, error) {
 	return b.owner.backend.GetCommitted(slot, key)
 }
 

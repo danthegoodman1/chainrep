@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestInMemoryBackendSnapshotIsDeepCopy(t *testing.T) {
@@ -12,7 +13,7 @@ func TestInMemoryBackendSnapshotIsDeepCopy(t *testing.T) {
 	if err := backend.CreateReplica(1); err != nil {
 		t.Fatalf("CreateReplica returned error: %v", err)
 	}
-	if err := backend.Put(1, "k1", "v1"); err != nil {
+	if err := backend.Put(1, "k1", "v1", testObjectMetadata(1)); err != nil {
 		t.Fatalf("Put returned error: %v", err)
 	}
 
@@ -20,13 +21,13 @@ func TestInMemoryBackendSnapshotIsDeepCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot returned error: %v", err)
 	}
-	snapshot["k1"] = "mutated"
+	snapshot["k1"] = CommittedObject{Value: "mutated", Metadata: testObjectMetadata(9)}
 
 	data, err := backend.ReplicaData(1)
 	if err != nil {
 		t.Fatalf("ReplicaData returned error: %v", err)
 	}
-	if got, want := data["k1"], "v1"; got != want {
+	if got, want := data["k1"].Value, "v1"; got != want {
 		t.Fatalf("stored value = %q, want %q", got, want)
 	}
 }
@@ -48,7 +49,7 @@ func TestNodeAddReplicaAsTailCopiesSnapshotAndActivates(t *testing.T) {
 	if err := sourceNode.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 1}); err != nil {
 		t.Fatalf("source ActivateReplica returned error: %v", err)
 	}
-	if err := sourceBackend.Put(1, "alpha", "one"); err != nil {
+	if err := sourceBackend.Put(1, "alpha", "one", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put returned error: %v", err)
 	}
 
@@ -80,7 +81,7 @@ func TestNodeAddReplicaAsTailCopiesSnapshotAndActivates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("target ReplicaData returned error: %v", err)
 	}
-	if got, want := data, (Snapshot{"alpha": "one"}); !reflect.DeepEqual(got, want) {
+	if got, want := snapshotValues(data), map[string]string{"alpha": "one"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("replica data = %v, want %v", got, want)
 	}
 
@@ -198,7 +199,7 @@ func TestNodeDrainAndRemoveLifecycle(t *testing.T) {
 	if err := node.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 1}); err != nil {
 		t.Fatalf("ActivateReplica returned error: %v", err)
 	}
-	if err := backend.Put(1, "k", "v"); err != nil {
+	if err := backend.Put(1, "k", "v", testObjectMetadata(1)); err != nil {
 		t.Fatalf("Put returned error: %v", err)
 	}
 
@@ -347,7 +348,7 @@ func TestEndToEndDrainFlowAcrossNodesWithoutNetworking(t *testing.T) {
 	if err := headNode.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 7}); err != nil {
 		t.Fatalf("head ActivateReplica returned error: %v", err)
 	}
-	if err := headBackend.Put(7, "order-1", "committed"); err != nil {
+	if err := headBackend.Put(7, "order-1", "committed", testObjectMetadata(1)); err != nil {
 		t.Fatalf("head Put returned error: %v", err)
 	}
 
@@ -385,7 +386,7 @@ func TestEndToEndDrainFlowAcrossNodesWithoutNetworking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tail ReplicaData returned error: %v", err)
 	}
-	if got, want := tailData, (Snapshot{"order-1": "committed"}); !reflect.DeepEqual(got, want) {
+	if got, want := snapshotValues(tailData), map[string]string{"order-1": "committed"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("tail data = %v, want %v", got, want)
 	}
 	if got, want := tailCoord.ReadySlots, []int{7}; !reflect.DeepEqual(got, want) {
@@ -413,7 +414,7 @@ func TestMultiSlotFailureIsolation(t *testing.T) {
 	if err := source.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 2}); err != nil {
 		t.Fatalf("source ActivateReplica returned error: %v", err)
 	}
-	if err := sourceBackend.Put(2, "k", "v"); err != nil {
+	if err := sourceBackend.Put(2, "k", "v", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put returned error: %v", err)
 	}
 
@@ -497,7 +498,7 @@ func runDeterministicFlow(t *testing.T) (NodeState, []int, []int, Snapshot) {
 	if err := source.ActivateReplica(ctx, ActivateReplicaCommand{Slot: 9}); err != nil {
 		t.Fatalf("source ActivateReplica returned error: %v", err)
 	}
-	if err := sourceBackend.Put(9, "a", "1"); err != nil {
+	if err := sourceBackend.Put(9, "a", "1", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put returned error: %v", err)
 	}
 
@@ -533,6 +534,9 @@ func runDeterministicFlow(t *testing.T) (NodeState, []int, []int, Snapshot) {
 
 func mustNewNode(t *testing.T, ctx context.Context, cfg Config, backend Backend, coord CoordinatorClient, repl ReplicationTransport) *Node {
 	t.Helper()
+	if cfg.Clock == nil {
+		cfg.Clock = &fakeClock{now: time.Unix(0, 0).UTC()}
+	}
 	node, err := NewNode(ctx, cfg, backend, coord, repl)
 	if err != nil {
 		t.Fatalf("NewNode returned error: %v", err)

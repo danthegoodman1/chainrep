@@ -75,7 +75,15 @@ func (r *Router) Put(ctx context.Context, key string, value string) (storage.Com
 	if err != nil {
 		return storage.CommitResult{}, err
 	}
-	return r.putWithSnapshot(ctx, key, value, snapshot, true)
+	return r.putWithSnapshot(ctx, key, value, storage.WriteConditions{}, snapshot, true)
+}
+
+func (r *Router) PutIf(ctx context.Context, key string, value string, conditions storage.WriteConditions) (storage.CommitResult, error) {
+	snapshot, err := r.loadedSnapshot()
+	if err != nil {
+		return storage.CommitResult{}, err
+	}
+	return r.putWithSnapshot(ctx, key, value, conditions, snapshot, true)
 }
 
 func (r *Router) Delete(ctx context.Context, key string) (storage.CommitResult, error) {
@@ -83,7 +91,15 @@ func (r *Router) Delete(ctx context.Context, key string) (storage.CommitResult, 
 	if err != nil {
 		return storage.CommitResult{}, err
 	}
-	return r.deleteWithSnapshot(ctx, key, snapshot, true)
+	return r.deleteWithSnapshot(ctx, key, storage.WriteConditions{}, snapshot, true)
+}
+
+func (r *Router) DeleteIf(ctx context.Context, key string, conditions storage.WriteConditions) (storage.CommitResult, error) {
+	snapshot, err := r.loadedSnapshot()
+	if err != nil {
+		return storage.CommitResult{}, err
+	}
+	return r.deleteWithSnapshot(ctx, key, conditions, snapshot, true)
 }
 
 func (r *Router) loadedSnapshot() (*coordserver.RoutingSnapshot, error) {
@@ -127,6 +143,7 @@ func (r *Router) putWithSnapshot(
 	ctx context.Context,
 	key string,
 	value string,
+	conditions storage.WriteConditions,
 	snapshot *coordserver.RoutingSnapshot,
 	allowRefresh bool,
 ) (storage.CommitResult, error) {
@@ -142,13 +159,14 @@ func (r *Router) putWithSnapshot(
 		Key:                  key,
 		Value:                value,
 		ExpectedChainVersion: route.ChainVersion,
+		Conditions:           conditions,
 	})
 	if err != nil {
 		if allowRefresh && isRoutingMismatch(err) {
 			if refreshErr := r.Refresh(ctx); refreshErr != nil {
 				return storage.CommitResult{}, refreshErr
 			}
-			return r.putWithSnapshot(ctx, key, value, r.snapshot, false)
+			return r.putWithSnapshot(ctx, key, value, conditions, r.snapshot, false)
 		}
 		return storage.CommitResult{}, err
 	}
@@ -158,6 +176,7 @@ func (r *Router) putWithSnapshot(
 func (r *Router) deleteWithSnapshot(
 	ctx context.Context,
 	key string,
+	conditions storage.WriteConditions,
 	snapshot *coordserver.RoutingSnapshot,
 	allowRefresh bool,
 ) (storage.CommitResult, error) {
@@ -172,13 +191,14 @@ func (r *Router) deleteWithSnapshot(
 		Slot:                 route.Slot,
 		Key:                  key,
 		ExpectedChainVersion: route.ChainVersion,
+		Conditions:           conditions,
 	})
 	if err != nil {
 		if allowRefresh && isRoutingMismatch(err) {
 			if refreshErr := r.Refresh(ctx); refreshErr != nil {
 				return storage.CommitResult{}, refreshErr
 			}
-			return r.deleteWithSnapshot(ctx, key, r.snapshot, false)
+			return r.deleteWithSnapshot(ctx, key, conditions, r.snapshot, false)
 		}
 		return storage.CommitResult{}, err
 	}

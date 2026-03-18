@@ -100,8 +100,8 @@ func TestOpenNodeRestoresRecoveredReplicaAndResumePreservesSequence(t *testing.T
 	}
 	if value, found, err := backend.GetCommitted(1, "beta"); err != nil {
 		t.Fatalf("GetCommitted returned error: %v", err)
-	} else if !found || value != "v2" {
-		t.Fatalf("GetCommitted = (%q, %t), want (%q, true)", value, found, "v2")
+	} else if !found || value.Value != "v2" {
+		t.Fatalf("GetCommitted = (%#v, %t), want value v2", value, found)
 	}
 }
 
@@ -212,8 +212,8 @@ func TestRecoverReplicaRebuildsFromPeerAndDropRecoveredReplicaDeletesLocalState(
 	if err != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", err)
 	}
-	wantSnapshot := Snapshot{"k": "v"}
-	if got := snapshot; !reflect.DeepEqual(got, wantSnapshot) {
+	wantSnapshot := map[string]string{"k": "v"}
+	if got := snapshotValues(snapshot); !reflect.DeepEqual(got, wantSnapshot) {
 		t.Fatalf("recovered snapshot = %#v, want %#v", got, wantSnapshot)
 	}
 	if got, want := recoveredTarget.State().Replicas[2].Assignment, newAssignment; !reflect.DeepEqual(got, want) {

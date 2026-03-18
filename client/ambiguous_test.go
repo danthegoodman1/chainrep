@@ -44,9 +44,7 @@ func TestEndToEndAmbiguousWriteMayCommitLater(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after delayed delivery returned error: %v", err)
 	}
-	if got, want := readResult, (storage.ReadResult{Slot: 0, ChainVersion: 1, Found: true, Value: "v1"}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("read after delayed delivery = %#v, want %#v", got, want)
-	}
+	assertFoundReadResult(t, readResult, 0, 1, "v1")
 }
 
 func TestEndToEndAmbiguousWriteMayNeverCommit(t *testing.T) {
@@ -86,17 +84,13 @@ func TestRetryAfterAmbiguousWriteIsANewWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Put returned error: %v", err)
 	}
-	if got, want := result, (storage.CommitResult{Slot: 0, Sequence: 2}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("second Put result = %#v, want %#v", got, want)
-	}
+	assertAppliedCommitResult(t, result, 0, 2)
 
 	readResult, err := h.router.Get(ctx, "k")
 	if err != nil {
 		t.Fatalf("Get after retry returned error: %v", err)
 	}
-	if got, want := readResult, (storage.ReadResult{Slot: 0, ChainVersion: 1, Found: true, Value: "v1"}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("read result after retry = %#v, want %#v", got, want)
-	}
+	assertFoundReadResult(t, readResult, 0, 1, "v1")
 	if got, want := mustHighestCommittedSequence(t, h.head, 0), uint64(2); got != want {
 		t.Fatalf("head highest committed = %d, want %d", got, want)
 	}
@@ -321,11 +315,48 @@ func mustNewStorageNode(
 	repl storage.ReplicationTransport,
 ) *storage.Node {
 	t.Helper()
+	if cfg.Clock == nil {
+		cfg.Clock = &fakeStorageClock{now: time.Unix(0, 0).UTC()}
+	}
 	node, err := storage.NewNode(ctx, cfg, backend, coord, repl)
 	if err != nil {
 		t.Fatalf("storage.NewNode returned error: %v", err)
 	}
 	return node
+}
+
+func assertAppliedCommitResult(t *testing.T, result storage.CommitResult, slot int, sequence uint64) {
+	t.Helper()
+	if got, want := result.Slot, slot; got != want {
+		t.Fatalf("slot = %d, want %d", got, want)
+	}
+	if got, want := result.Sequence, sequence; got != want {
+		t.Fatalf("sequence = %d, want %d", got, want)
+	}
+	if !result.Applied || result.Metadata == nil {
+		t.Fatalf("result = %#v, want applied metadata-bearing commit", result)
+	}
+}
+
+func assertFoundReadResult(t *testing.T, result storage.ReadResult, slot int, chainVersion uint64, value string) {
+	t.Helper()
+	if got, want := result.Slot, slot; got != want {
+		t.Fatalf("slot = %d, want %d", got, want)
+	}
+	if got, want := result.ChainVersion, chainVersion; got != want {
+		t.Fatalf("chain version = %d, want %d", got, want)
+	}
+	if !result.Found || result.Value != value || result.Metadata == nil {
+		t.Fatalf("result = %#v, want found value with metadata", result)
+	}
+}
+
+type fakeStorageClock struct {
+	now time.Time
+}
+
+func (c *fakeStorageClock) Now() time.Time {
+	return c.now
 }
 
 func mustAddAndActivateReplica(t *testing.T, node *storage.Node, assignment storage.ReplicaAssignment) {

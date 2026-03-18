@@ -25,8 +25,14 @@ func TestClientHandlersReadAndWriteAgainstServingReplicas(t *testing.T) {
 		if err != nil {
 			t.Fatalf("HandleClientGet returned error: %v", err)
 		}
-		if got, want := result, (ReadResult{Slot: 9, ChainVersion: 1, Found: true, Value: "v"}); !reflect.DeepEqual(got, want) {
-			t.Fatalf("read result = %#v, want %#v", got, want)
+		if got, want := result.Slot, 9; got != want {
+			t.Fatalf("slot = %d, want %d", got, want)
+		}
+		if got, want := result.ChainVersion, uint64(1); got != want {
+			t.Fatalf("chain version = %d, want %d", got, want)
+		}
+		if !result.Found || result.Value != "v" || result.Metadata == nil {
+			t.Fatalf("read result = %#v, want found value with metadata", result)
 		}
 	})
 
@@ -159,7 +165,7 @@ func TestCommittedReadsDoNotExposeStagedWrites(t *testing.T) {
 	node := mustNewNode(t, ctx, Config{NodeID: "single"}, backend, NewInMemoryCoordinatorClient(), transport)
 	mustActivateReplica(t, node, 4, ReplicaAssignment{Slot: 4, ChainVersion: 1, Role: ReplicaRoleSingle})
 
-	if err := backend.StagePut(4, 1, "k", "v"); err != nil {
+	if err := backend.StagePut(4, 1, "k", "v", testObjectMetadata(1)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
 	result, err := node.HandleClientGet(ctx, ClientGetRequest{
@@ -229,16 +235,20 @@ func TestClientWriteTimeoutsBecomeAmbiguousErrors(t *testing.T) {
 
 	t.Run("delete cancellation returns ambiguous write", func(t *testing.T) {
 		transport := &blockingWriteTransport{}
+		backend := NewInMemoryBackend()
 		node := mustNewNode(t, ctx, Config{
 			NodeID:             "head",
 			WriteCommitTimeout: time.Hour,
-		}, NewInMemoryBackend(), NewInMemoryCoordinatorClient(), transport)
+		}, backend, NewInMemoryCoordinatorClient(), transport)
 		mustActivateReplica(t, node, 8, ReplicaAssignment{
 			Slot:         8,
 			ChainVersion: 4,
 			Role:         ReplicaRoleHead,
 			Peers:        ChainPeers{SuccessorNodeID: "tail"},
 		})
+		if err := backend.Put(8, "k", "seed", testObjectMetadata(1)); err != nil {
+			t.Fatalf("backend.Put returned error: %v", err)
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -275,7 +285,7 @@ func TestInMemoryBackendGetCommitted(t *testing.T) {
 	if err := backend.CreateReplica(7); err != nil {
 		t.Fatalf("CreateReplica returned error: %v", err)
 	}
-	if err := backend.StagePut(7, 1, "k", "v"); err != nil {
+	if err := backend.StagePut(7, 1, "k", "v", testObjectMetadata(1)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
 
@@ -290,7 +300,7 @@ func TestInMemoryBackendGetCommitted(t *testing.T) {
 	}
 	if got, found, err := backend.GetCommitted(7, "k"); err != nil {
 		t.Fatalf("GetCommitted after commit returned error: %v", err)
-	} else if !found || got != "v" {
-		t.Fatalf("GetCommitted after commit = (%q, %v), want (\"v\", true)", got, found)
+	} else if !found || got.Value != "v" || got.Metadata != testObjectMetadata(1) {
+		t.Fatalf("GetCommitted after commit = (%#v, %v), want committed object", got, found)
 	}
 }

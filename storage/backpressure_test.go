@@ -46,7 +46,7 @@ func TestWriteBackpressureRejectsConcurrentWriteOnSameSlot(t *testing.T) {
 	if got, want := nodes["head"].InFlightClientWrites(), 0; got != want {
 		t.Fatalf("in-flight client writes = %d, want %d", got, want)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, nodes["tail"], 1), (Snapshot{"k1": "v1"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, nodes["tail"], 1), map[string]string{"k1": "v1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("tail committed snapshot = %v, want %v", got, want)
 	}
 }
@@ -89,7 +89,7 @@ func TestWriteBackpressureRejectsOtherSlotWhenNodeBudgetIsFull(t *testing.T) {
 		t.Fatalf("outer HandleClientPut returned error: %v", err)
 	}
 	assertWriteBackpressure(t, nestedErr, 2, 1)
-	if got, want := mustNodeCommittedSnapshot(t, nodes["tail-2"], 2), (Snapshot{}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, nodes["tail-2"], 2), map[string]string{}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("slot 2 committed snapshot = %v, want %v", got, want)
 	}
 }
@@ -134,10 +134,10 @@ func TestWriteBackpressurePerSlotCapDoesNotStarveOtherSlots(t *testing.T) {
 	if nestedErr != nil {
 		t.Fatalf("nested HandleClientPut returned error: %v", nestedErr)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, nodes["tail-1"], 1), (Snapshot{"k1": "v1"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, nodes["tail-1"], 1), map[string]string{"k1": "v1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("slot 1 committed snapshot = %v, want %v", got, want)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, nodes["tail-2"], 2), (Snapshot{"k2": "v2"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, nodes["tail-2"], 2), map[string]string{"k2": "v2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("slot 2 committed snapshot = %v, want %v", got, want)
 	}
 	if got, want := nodes["head"].InFlightClientWrites(), 0; got != want {
@@ -184,7 +184,7 @@ func TestWriteAdmissionReleasesAfterAmbiguousTimeout(t *testing.T) {
 	if got, want := mustNodeStagedSequences(t, nodes["head"], 7), []uint64{1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("staged sequences = %v, want %v", got, want)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, nodes["tail"], 7), (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, nodes["tail"], 7), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("tail committed snapshot = %v, want %v", got, want)
 	}
 }
@@ -266,10 +266,10 @@ func TestCatchupBackpressureRejectsConcurrentAddReplicaAsTail(t *testing.T) {
 	})
 	mustActivateReplica(t, nodes["source"], 1, ReplicaAssignment{Slot: 1, ChainVersion: 1, Role: ReplicaRoleSingle})
 	mustActivateReplica(t, nodes["source"], 2, ReplicaAssignment{Slot: 2, ChainVersion: 1, Role: ReplicaRoleSingle})
-	if err := backends["source"].Put(1, "k1", "v1"); err != nil {
+	if err := backends["source"].Put(1, "k1", "v1", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put(slot=1) returned error: %v", err)
 	}
-	if err := backends["source"].Put(2, "k2", "v2"); err != nil {
+	if err := backends["source"].Put(2, "k2", "v2", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put(slot=2) returned error: %v", err)
 	}
 
@@ -327,10 +327,10 @@ func TestCatchupBackpressureSharedWithRecoverReplicaAndReleasesOnFailure(t *test
 	})
 	mustActivateReplica(t, nodes["source"], 1, ReplicaAssignment{Slot: 1, ChainVersion: 1, Role: ReplicaRoleSingle})
 	mustActivateReplica(t, nodes["source"], 2, ReplicaAssignment{Slot: 2, ChainVersion: 1, Role: ReplicaRoleSingle})
-	if err := backends["source"].Put(1, "k1", "v1"); err != nil {
+	if err := backends["source"].Put(1, "k1", "v1", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put(slot=1) returned error: %v", err)
 	}
-	if err := backends["source"].Put(2, "k2", "v2"); err != nil {
+	if err := backends["source"].Put(2, "k2", "v2", testObjectMetadata(1)); err != nil {
 		t.Fatalf("source Put(slot=2) returned error: %v", err)
 	}
 

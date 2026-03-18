@@ -260,15 +260,27 @@ func TestEndToEndRouterPutGetDeleteAndRefreshAfterReconfiguration(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Put returned error: %v", err)
 	}
-	if got, want := putResult, (storage.CommitResult{Slot: 1, Sequence: 1}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("put result = %#v, want %#v", got, want)
+	if got, want := putResult.Slot, 1; got != want {
+		t.Fatalf("put slot = %d, want %d", got, want)
+	}
+	if got, want := putResult.Sequence, uint64(1); got != want {
+		t.Fatalf("put sequence = %d, want %d", got, want)
+	}
+	if !putResult.Applied || putResult.Metadata == nil {
+		t.Fatalf("put result = %#v, want applied metadata-bearing commit", putResult)
 	}
 	readResult, err := router.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
-	if got, want := readResult, (storage.ReadResult{Slot: 1, ChainVersion: 1, Found: true, Value: "v1"}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("read result = %#v, want %#v", got, want)
+	if got, want := readResult.Slot, 1; got != want {
+		t.Fatalf("read slot = %d, want %d", got, want)
+	}
+	if got, want := readResult.ChainVersion, uint64(1); got != want {
+		t.Fatalf("read chain version = %d, want %d", got, want)
+	}
+	if !readResult.Found || readResult.Value != "v1" || readResult.Metadata == nil {
+		t.Fatalf("read result = %#v, want found value with metadata", readResult)
 	}
 	assertChainValue(t, h, 1, key, "v1")
 
@@ -342,6 +354,39 @@ func TestEndToEndRouterPutGetDeleteAndRefreshAfterReconfiguration(t *testing.T) 
 		t.Fatalf("read after delete = %#v, want not found", readResult)
 	}
 	assertChainValue(t, h, 1, key, "")
+}
+
+func TestRouterPutIfReturnsTypedConditionFailure(t *testing.T) {
+	ctx := context.Background()
+	h := newRouterHarness(t, []string{"a", "b", "c"})
+	if _, err := h.server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 8, 3, []string{"a", "b", "c"})
+
+	router := mustNewRouter(t, h.server, h.transport)
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+
+	key := keyForSlot(t, 1, 8, "slot1")
+	if _, err := router.Put(ctx, key, "v1"); err != nil {
+		t.Fatalf("Put returned error: %v", err)
+	}
+	existsFalse := false
+	_, err := router.PutIf(ctx, key, "v2", storage.WriteConditions{
+		Exists: &existsFalse,
+	})
+	if err == nil {
+		t.Fatal("PutIf unexpectedly succeeded")
+	}
+	var failed *storage.ConditionFailedError
+	if !errors.As(err, &failed) {
+		t.Fatalf("error = %v, want condition failed", err)
+	}
+	if !failed.CurrentExists || failed.CurrentMetadata == nil || failed.CurrentMetadata.Version != 1 {
+		t.Fatalf("condition failure = %#v, want current version 1", failed)
+	}
 }
 
 func TestEndToEndRouterPutGetDeleteWithQueuedReplicationTransport(t *testing.T) {
@@ -718,12 +763,12 @@ func assertChainValue(t *testing.T, h *routerHarness, slot int, key string, want
 		got := snapshot[key]
 		if want == "" {
 			if _, exists := snapshot[key]; exists {
-				t.Fatalf("node %q slot %d has value %q, want missing", nodeID, slot, got)
+				t.Fatalf("node %q slot %d has value %q, want missing", nodeID, slot, got.Value)
 			}
 			continue
 		}
-		if got != want {
-			t.Fatalf("node %q slot %d value = %q, want %q", nodeID, slot, got, want)
+		if got.Value != want {
+			t.Fatalf("node %q slot %d value = %q, want %q", nodeID, slot, got.Value, want)
 		}
 	}
 }

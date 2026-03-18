@@ -217,6 +217,7 @@ func (s *StorageGRPCServer) Put(ctx context.Context, req *grpcproto.ClientPutReq
 		Key:                  req.Key,
 		Value:                req.Value,
 		ExpectedChainVersion: req.ExpectedChainVersion,
+		Conditions:           fromProtoWriteConditions(req.Conditions),
 	})
 	if err != nil {
 		return nil, encodeError(err)
@@ -229,6 +230,7 @@ func (s *StorageGRPCServer) Delete(ctx context.Context, req *grpcproto.ClientDel
 		Slot:                 int(req.Slot),
 		Key:                  req.Key,
 		ExpectedChainVersion: req.ExpectedChainVersion,
+		Conditions:           fromProtoWriteConditions(req.Conditions),
 	})
 	if err != nil {
 		return nil, encodeError(err)
@@ -303,6 +305,7 @@ func (s *StorageGRPCServer) ForwardWrite(ctx context.Context, req *grpcproto.For
 			Kind:     storage.OperationKind(req.Operation.Kind),
 			Key:      req.Operation.Key,
 			Value:    req.Operation.Value,
+			Metadata: derefObjectMetadata(fromProtoObjectMetadata(req.Operation.Metadata)),
 		},
 		FromNodeID: req.FromNodeId,
 	}); err != nil {

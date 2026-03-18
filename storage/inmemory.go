@@ -7,9 +7,10 @@ import (
 )
 
 type stagedOperation struct {
-	kind  OperationKind
-	key   string
-	value string
+	kind     OperationKind
+	key      string
+	value    string
+	metadata ObjectMetadata
 }
 
 type replicaData struct {
@@ -75,12 +76,12 @@ func (b *InMemoryBackend) SetHighestCommittedSequence(slot int, sequence uint64)
 	return nil
 }
 
-func (b *InMemoryBackend) Put(slot int, key string, value string) error {
+func (b *InMemoryBackend) Put(slot int, key string, value string, metadata ObjectMetadata) error {
 	replica, exists := b.replicas[slot]
 	if !exists {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
 	}
-	replica.committed[key] = value
+	replica.committed[key] = CommittedObject{Value: value, Metadata: cloneObjectMetadata(metadata)}
 	return nil
 }
 
@@ -88,7 +89,7 @@ func (b *InMemoryBackend) ReplicaData(slot int) (Snapshot, error) {
 	return b.CommittedSnapshot(slot)
 }
 
-func (b *InMemoryBackend) StagePut(slot int, sequence uint64, key string, value string) error {
+func (b *InMemoryBackend) StagePut(slot int, sequence uint64, key string, value string, metadata ObjectMetadata) error {
 	replica, exists := b.replicas[slot]
 	if !exists {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
@@ -96,11 +97,16 @@ func (b *InMemoryBackend) StagePut(slot int, sequence uint64, key string, value 
 	if _, exists := replica.staged[sequence]; exists {
 		return fmt.Errorf("%w: slot %d sequence %d already staged", ErrSequenceMismatch, slot, sequence)
 	}
-	replica.staged[sequence] = stagedOperation{kind: OperationKindPut, key: key, value: value}
+	replica.staged[sequence] = stagedOperation{
+		kind:     OperationKindPut,
+		key:      key,
+		value:    value,
+		metadata: cloneObjectMetadata(metadata),
+	}
 	return nil
 }
 
-func (b *InMemoryBackend) StageDelete(slot int, sequence uint64, key string) error {
+func (b *InMemoryBackend) StageDelete(slot int, sequence uint64, key string, metadata ObjectMetadata) error {
 	replica, exists := b.replicas[slot]
 	if !exists {
 		return fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
@@ -108,7 +114,11 @@ func (b *InMemoryBackend) StageDelete(slot int, sequence uint64, key string) err
 	if _, exists := replica.staged[sequence]; exists {
 		return fmt.Errorf("%w: slot %d sequence %d already staged", ErrSequenceMismatch, slot, sequence)
 	}
-	replica.staged[sequence] = stagedOperation{kind: OperationKindDelete, key: key}
+	replica.staged[sequence] = stagedOperation{
+		kind:     OperationKindDelete,
+		key:      key,
+		metadata: cloneObjectMetadata(metadata),
+	}
 	return nil
 }
 
@@ -132,7 +142,10 @@ func (b *InMemoryBackend) CommitSequence(slot int, sequence uint64) error {
 	}
 	switch operation.kind {
 	case OperationKindPut:
-		replica.committed[operation.key] = operation.value
+		replica.committed[operation.key] = CommittedObject{
+			Value:    operation.value,
+			Metadata: cloneObjectMetadata(operation.metadata),
+		}
 	case OperationKindDelete:
 		delete(replica.committed, operation.key)
 	default:
@@ -147,13 +160,13 @@ func (b *InMemoryBackend) CommittedSnapshot(slot int) (Snapshot, error) {
 	return b.Snapshot(slot)
 }
 
-func (b *InMemoryBackend) GetCommitted(slot int, key string) (string, bool, error) {
+func (b *InMemoryBackend) GetCommitted(slot int, key string) (CommittedObject, bool, error) {
 	replica, exists := b.replicas[slot]
 	if !exists {
-		return "", false, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
+		return CommittedObject{}, false, fmt.Errorf("%w: slot %d", ErrUnknownReplica, slot)
 	}
 	value, ok := replica.committed[key]
-	return value, ok, nil
+	return cloneCommittedObject(value), ok, nil
 }
 
 func (b *InMemoryBackend) HighestCommittedSequence(slot int) (uint64, error) {

@@ -18,11 +18,37 @@ func TestFaultInjectedRouterHistoryIsDeterministic(t *testing.T) {
 	if !reflect.DeepEqual(left.finalState, right.finalState) {
 		t.Fatalf("final coordinator state mismatch\nleft=%#v\nright=%#v", left.finalState, right.finalState)
 	}
-	if !reflect.DeepEqual(left.finalSnapshots, right.finalSnapshots) {
+	if !reflect.DeepEqual(snapshotValueSets(left.finalSnapshots), snapshotValueSets(right.finalSnapshots)) {
 		t.Fatalf("final snapshots mismatch\nleft=%#v\nright=%#v", left.finalSnapshots, right.finalSnapshots)
 	}
-	if !reflect.DeepEqual(left.finalRoute, right.finalRoute) {
+	if !sameReadResultValues(left.finalRoute, right.finalRoute) {
 		t.Fatalf("final route mismatch\nleft=%#v\nright=%#v", left.finalRoute, right.finalRoute)
+	}
+}
+
+func snapshotValueSets(snapshots map[string]storage.Snapshot) map[string]map[string]string {
+	values := make(map[string]map[string]string, len(snapshots))
+	for nodeID, snapshot := range snapshots {
+		nodeValues := make(map[string]string, len(snapshot))
+		for key, object := range snapshot {
+			nodeValues[key] = object.Value
+		}
+		values[nodeID] = nodeValues
+	}
+	return values
+}
+
+func sameReadResultValues(left storage.ReadResult, right storage.ReadResult) bool {
+	if left.Slot != right.Slot || left.ChainVersion != right.ChainVersion || left.Found != right.Found || left.Value != right.Value {
+		return false
+	}
+	switch {
+	case left.Metadata == nil && right.Metadata == nil:
+		return true
+	case left.Metadata == nil || right.Metadata == nil:
+		return false
+	default:
+		return left.Metadata.Version == right.Metadata.Version
 	}
 }
 
@@ -158,12 +184,12 @@ func mustQueuedChainValue(t *testing.T, h *queuedRouterHarness, slot int, key st
 		}
 		if got, ok := snapshot[key]; ok {
 			if !found {
-				value = got
+				value = got.Value
 				found = true
 				continue
 			}
-			if got != value {
-				t.Fatalf("inconsistent chain value: got %q and %q", value, got)
+			if got.Value != value {
+				t.Fatalf("inconsistent chain value: got %q and %q", value, got.Value)
 			}
 		}
 	}

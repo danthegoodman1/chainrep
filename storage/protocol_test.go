@@ -13,10 +13,10 @@ func TestInMemoryBackendStagesThenCommitsSequences(t *testing.T) {
 	if err := backend.CreateReplica(1); err != nil {
 		t.Fatalf("CreateReplica returned error: %v", err)
 	}
-	if err := backend.StagePut(1, 1, "k1", "v1"); err != nil {
+	if err := backend.StagePut(1, 1, "k1", "v1", testObjectMetadata(1)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
-	if err := backend.StageDelete(1, 2, "k1"); err != nil {
+	if err := backend.StageDelete(1, 2, "k1", testObjectMetadata(2)); err != nil {
 		t.Fatalf("StageDelete returned error: %v", err)
 	}
 
@@ -34,7 +34,7 @@ func TestInMemoryBackendStagesThenCommitsSequences(t *testing.T) {
 	if err := backend.CommitSequence(1, 1); err != nil {
 		t.Fatalf("CommitSequence(1) returned error: %v", err)
 	}
-	if got, want := mustCommittedSnapshot(t, backend, 1), (Snapshot{"k1": "v1"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustCommittedSnapshot(t, backend, 1), map[string]string{"k1": "v1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot after seq1 = %v, want %v", got, want)
 	}
 	if got, want := mustStagedSequences(t, backend, 1), []uint64{2}; !reflect.DeepEqual(got, want) {
@@ -44,7 +44,7 @@ func TestInMemoryBackendStagesThenCommitsSequences(t *testing.T) {
 	if err := backend.CommitSequence(1, 2); err != nil {
 		t.Fatalf("CommitSequence(2) returned error: %v", err)
 	}
-	if got, want := mustCommittedSnapshot(t, backend, 1), (Snapshot{}); !reflect.DeepEqual(got, want) {
+	if got, want := mustCommittedSnapshot(t, backend, 1), map[string]string{}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot after seq2 = %v, want %v", got, want)
 	}
 	if got := mustStagedSequences(t, backend, 1); len(got) != 0 {
@@ -65,10 +65,8 @@ func TestSingleReplicaSubmitPutAndDeleteCommitImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitPut returned error: %v", err)
 	}
-	if got, want := result, (CommitResult{Slot: 1, Sequence: 1}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("commit result = %#v, want %#v", got, want)
-	}
-	if got, want := mustNodeCommittedSnapshot(t, node, 1), (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+	assertAppliedCommitResult(t, result, 1, 1)
+	if got, want := mustNodeCommittedSnapshot(t, node, 1), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want %v", got, want)
 	}
 	if got, want := mustHighestCommitted(t, node, 1), uint64(1); got != want {
@@ -79,10 +77,8 @@ func TestSingleReplicaSubmitPutAndDeleteCommitImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitDelete returned error: %v", err)
 	}
-	if got, want := result, (CommitResult{Slot: 1, Sequence: 2}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("commit result = %#v, want %#v", got, want)
-	}
-	if got, want := mustNodeCommittedSnapshot(t, node, 1), (Snapshot{}); !reflect.DeepEqual(got, want) {
+	assertAppliedCommitResult(t, result, 1, 2)
+	if got, want := mustNodeCommittedSnapshot(t, node, 1), map[string]string{}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want %v", got, want)
 	}
 	if got := mustNodeStagedSequences(t, node, 1); len(got) != 0 {
@@ -98,19 +94,15 @@ func TestHeadMiddleTailPutAndDeleteReplicateAndCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitPut returned error: %v", err)
 	}
-	if got, want := putResult, (CommitResult{Slot: 7, Sequence: 1}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("put result = %#v, want %#v", got, want)
-	}
-	assertCommittedStateEqual(t, nodes, 7, Snapshot{"k": "v"}, 1)
+	assertAppliedCommitResult(t, putResult, 7, 1)
+	assertCommittedStateEqual(t, nodes, 7, map[string]string{"k": "v"}, 1)
 
 	deleteResult, err := nodes["head"].SubmitDelete(ctx, 7, "k")
 	if err != nil {
 		t.Fatalf("SubmitDelete returned error: %v", err)
 	}
-	if got, want := deleteResult, (CommitResult{Slot: 7, Sequence: 2}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("delete result = %#v, want %#v", got, want)
-	}
-	assertCommittedStateEqual(t, nodes, 7, Snapshot{}, 2)
+	assertAppliedCommitResult(t, deleteResult, 7, 2)
+	assertCommittedStateEqual(t, nodes, 7, map[string]string{}, 2)
 }
 
 func TestQueuedTransportWaitsForExplicitCommitAndPreservesStaging(t *testing.T) {
@@ -131,7 +123,7 @@ func TestQueuedTransportWaitsForExplicitCommitAndPreservesStaging(t *testing.T) 
 		if got, want := mustNodeStagedSequences(t, nodes["head"], 7), []uint64{1}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("head staged sequences before first delivery = %v, want %v", got, want)
 		}
-		if got, want := mustNodeCommittedSnapshot(t, nodes["head"], 7), (Snapshot{}); !reflect.DeepEqual(got, want) {
+		if got, want := mustNodeCommittedSnapshot(t, nodes["head"], 7), map[string]string{}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("head committed snapshot before first delivery = %v, want %v", got, want)
 		}
 	})
@@ -140,13 +132,11 @@ func TestQueuedTransportWaitsForExplicitCommitAndPreservesStaging(t *testing.T) 
 	if err != nil {
 		t.Fatalf("SubmitPut returned error: %v", err)
 	}
-	if got, want := result, (CommitResult{Slot: 7, Sequence: 1}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("commit result = %#v, want %#v", got, want)
-	}
+	assertAppliedCommitResult(t, result, 7, 1)
 	if got, want := delivered, []string{"forward:mid", "forward:tail", "commit:mid", "commit:head"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("delivery order = %v, want %v", got, want)
 	}
-	assertCommittedStateEqual(t, nodes, 7, Snapshot{"k": "v"}, 1)
+	assertCommittedStateEqual(t, nodes, 7, map[string]string{"k": "v"}, 1)
 	if got := transport.Pending(); got != 0 {
 		t.Fatalf("pending queued messages = %d, want 0", got)
 	}
@@ -181,17 +171,15 @@ func TestQueuedTransportDuplicateMessagesStillConverge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitPut returned error: %v", err)
 	}
-	if got, want := result, (CommitResult{Slot: 9, Sequence: 1}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("commit result = %#v, want %#v", got, want)
-	}
-	assertCommittedStateEqual(t, nodes, 9, Snapshot{"k": "v"}, 1)
+	assertAppliedCommitResult(t, result, 9, 1)
+	assertCommittedStateEqual(t, nodes, 9, map[string]string{"k": "v"}, 1)
 	if got, want := transport.Pending(), 1; got != want {
 		t.Fatalf("pending queued messages before duplicate drain = %d, want %d", got, want)
 	}
 	if err := transport.DeliverAll(ctx); err != nil {
 		t.Fatalf("DeliverAll returned error: %v", err)
 	}
-	assertCommittedStateEqual(t, nodes, 9, Snapshot{"k": "v"}, 1)
+	assertCommittedStateEqual(t, nodes, 9, map[string]string{"k": "v"}, 1)
 	if got := transport.Pending(); got != 0 {
 		t.Fatalf("pending queued messages after duplicate drain = %d, want 0", got)
 	}
@@ -207,7 +195,7 @@ func TestQueuedTransportDropLeavesWriteStagedAndUncommitted(t *testing.T) {
 	} else if !errors.Is(err, ErrStateMismatch) {
 		t.Fatalf("error = %v, want state mismatch", err)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, nodes["head"], 6), (Snapshot{}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, nodes["head"], 6), map[string]string{}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want empty", got)
 	}
 	if got, want := mustNodeStagedSequences(t, nodes["head"], 6), []uint64{1}; !reflect.DeepEqual(got, want) {
@@ -260,7 +248,7 @@ func TestPipelineStagesLaterWritesBeforeEarlierCommitAndCommitsInOrder(t *testin
 	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 1, FromNodeID: "tail"}); err != nil {
 		t.Fatalf("HandleCommitWrite(seq=1) returned error: %v", err)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k1": "v1", "k2": "v2"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, node, 5), map[string]string{"k1": "v1", "k2": "v2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot after drained buffered commits = %v, want %v", got, want)
 	}
 	if got := mustNodeStagedSequences(t, node, 5); len(got) != 0 {
@@ -316,7 +304,7 @@ func TestOutOfOrderForwardAndCommitRequestsAreBufferedAndDrained(t *testing.T) {
 	if err := node.HandleCommitWrite(ctx, CommitWriteRequest{Slot: 5, Sequence: 1, FromNodeID: "tail"}); err != nil {
 		t.Fatalf("HandleCommitWrite(seq=1) returned error: %v", err)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, node, 5), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot after commit drain = %v, want %v", got, want)
 	}
 }
@@ -372,7 +360,7 @@ func TestDuplicateAndConflictingReplicaMessages(t *testing.T) {
 		if err := node.HandleForwardWrite(ctx, req); err != nil {
 			t.Fatalf("duplicate HandleForwardWrite returned error: %v", err)
 		}
-		if got, want := mustNodeCommittedSnapshot(t, node, 5), (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+		if got, want := mustNodeCommittedSnapshot(t, node, 5), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("committed snapshot = %v, want %v", got, want)
 		}
 	})
@@ -574,7 +562,7 @@ func TestWriteValidationAndDownstreamFailure(t *testing.T) {
 		} else if !containsError(err, "downstream unavailable") {
 			t.Fatalf("error = %v, want downstream unavailable context", err)
 		}
-		if got, want := mustNodeCommittedSnapshot(t, node, 6), (Snapshot{}); !reflect.DeepEqual(got, want) {
+		if got, want := mustNodeCommittedSnapshot(t, node, 6), map[string]string{}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("committed snapshot = %v, want empty", got)
 		}
 		if got, want := mustNodeStagedSequences(t, node, 6), []uint64{1}; !reflect.DeepEqual(got, want) {
@@ -648,11 +636,11 @@ func runReplicationHistory(t *testing.T) replicationHistory {
 			}
 		}
 	}
-	if !reflect.DeepEqual(result.finalStates["a"][11], Snapshot{"y": "2"}) {
-		t.Fatalf("slot 11 state = %v, want %v", result.finalStates["a"][11], Snapshot{"y": "2"})
+	if !reflect.DeepEqual(snapshotValues(result.finalStates["a"][11]), map[string]string{"y": "2"}) {
+		t.Fatalf("slot 11 state = %v, want %v", result.finalStates["a"][11], map[string]string{"y": "2"})
 	}
-	if !reflect.DeepEqual(result.finalStates["c"][12], Snapshot{"z": "9"}) {
-		t.Fatalf("slot 12 state = %v, want %v", result.finalStates["c"][12], Snapshot{"z": "9"})
+	if !reflect.DeepEqual(snapshotValues(result.finalStates["c"][12]), map[string]string{"z": "9"}) {
+		t.Fatalf("slot 12 state = %v, want %v", result.finalStates["c"][12], map[string]string{"z": "9"})
 	}
 	return result
 }
@@ -883,7 +871,7 @@ func mustActivateReplica(t *testing.T, node *Node, slot int, assignment ReplicaA
 	}
 }
 
-func assertCommittedStateEqual(t *testing.T, nodes map[string]*Node, slot int, want Snapshot, wantSequence uint64) {
+func assertCommittedStateEqual(t *testing.T, nodes map[string]*Node, slot int, want map[string]string, wantSequence uint64) {
 	t.Helper()
 	for nodeID, node := range nodes {
 		if got := mustNodeCommittedSnapshot(t, node, slot); !reflect.DeepEqual(got, want) {
@@ -898,13 +886,13 @@ func assertCommittedStateEqual(t *testing.T, nodes map[string]*Node, slot int, w
 	}
 }
 
-func mustCommittedSnapshot(t *testing.T, backend *InMemoryBackend, slot int) Snapshot {
+func mustCommittedSnapshot(t *testing.T, backend *InMemoryBackend, slot int) map[string]string {
 	t.Helper()
 	snapshot, err := backend.CommittedSnapshot(slot)
 	if err != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", err)
 	}
-	return snapshot
+	return snapshotValues(snapshot)
 }
 
 func mustStagedSequences(t *testing.T, backend *InMemoryBackend, slot int) []uint64 {
@@ -916,13 +904,13 @@ func mustStagedSequences(t *testing.T, backend *InMemoryBackend, slot int) []uin
 	return sequences
 }
 
-func mustNodeCommittedSnapshot(t *testing.T, node *Node, slot int) Snapshot {
+func mustNodeCommittedSnapshot(t *testing.T, node *Node, slot int) map[string]string {
 	t.Helper()
 	snapshot, err := node.CommittedSnapshot(slot)
 	if err != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", err)
 	}
-	return snapshot
+	return snapshotValues(snapshot)
 }
 
 func mustNodeStagedSequences(t *testing.T, node *Node, slot int) []uint64 {
@@ -963,4 +951,20 @@ func mustHighestCommitted(t *testing.T, node *Node, slot int) uint64 {
 
 func containsError(err error, substring string) bool {
 	return err != nil && strings.Contains(err.Error(), substring)
+}
+
+func assertAppliedCommitResult(t *testing.T, result CommitResult, slot int, sequence uint64) {
+	t.Helper()
+	if got, want := result.Slot, slot; got != want {
+		t.Fatalf("commit result slot = %d, want %d", got, want)
+	}
+	if got, want := result.Sequence, sequence; got != want {
+		t.Fatalf("commit result sequence = %d, want %d", got, want)
+	}
+	if !result.Applied {
+		t.Fatalf("commit result = %#v, want applied", result)
+	}
+	if result.Metadata == nil {
+		t.Fatalf("commit result = %#v, want metadata", result)
+	}
 }

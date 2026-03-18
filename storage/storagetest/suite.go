@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/storage"
 )
@@ -41,13 +42,13 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 		if err := backend.CreateReplica(1); err != nil {
 			t.Fatalf("CreateReplica returned error: %v", err)
 		}
-		if err := backend.StagePut(1, 1, "k", "v"); err != nil {
+		if err := backend.StagePut(1, 1, "k", "v", testMetadata(1)); err != nil {
 			t.Fatalf("StagePut returned error: %v", err)
 		}
 		if value, found, err := backend.GetCommitted(1, "k"); err != nil {
 			t.Fatalf("GetCommitted returned error: %v", err)
-		} else if found || value != "" {
-			t.Fatalf("GetCommitted = (%q, %t), want (\"\", false)", value, found)
+		} else if found || value != (storage.CommittedObject{}) {
+			t.Fatalf("GetCommitted = (%#v, %t), want zero,false", value, found)
 		}
 	})
 
@@ -57,10 +58,12 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 		if err := backend.CreateReplica(1); err != nil {
 			t.Fatalf("CreateReplica returned error: %v", err)
 		}
-		if err := backend.StagePut(1, 1, "k", "v1"); err != nil {
+		putMetadata := testMetadata(1)
+		deleteMetadata := testMetadata(2)
+		if err := backend.StagePut(1, 1, "k", "v1", putMetadata); err != nil {
 			t.Fatalf("StagePut returned error: %v", err)
 		}
-		if err := backend.StageDelete(1, 2, "k"); err != nil {
+		if err := backend.StageDelete(1, 2, "k", deleteMetadata); err != nil {
 			t.Fatalf("StageDelete returned error: %v", err)
 		}
 		if err := backend.CommitSequence(1, 2); !errors.Is(err, storage.ErrSequenceMismatch) {
@@ -71,16 +74,16 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 		}
 		if got, found, err := backend.GetCommitted(1, "k"); err != nil {
 			t.Fatalf("GetCommitted after put returned error: %v", err)
-		} else if !found || got != "v1" {
-			t.Fatalf("GetCommitted after put = (%q, %t), want (\"v1\", true)", got, found)
+		} else if !found || got != (storage.CommittedObject{Value: "v1", Metadata: putMetadata}) {
+			t.Fatalf("GetCommitted after put = (%#v, %t), want committed object", got, found)
 		}
 		if err := backend.CommitSequence(1, 2); err != nil {
 			t.Fatalf("CommitSequence(2) returned error: %v", err)
 		}
 		if got, found, err := backend.GetCommitted(1, "k"); err != nil {
 			t.Fatalf("GetCommitted after delete returned error: %v", err)
-		} else if found || got != "" {
-			t.Fatalf("GetCommitted after delete = (%q, %t), want (\"\", false)", got, found)
+		} else if found || got != (storage.CommittedObject{}) {
+			t.Fatalf("GetCommitted after delete = (%#v, %t), want zero,false", got, found)
 		}
 		if got, err := backend.StagedSequences(1); err != nil {
 			t.Fatalf("StagedSequences returned error: %v", err)
@@ -100,7 +103,7 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 		if err := backend.CreateReplica(1); err != nil {
 			t.Fatalf("CreateReplica returned error: %v", err)
 		}
-		if err := backend.StagePut(1, 1, "k", "v"); err != nil {
+		if err := backend.StagePut(1, 1, "k", "v", testMetadata(1)); err != nil {
 			t.Fatalf("StagePut returned error: %v", err)
 		}
 		if err := backend.CommitSequence(1, 1); err != nil {
@@ -110,11 +113,11 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 		if err != nil {
 			t.Fatalf("CommittedSnapshot returned error: %v", err)
 		}
-		snapshot["k"] = "mutated"
+		snapshot["k"] = storage.CommittedObject{Value: "mutated", Metadata: testMetadata(9)}
 		if got, found, err := backend.GetCommitted(1, "k"); err != nil {
 			t.Fatalf("GetCommitted returned error: %v", err)
-		} else if !found || got != "v" {
-			t.Fatalf("GetCommitted = (%q, %t), want (\"v\", true)", got, found)
+		} else if !found || got != (storage.CommittedObject{Value: "v", Metadata: testMetadata(1)}) {
+			t.Fatalf("GetCommitted = (%#v, %t), want committed object", got, found)
 		}
 	})
 
@@ -124,7 +127,7 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 		if err := backend.CreateReplica(3); err != nil {
 			t.Fatalf("CreateReplica returned error: %v", err)
 		}
-		if err := backend.StagePut(3, 1, "k", "v"); err != nil {
+		if err := backend.StagePut(3, 1, "k", "v", testMetadata(1)); err != nil {
 			t.Fatalf("StagePut returned error: %v", err)
 		}
 		if err := backend.CommitSequence(3, 1); err != nil {
@@ -137,6 +140,15 @@ func RunBackendSuite(t *testing.T, factory BackendFactory) {
 			t.Fatalf("CommittedSnapshot error = %v, want unknown replica", err)
 		}
 	})
+}
+
+func testMetadata(version uint64) storage.ObjectMetadata {
+	base := time.Unix(0, 0).UTC()
+	return storage.ObjectMetadata{
+		Version:   version,
+		CreatedAt: base.Add(time.Duration(version) * time.Second),
+		UpdatedAt: base.Add(time.Duration(version) * time.Second),
+	}
 }
 
 func RunLocalStateStoreSuite(t *testing.T, factory LocalStateStoreFactory) {

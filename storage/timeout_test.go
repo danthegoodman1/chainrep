@@ -36,7 +36,7 @@ func TestSubmitPutTimesOutAndPreservesInFlightState(t *testing.T) {
 	if got, want := mustNodeStagedSequences(t, node, 7), []uint64{1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("staged sequences = %v, want %v", got, want)
 	}
-	if got, want := mustNodeCommittedSnapshot(t, node, 7), (Snapshot{}); !reflect.DeepEqual(got, want) {
+	if got, want := mustNodeCommittedSnapshot(t, node, 7), map[string]string{}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want %v", got, want)
 	}
 	if got, want := mustHighestCommitted(t, node, 7), uint64(0); got != want {

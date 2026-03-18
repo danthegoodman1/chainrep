@@ -118,7 +118,7 @@ func TestHandleClientPutSingleReplicaReturnsAmbiguousOnPersistCancellation(t *te
 	if snapErr != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", snapErr)
 	}
-	if got, want := snapshot, (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+	if got, want := snapshotValues(snapshot), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want %v", got, want)
 	}
 }
@@ -146,7 +146,7 @@ func TestTailHandleForwardWriteHonorsContextDuringCommitPersist(t *testing.T) {
 	cancel()
 
 	err = node.HandleForwardWrite(cancelCtx, ForwardWriteRequest{
-		Operation:  WriteOperation{Slot: 6, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v"},
+		Operation:  WriteOperation{Slot: 6, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v", Metadata: testObjectMetadata(1)},
 		FromNodeID: "head",
 	})
 	if err == nil {
@@ -159,7 +159,7 @@ func TestTailHandleForwardWriteHonorsContextDuringCommitPersist(t *testing.T) {
 	if snapErr != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", snapErr)
 	}
-	if got, want := snapshot, (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+	if got, want := snapshotValues(snapshot), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want %v", got, want)
 	}
 }
@@ -179,7 +179,7 @@ func TestHandleCommitWriteHonorsContextDuringCommitPersist(t *testing.T) {
 	})
 	record := node.replicas[7]
 	record = node.ensureProtocolState(record)
-	op := WriteOperation{Slot: 7, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v"}
+	op := WriteOperation{Slot: 7, Sequence: 1, Kind: OperationKindPut, Key: "k", Value: "v", Metadata: testObjectMetadata(1)}
 	if err := node.stageOperation(op); err != nil {
 		t.Fatalf("stageOperation returned error: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestHandleCommitWriteHonorsContextDuringCommitPersist(t *testing.T) {
 	if snapErr != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", snapErr)
 	}
-	if got, want := snapshot, (Snapshot{"k": "v"}); !reflect.DeepEqual(got, want) {
+	if got, want := snapshotValues(snapshot), map[string]string{"k": "v"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("committed snapshot = %v, want %v", got, want)
 	}
 }

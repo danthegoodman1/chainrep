@@ -172,6 +172,43 @@ func TestClientTransportReturnsTypedErrorsOverGRPC(t *testing.T) {
 			t.Fatal("first Put unexpectedly succeeded")
 		}
 	})
+
+	t.Run("condition failed", func(t *testing.T) {
+		ctx := context.Background()
+		pool := grpcx.NewConnPool()
+		t.Cleanup(func() { _ = pool.Close() })
+
+		node := mustSingleReplicaNode(t, ctx, "node-a", storage.Config{NodeID: "node-a"}, storage.NewInMemoryCoordinatorClient(), storage.NewInMemoryReplicationTransport(), 6, 1)
+		server, address := mustStartStorageServer(t, node)
+		defer func() { _ = server.Close() }()
+
+		transport := grpcx.NewClientTransport(pool)
+		if _, err := transport.Put(ctx, address, storage.ClientPutRequest{
+			Slot:                 6,
+			Key:                  "alpha",
+			Value:                "one",
+			ExpectedChainVersion: 1,
+		}); err != nil {
+			t.Fatalf("initial Put returned error: %v", err)
+		}
+		existsFalse := false
+		_, err := transport.Put(ctx, address, storage.ClientPutRequest{
+			Slot:                 6,
+			Key:                  "alpha",
+			Value:                "two",
+			ExpectedChainVersion: 1,
+			Conditions: storage.WriteConditions{
+				Exists: &existsFalse,
+			},
+		})
+		var failed *storage.ConditionFailedError
+		if !errors.As(err, &failed) {
+			t.Fatalf("second Put error = %v, want condition failed", err)
+		}
+		if !failed.CurrentExists || failed.CurrentMetadata == nil || failed.CurrentMetadata.Version != 1 {
+			t.Fatalf("condition failure = %#v, want current version 1", failed)
+		}
+	})
 }
 
 func TestReplicationTransportOverGRPC(t *testing.T) {
@@ -214,8 +251,8 @@ func TestReplicationTransportOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", err)
 	}
-	if got := snapshot["alpha"]; got != "one" {
-		t.Fatalf("target snapshot alpha = %q, want one", got)
+	if got := snapshot["alpha"]; got.Value != "one" {
+		t.Fatalf("target snapshot alpha = %q, want one", got.Value)
 	}
 
 	head := mustOpenNode(t, ctx, storage.Config{NodeID: "head"}, storage.NewInMemoryBackend(), storage.NewInMemoryCoordinatorClient(), repl)
@@ -254,8 +291,8 @@ func TestReplicationTransportOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("target CommittedSnapshot returned error: %v", err)
 	}
-	if got := snapshot["beta"]; got != "two" {
-		t.Fatalf("target snapshot beta = %q, want two", got)
+	if got := snapshot["beta"]; got.Value != "two" {
+		t.Fatalf("target snapshot beta = %q, want two", got.Value)
 	}
 }
 

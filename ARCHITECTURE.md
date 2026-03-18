@@ -48,6 +48,7 @@ It is responsible for:
 - reporting readiness, removal, and heartbeat information back to the coordinator
 - reopening persisted replica metadata and committed state after restart
 - reporting recovered local inventory to the coordinator for explicit revalidation
+- assigning per-object system metadata at the head and preserving it through replication and catch-up
 
 It is not responsible for:
 
@@ -174,6 +175,20 @@ Each hosted replica has:
 - chain metadata
 - predecessor/successor information, including the transport target distributed by the coordinator
 - a local lifecycle state
+
+Committed objects carry system-managed metadata:
+
+- `version`: per-object monotonic version within the current object lifetime
+- `created_at`
+- `updated_at`
+
+Client writes may include conditional predicates evaluated against the current committed object at the head:
+
+- `exists == true/false`
+- `version` with `eq/lt/lte/gt/gte`
+- `updated_at` with `eq/lt/lte/gt/gte`
+
+All supplied conditions are combined with `AND`. Failed conditions are rejected before sequence allocation or replication. Delete removes the object from normal reads and does not retain hidden lineage, so conditional fencing is not preserved across delete and recreate in v1.
 
 Current replica lifecycle states:
 

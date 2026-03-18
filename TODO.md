@@ -27,4 +27,4 @@
 - [x] Add backpressure and resource controls for replication, catch-up, and client write paths.
 - [x] Add fault-injected async transport tests for delay, drop, duplicate, and reorder behavior.
 - [x] Define and test crash-consistency guarantees for the durable storage backend and local metadata store.
-- [ ] Stored objects have associated metadata, enabling conditional writes (e.g. monotonic fencing token per-object, auto-incremented on mutation)
+- [x] Stored objects have associated metadata, enabling conditional writes (e.g. monotonic fencing token per-object, auto-incremented on mutation)

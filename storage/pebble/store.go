@@ -59,9 +59,10 @@ type LocalStore struct {
 }
 
 type stagedValue struct {
-	Kind  storage.OperationKind `json:"kind"`
-	Key   string                `json:"key"`
-	Value string                `json:"value"`
+	Kind     storage.OperationKind `json:"kind"`
+	Key      string                `json:"key"`
+	Value    string                `json:"value"`
+	Metadata storage.ObjectMetadata `json:"metadata"`
 }
 
 func Open(path string) (*Store, error) {
@@ -166,7 +167,11 @@ func (b *Backend) InstallSnapshot(slot int, snap storage.Snapshot) error {
 	}
 	keys := sortedSnapshotKeys(snap)
 	for _, key := range keys {
-		if err := batch.Set(committedKey(slot, key), []byte(snap[key]), nil); err != nil {
+		encoded, err := json.Marshal(snap[key])
+		if err != nil {
+			return fmt.Errorf("err in json.Marshal(committed snapshot): %w", err)
+		}
+		if err := batch.Set(committedKey(slot, key), encoded, nil); err != nil {
 			return fmt.Errorf("err in batch.Set(committed snapshot): %w", err)
 		}
 	}
@@ -194,18 +199,20 @@ func (b *Backend) SetHighestCommittedSequence(slot int, sequence uint64) error {
 	return nil
 }
 
-func (b *Backend) StagePut(slot int, sequence uint64, key string, value string) error {
+func (b *Backend) StagePut(slot int, sequence uint64, key string, value string, metadata storage.ObjectMetadata) error {
 	return b.stageOperation(slot, sequence, stagedValue{
-		Kind:  storage.OperationKindPut,
-		Key:   key,
-		Value: value,
+		Kind:     storage.OperationKindPut,
+		Key:      key,
+		Value:    value,
+		Metadata: metadata,
 	})
 }
 
-func (b *Backend) StageDelete(slot int, sequence uint64, key string) error {
+func (b *Backend) StageDelete(slot int, sequence uint64, key string, metadata storage.ObjectMetadata) error {
 	return b.stageOperation(slot, sequence, stagedValue{
-		Kind: storage.OperationKindDelete,
-		Key:  key,
+		Kind:     storage.OperationKindDelete,
+		Key:      key,
+		Metadata: metadata,
 	})
 }
 
@@ -232,7 +239,14 @@ func (b *Backend) CommitSequence(slot int, sequence uint64) error {
 	defer batch.Close()
 	switch operation.Kind {
 	case storage.OperationKindPut:
-		if err := batch.Set(committedKey(slot, operation.Key), []byte(operation.Value), nil); err != nil {
+		encoded, err := json.Marshal(storage.CommittedObject{
+			Value:    operation.Value,
+			Metadata: operation.Metadata,
+		})
+		if err != nil {
+			return fmt.Errorf("err in json.Marshal(committed put): %w", err)
+		}
+		if err := batch.Set(committedKey(slot, operation.Key), encoded, nil); err != nil {
 			return fmt.Errorf("err in batch.Set(committed put): %w", err)
 		}
 	case storage.OperationKindDelete:
@@ -270,7 +284,11 @@ func (b *Backend) CommittedSnapshot(slot int) (storage.Snapshot, error) {
 	snapshot := storage.Snapshot{}
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key()[len(prefix):])
-		snapshot[key] = string(iter.Value())
+		var object storage.CommittedObject
+		if err := json.Unmarshal(iter.Value(), &object); err != nil {
+			return nil, fmt.Errorf("err in json.Unmarshal(committed snapshot): %w", err)
+		}
+		snapshot[key] = object
 	}
 	if err := iter.Error(); err != nil {
 		return nil, fmt.Errorf("err in iter.Error(committed): %w", err)
@@ -278,19 +296,23 @@ func (b *Backend) CommittedSnapshot(slot int) (storage.Snapshot, error) {
 	return snapshot, nil
 }
 
-func (b *Backend) GetCommitted(slot int, key string) (string, bool, error) {
+func (b *Backend) GetCommitted(slot int, key string) (storage.CommittedObject, bool, error) {
 	if _, err := b.HighestCommittedSequence(slot); err != nil {
-		return "", false, err
+		return storage.CommittedObject{}, false, err
 	}
 	value, closer, err := b.owner.db.Get(committedKey(slot, key))
 	if errors.Is(err, cockroachpebble.ErrNotFound) {
-		return "", false, nil
+		return storage.CommittedObject{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("err in db.Get(committed): %w", err)
+		return storage.CommittedObject{}, false, fmt.Errorf("err in db.Get(committed): %w", err)
 	}
 	defer closer.Close()
-	return string(slices.Clone(value)), true, nil
+	var object storage.CommittedObject
+	if err := json.Unmarshal(slices.Clone(value), &object); err != nil {
+		return storage.CommittedObject{}, false, fmt.Errorf("err in json.Unmarshal(committed): %w", err)
+	}
+	return object, true, nil
 }
 
 func (b *Backend) HighestCommittedSequence(slot int) (uint64, error) {

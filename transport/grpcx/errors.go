@@ -48,6 +48,18 @@ func encodeError(err error) error {
 		return st.Err()
 	}
 
+	var conditionFailed *storage.ConditionFailedError
+	if errors.As(err, &conditionFailed) {
+		st, _ := status.New(codes.FailedPrecondition, err.Error()).WithDetails(&grpcproto.ConditionFailedDetail{
+			Slot:                 int32(conditionFailed.Slot),
+			Kind:                 string(conditionFailed.Kind),
+			ExpectedChainVersion: conditionFailed.ExpectedChainVersion,
+			CurrentExists:        conditionFailed.CurrentExists,
+			CurrentMetadata:      protoObjectMetadata(conditionFailed.CurrentMetadata),
+		})
+		return st.Err()
+	}
+
 	var pressure *storage.BackpressureError
 	if errors.As(err, &pressure) {
 		st, _ := status.New(codes.ResourceExhausted, err.Error()).WithDetails(&grpcproto.BackpressureDetail{
@@ -111,6 +123,14 @@ func decodeError(err error) error {
 				Resource: storage.BackpressureResource(typed.Resource),
 				Cause:    backpressureCause(storage.BackpressureResource(typed.Resource)),
 			}
+		case *grpcproto.ConditionFailedDetail:
+			return &storage.ConditionFailedError{
+				Slot:                 int(typed.Slot),
+				Kind:                 storage.OperationKind(typed.Kind),
+				ExpectedChainVersion: typed.ExpectedChainVersion,
+				CurrentExists:        typed.CurrentExists,
+				CurrentMetadata:      fromProtoObjectMetadata(typed.CurrentMetadata),
+			}
 		case *grpcproto.DomainErrorDetail:
 			return decodeDomainError(typed)
 		}
@@ -138,6 +158,8 @@ func domainErrorDetail(err error) (*grpcproto.DomainErrorDetail, bool) {
 		return &grpcproto.DomainErrorDetail{Kind: "storage_state_mismatch"}, true
 	case errors.Is(err, storage.ErrProtocolConflict):
 		return &grpcproto.DomainErrorDetail{Kind: "protocol_conflict"}, true
+	case errors.Is(err, storage.ErrConditionFailed):
+		return &grpcproto.DomainErrorDetail{Kind: "condition_failed"}, true
 	case errors.Is(err, storage.ErrInvalidTransition):
 		return &grpcproto.DomainErrorDetail{Kind: "invalid_transition"}, true
 	case errors.Is(err, coordserver.ErrUnexpectedProgress):
@@ -172,6 +194,8 @@ func decodeDomainError(detail *grpcproto.DomainErrorDetail) error {
 		return storage.ErrStateMismatch
 	case "protocol_conflict":
 		return storage.ErrProtocolConflict
+	case "condition_failed":
+		return storage.ErrConditionFailed
 	case "invalid_transition":
 		return storage.ErrInvalidTransition
 	case "unexpected_progress":

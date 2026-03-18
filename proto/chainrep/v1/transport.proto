@@ -6,6 +6,41 @@ option go_package = "github.com/danthegoodman1/chainrep/transport/grpcproto;grpc
 
 message Empty {}
 
+enum ComparisonOperator {
+  COMPARISON_OPERATOR_UNSPECIFIED = 0;
+  COMPARISON_OPERATOR_EQ = 1;
+  COMPARISON_OPERATOR_LT = 2;
+  COMPARISON_OPERATOR_LTE = 3;
+  COMPARISON_OPERATOR_GT = 4;
+  COMPARISON_OPERATOR_GTE = 5;
+}
+
+message ObjectMetadata {
+  uint64 version = 1;
+  int64 created_at_unix_nano = 2;
+  int64 updated_at_unix_nano = 3;
+}
+
+message BoolCondition {
+  bool value = 1;
+}
+
+message VersionComparison {
+  ComparisonOperator operator = 1;
+  uint64 value = 2;
+}
+
+message TimeComparison {
+  ComparisonOperator operator = 1;
+  int64 unix_nano = 2;
+}
+
+message WriteConditions {
+  BoolCondition exists = 1;
+  VersionComparison version = 2;
+  TimeComparison updated_at = 3;
+}
+
 message FailureDomain {
   string key = 1;
   string value = 2;
@@ -146,17 +181,21 @@ message ClientPutRequest {
   string key = 2;
   string value = 3;
   uint64 expected_chain_version = 4;
+  WriteConditions conditions = 5;
 }
 
 message ClientDeleteRequest {
   int32 slot = 1;
   string key = 2;
   uint64 expected_chain_version = 3;
+  WriteConditions conditions = 4;
 }
 
 message CommitResult {
   int32 slot = 1;
   uint64 sequence = 2;
+  bool applied = 3;
+  ObjectMetadata metadata = 4;
 }
 
 message ReadResult {
@@ -164,6 +203,7 @@ message ReadResult {
   uint64 chain_version = 2;
   bool found = 3;
   string value = 4;
+  ObjectMetadata metadata = 5;
 }
 
 message WriteOperation {
@@ -172,6 +212,7 @@ message WriteOperation {
   string kind = 3;
   string key = 4;
   string value = 5;
+  ObjectMetadata metadata = 6;
 }
 
 message ForwardWriteRequest {
@@ -192,6 +233,7 @@ message FetchSnapshotRequest {
 message SnapshotEntry {
   string key = 1;
   string value = 2;
+  ObjectMetadata metadata = 3;
 }
 
 message FetchCommittedSequenceRequest {
@@ -216,6 +258,14 @@ message AmbiguousWriteDetail {
   string kind = 2;
   uint64 expected_chain_version = 3;
   string cause = 4;
+}
+
+message ConditionFailedDetail {
+  int32 slot = 1;
+  string kind = 2;
+  uint64 expected_chain_version = 3;
+  bool current_exists = 4;
+  ObjectMetadata current_metadata = 5;
 }
 
 message BackpressureDetail {

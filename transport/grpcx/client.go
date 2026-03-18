@@ -409,6 +409,7 @@ func (t *ReplicationTransport) ForwardWrite(ctx context.Context, toTarget string
 			Kind:     string(req.Operation.Kind),
 			Key:      req.Operation.Key,
 			Value:    req.Operation.Value,
+			Metadata: protoObjectMetadata(&req.Operation.Metadata),
 		},
 		FromNodeId: req.FromNodeID,
 	})
@@ -465,6 +466,7 @@ func (t *ClientTransport) Put(ctx context.Context, target string, req storage.Cl
 		Key:                  req.Key,
 		Value:                req.Value,
 		ExpectedChainVersion: req.ExpectedChainVersion,
+		Conditions:           protoWriteConditions(req.Conditions),
 	})
 	if err != nil {
 		return storage.CommitResult{}, decodeError(err)
@@ -481,6 +483,7 @@ func (t *ClientTransport) Delete(ctx context.Context, target string, req storage
 		Slot:                 int32(req.Slot),
 		Key:                  req.Key,
 		ExpectedChainVersion: req.ExpectedChainVersion,
+		Conditions:           protoWriteConditions(req.Conditions),
 	})
 	if err != nil {
 		return storage.CommitResult{}, decodeError(err)

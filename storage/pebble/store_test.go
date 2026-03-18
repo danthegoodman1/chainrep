@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/storage"
 	"github.com/danthegoodman1/chainrep/storage/storagetest"
@@ -56,7 +57,7 @@ func TestPebbleCompletedOperationsSurviveReopen(t *testing.T) {
 	} else if got != 0 {
 		t.Fatalf("HighestCommittedSequence after reopen = %d, want 0", got)
 	}
-	if err := backend.StagePut(1, 1, "k", "v"); err != nil {
+	if err := backend.StagePut(1, 1, "k", "v", testMetadata(1)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -71,7 +72,7 @@ func TestPebbleCompletedOperationsSurviveReopen(t *testing.T) {
 	} else if len(got) != 0 {
 		t.Fatalf("StagedSequences after reopen = %v, want none", got)
 	}
-	if err := backend.StagePut(1, 1, "k", "v"); err != nil {
+	if err := backend.StagePut(1, 1, "k", "v", testMetadata(1)); err != nil {
 		t.Fatalf("StagePut after reopen returned error: %v", err)
 	}
 	if err := backend.CommitSequence(1, 1); err != nil {
@@ -86,8 +87,8 @@ func TestPebbleCompletedOperationsSurviveReopen(t *testing.T) {
 	local = store.LocalStateStore()
 	if got, found, err := backend.GetCommitted(1, "k"); err != nil {
 		t.Fatalf("GetCommitted after reopen returned error: %v", err)
-	} else if !found || got != "v" {
-		t.Fatalf("GetCommitted after reopen = (%q, %t), want (\"v\", true)", got, found)
+	} else if !found || got.Value != "v" || got.Metadata != testMetadata(1) {
+		t.Fatalf("GetCommitted after reopen = (%#v, %t), want committed object", got, found)
 	}
 	if got, err := backend.StagedSequences(1); err != nil {
 		t.Fatalf("StagedSequences after commit reopen returned error: %v", err)
@@ -199,8 +200,8 @@ func TestPebbleNodeRestartRecoveryAndClose(t *testing.T) {
 	}
 	if read, found, err := reopenedBackend.GetCommitted(1, "beta"); err != nil {
 		t.Fatalf("GetCommitted returned error: %v", err)
-	} else if !found || read != "v2" {
-		t.Fatalf("GetCommitted = (%q, %t), want (\"v2\", true)", read, found)
+	} else if !found || read.Value != "v2" {
+		t.Fatalf("GetCommitted = (%#v, %t), want value v2", read, found)
 	}
 }
 
@@ -211,14 +212,14 @@ func TestPebbleOpenCleansStagedOperations(t *testing.T) {
 	if err := backend.CreateReplica(1); err != nil {
 		t.Fatalf("CreateReplica(1) returned error: %v", err)
 	}
-	if err := backend.StagePut(1, 1, "staged", "ghost"); err != nil {
+	if err := backend.StagePut(1, 1, "staged", "ghost", testMetadata(1)); err != nil {
 		t.Fatalf("StagePut(slot=1) returned error: %v", err)
 	}
 	if err := backend.CreateReplica(2); err != nil {
 		t.Fatalf("CreateReplica(2) returned error: %v", err)
 	}
 	mustCommitValue(t, backend, 2, 1, "committed", "v1")
-	if err := backend.StagePut(2, 2, "staged", "ghost"); err != nil {
+	if err := backend.StagePut(2, 2, "staged", "ghost", testMetadata(2)); err != nil {
 		t.Fatalf("StagePut(slot=2) returned error: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -245,7 +246,7 @@ func TestPebbleOpenCleansStagedOperations(t *testing.T) {
 	}
 	if got, err := reopenedBackend.CommittedSnapshot(1); err != nil {
 		t.Fatalf("CommittedSnapshot(slot=1) returned error: %v", err)
-	} else if !reflect.DeepEqual(got, storage.Snapshot{}) {
+	} else if !reflect.DeepEqual(snapshotValues(got), map[string]string{}) {
 		t.Fatalf("CommittedSnapshot(slot=1) = %v, want empty", got)
 	}
 	if got, err := reopenedBackend.HighestCommittedSequence(2); err != nil {
@@ -255,7 +256,7 @@ func TestPebbleOpenCleansStagedOperations(t *testing.T) {
 	}
 	if got, err := reopenedBackend.CommittedSnapshot(2); err != nil {
 		t.Fatalf("CommittedSnapshot(slot=2) returned error: %v", err)
-	} else if want := (storage.Snapshot{"committed": "v1"}); !reflect.DeepEqual(got, want) {
+	} else if want := map[string]string{"committed": "v1"}; !reflect.DeepEqual(snapshotValues(got), want) {
 		t.Fatalf("CommittedSnapshot(slot=2) = %v, want %v", got, want)
 	}
 }
@@ -267,7 +268,7 @@ func TestPebbleOpenCleanupFailureIsRetryable(t *testing.T) {
 	if err := backend.CreateReplica(1); err != nil {
 		t.Fatalf("CreateReplica returned error: %v", err)
 	}
-	if err := backend.StagePut(1, 1, "k", "v"); err != nil {
+	if err := backend.StagePut(1, 1, "k", "v", testMetadata(1)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -338,11 +339,11 @@ func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 				mustCommitValue(t, backend, 1, 1, "old", "v1")
 			},
 			act: func(backend storage.Backend, _ storage.LocalStateStore) error {
-				return backend.InstallSnapshot(1, storage.Snapshot{"new": "v2"})
+				return backend.InstallSnapshot(1, valueSnapshot(map[string]string{"new": "v2"}))
 			},
 			assert: func(t *testing.T, backend storage.Backend, _ storage.LocalStateStore) {
 				t.Helper()
-				assertCommittedSnapshot(t, backend, 1, storage.Snapshot{"old": "v1"})
+				assertCommittedSnapshot(t, backend, 1, map[string]string{"old": "v1"})
 				assertHighestCommitted(t, backend, 1, 1)
 			},
 		},
@@ -361,7 +362,7 @@ func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 			},
 			assert: func(t *testing.T, backend storage.Backend, _ storage.LocalStateStore) {
 				t.Helper()
-				assertCommittedSnapshot(t, backend, 1, storage.Snapshot{"k": "v1"})
+				assertCommittedSnapshot(t, backend, 1, map[string]string{"k": "v1"})
 				assertHighestCommitted(t, backend, 1, 1)
 			},
 		},
@@ -373,7 +374,7 @@ func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 				if err := backend.CreateReplica(1); err != nil {
 					t.Fatalf("CreateReplica returned error: %v", err)
 				}
-				if err := backend.StagePut(1, 1, "k", "v1"); err != nil {
+				if err := backend.StagePut(1, 1, "k", "v1", testMetadata(1)); err != nil {
 					t.Fatalf("StagePut returned error: %v", err)
 				}
 			},
@@ -382,7 +383,7 @@ func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 			},
 			assert: func(t *testing.T, backend storage.Backend, _ storage.LocalStateStore) {
 				t.Helper()
-				assertCommittedSnapshot(t, backend, 1, storage.Snapshot{})
+				assertCommittedSnapshot(t, backend, 1, map[string]string{})
 				assertHighestCommitted(t, backend, 1, 0)
 				if got, err := backend.StagedSequences(1); err != nil {
 					t.Fatalf("StagedSequences returned error: %v", err)
@@ -406,7 +407,7 @@ func TestPebbleFailedDurableMutationsLeavePrefixStateAfterReopen(t *testing.T) {
 			},
 			assert: func(t *testing.T, backend storage.Backend, _ storage.LocalStateStore) {
 				t.Helper()
-				assertCommittedSnapshot(t, backend, 1, storage.Snapshot{"k": "v1"})
+				assertCommittedSnapshot(t, backend, 1, map[string]string{"k": "v1"})
 				assertHighestCommitted(t, backend, 1, 1)
 			},
 		},
@@ -515,7 +516,7 @@ func TestPebbleNodeReopenIgnoresStagedRemnantsForRecovery(t *testing.T) {
 	} else if got, want := result.Sequence, uint64(1); got != want {
 		t.Fatalf("SubmitPut sequence = %d, want %d", got, want)
 	}
-	if err := backend.StagePut(1, 2, "ghost", "v2"); err != nil {
+	if err := backend.StagePut(1, 2, "ghost", "v2", testMetadata(2)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
 	if err := node.Close(); err != nil {
@@ -556,13 +557,13 @@ func TestPebbleNodeReopenIgnoresStagedRemnantsForRecovery(t *testing.T) {
 	if got, found, err := reopenedBackend.GetCommitted(1, "ghost"); err != nil {
 		t.Fatalf("GetCommitted(ghost) returned error: %v", err)
 	} else if found {
-		t.Fatalf("GetCommitted(ghost) = (%q, %t), want not found", got, found)
+		t.Fatalf("GetCommitted(ghost) = (%#v, %t), want not found", got, found)
 	}
 }
 
 func mustCommitValue(t *testing.T, backend storage.Backend, slot int, sequence uint64, key string, value string) {
 	t.Helper()
-	if err := backend.StagePut(slot, sequence, key, value); err != nil {
+	if err := backend.StagePut(slot, sequence, key, value, testMetadata(sequence)); err != nil {
 		t.Fatalf("StagePut returned error: %v", err)
 	}
 	if err := backend.CommitSequence(slot, sequence); err != nil {
@@ -570,13 +571,13 @@ func mustCommitValue(t *testing.T, backend storage.Backend, slot int, sequence u
 	}
 }
 
-func assertCommittedSnapshot(t *testing.T, backend storage.Backend, slot int, want storage.Snapshot) {
+func assertCommittedSnapshot(t *testing.T, backend storage.Backend, slot int, want map[string]string) {
 	t.Helper()
 	got, err := backend.CommittedSnapshot(slot)
 	if err != nil {
 		t.Fatalf("CommittedSnapshot returned error: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(snapshotValues(got), want) {
 		t.Fatalf("CommittedSnapshot = %v, want %v", got, want)
 	}
 }
@@ -599,4 +600,29 @@ func mustOpenStore(t *testing.T, path string) *Store {
 		t.Fatalf("Open returned error: %v", err)
 	}
 	return store
+}
+
+func testMetadata(version uint64) storage.ObjectMetadata {
+	base := time.Unix(0, 0).UTC()
+	return storage.ObjectMetadata{
+		Version:   version,
+		CreatedAt: base.Add(time.Duration(version) * time.Second),
+		UpdatedAt: base.Add(time.Duration(version) * time.Second),
+	}
+}
+
+func snapshotValues(snapshot storage.Snapshot) map[string]string {
+	values := make(map[string]string, len(snapshot))
+	for key, object := range snapshot {
+		values[key] = object.Value
+	}
+	return values
+}
+
+func valueSnapshot(entries map[string]string) storage.Snapshot {
+	snapshot := make(storage.Snapshot, len(entries))
+	for key, value := range entries {
+		snapshot[key] = storage.CommittedObject{Value: value, Metadata: storage.ObjectMetadata{}}
+	}
+	return snapshot
 }

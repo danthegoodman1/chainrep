@@ -597,7 +597,7 @@ func TestEndToEndAddNodeFlowWithInMemoryNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReplicaData returned error: %v", err)
 	}
-	if !reflect.DeepEqual(data, storage.Snapshot{"seed-1": "value-1"}) {
+	if !reflect.DeepEqual(storageSnapshotValues(data), map[string]string{"seed-1": "value-1"}) {
 		t.Fatalf("replica data = %v, want seed copy", data)
 	}
 }
@@ -805,7 +805,7 @@ func (h *inMemoryHarness) seedBootstrap(t *testing.T, slotCount int, replication
 			if err := adapter.Node().ActivateReplica(context.Background(), storage.ActivateReplicaCommand{Slot: chain.Slot}); err != nil {
 				t.Fatalf("seed ActivateReplica returned error: %v", err)
 			}
-			if err := h.backends[replica.NodeID].Put(chain.Slot, fmt.Sprintf("seed-%d", chain.Slot), fmt.Sprintf("value-%d", chain.Slot)); err != nil {
+			if err := h.backends[replica.NodeID].Put(chain.Slot, fmt.Sprintf("seed-%d", chain.Slot), fmt.Sprintf("value-%d", chain.Slot), storage.ObjectMetadata{Version: 1}); err != nil {
 				t.Fatalf("seed Put returned error: %v", err)
 			}
 		}
@@ -813,6 +813,14 @@ func (h *inMemoryHarness) seedBootstrap(t *testing.T, slotCount int, replication
 	for _, adapter := range h.adapters {
 		adapter.BindServer(h.server)
 	}
+}
+
+func storageSnapshotValues(snapshot storage.Snapshot) map[string]string {
+	values := make(map[string]string, len(snapshot))
+	for key, object := range snapshot {
+		values[key] = object.Value
+	}
+	return values
 }
 
 type historyResult struct {
