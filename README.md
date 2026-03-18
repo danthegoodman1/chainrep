@@ -50,7 +50,7 @@ Benchmark command:
 go test ./transport/grpcx -run '^$' -bench BenchmarkClientLatencyGRPC_Localhost -benchmem -benchtime=3s -count=5 -cpu=1
 ```
 
-Average results from 5 localhost benchmark runs on an Apple M3 Max on March 18, 2026, using the command above:
+Average results from 5 localhost benchmark runs on an Apple M3 Max, using the command above:
 
 - `single_replica_get`: `0.044 ms/op`, `10,656 B/op`, `186 allocs/op`
 - `single_replica_put`: `0.100 ms/op`, `13,976 B/op`, `291 allocs/op`
