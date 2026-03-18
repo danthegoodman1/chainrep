@@ -217,6 +217,34 @@ The repository now has a real gRPC transport layer in addition to the in-memory 
   - client-facing RPCs can use TLS only or TLS with optional client cert verification
   - internal authorization is identity-bound by RPC plane rather than trusting any CA-signed peer for every internal action
 
+## Observability and Ops
+
+The repository now has a first real operability surface in addition to the storage and
+transport runtime itself.
+
+- logging uses `zerolog` through the local `gologger` package
+- logging is event-focused rather than per-request by default
+- coordinator, storage, and gRPC transport layers expose Prometheus metrics through
+  per-process registries
+- coordinator and storage processes can each expose a separate optional read-only HTTP
+  admin listener
+
+The admin HTTP plane exposes:
+
+- `/livez`
+- `/readyz`
+- `/metrics`
+- `/admin/v1/state`
+
+`/admin/v1/state` is intentionally read-only JSON. Coordinator state includes current
+runtime version, routing snapshot, pending work, heartbeats, liveness records,
+unavailable replicas, recovery reports, and recent repair events. Storage state
+includes `Node.State()`, current node resource usage, and recent replica/recovery or
+backpressure events.
+
+The admin plane is intentionally unauthenticated in v1 and should be bound to loopback
+or another trusted network boundary.
+
 ### Tail add / join
 
 1. coordinator decides a node should join a chain as a new tail
@@ -276,9 +304,7 @@ The code now has the core interfaces plus:
 
 It still does not yet have:
 
-- transport security
 - coordinator HA/failover
-- broader observability and ops surfaces
 
 So the current shape is:
 

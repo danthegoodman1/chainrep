@@ -3,10 +3,28 @@
 - Real gRPC transport between client, coordinator, and storage nodes
 - Durable local Pebble-backed storage backend
 - Conditional writes with per-object metadata
+- Optional TLS/mTLS security for gRPC transports
+- Read-only HTTP admin/health endpoints plus Prometheus metrics
 
 - [Architecture](./ARCHITECTURE.md)
 - [Coordinator](./coordinator/README.md)
+- [Observability](./OBSERVABILITY.md)
 - [Security](./SECURITY.md)
+
+## Ops Surfaces
+
+Observability is documented in [OBSERVABILITY.md](./OBSERVABILITY.md).
+
+At a high level, each coordinator or storage process can optionally expose a
+separate read-only HTTP admin listener with:
+
+- `/livez`
+- `/readyz`
+- `/metrics`
+- `/admin/v1/state`
+
+The admin listener is unauthenticated in v1 and is intended for loopback or a
+trusted network only.
 
 ## Performance Notes
 

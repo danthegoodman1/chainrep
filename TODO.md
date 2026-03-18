@@ -22,7 +22,7 @@
 - [x] Add transport-level idempotency and duplicate/out-of-order message handling for replica protocol messages.
 - [x] Add timeout/cancellation enforcement for externally-coupled operations, especially head write commit waiting and coordinator-to-storage command dispatch.
 - [x] Remove internal context.Background persistence calls in storage and thread caller/context-derived deadlines through local metadata and recovery paths.
-- [ ] Add observability and ops surfaces: metrics, structured logs, health/admin endpoints, and repair visibility.
+- [x] Add observability and ops surfaces: metrics, structured logs, health/admin endpoints, and repair visibility.
 - [x] Add transport security for client/control/data-plane RPCs: TLS or mTLS, authentication/authorization, and certificate rotation/trust management.
 - [x] Add backpressure and resource controls for replication, catch-up, and client write paths.
 - [x] Add fault-injected async transport tests for delay, drop, duplicate, and reorder behavior.

@@ -10,7 +10,10 @@ import (
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
+	"github.com/danthegoodman1/chainrep/ops"
 	"github.com/danthegoodman1/chainrep/storage"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
 )
 
 var (
@@ -83,6 +86,8 @@ type ServerConfig struct {
 	DispatchTimeout        time.Duration
 	RecoveryCommandTimeout time.Duration
 	NodeClientFactory      NodeClientFactory
+	Logger                 *zerolog.Logger
+	MetricsRegistry        *prometheus.Registry
 }
 
 type NodeClientFactory interface {
@@ -105,6 +110,9 @@ type Server struct {
 	dispatchTimeout        time.Duration
 	recoveryCommandTimeout time.Duration
 	nodeClientFactory      NodeClientFactory
+	logger                 zerolog.Logger
+	metrics                *serverMetrics
+	events                 *serverEventRecorder
 }
 
 const (
@@ -136,19 +144,22 @@ func OpenWithConfig(
 	}
 
 	server := &Server{
-		rt:         rt,
-		nodes:      clonedNodes,
-		heartbeats: map[string]storage.NodeStatus{},
-		liveness:   map[string]coordruntime.NodeLivenessRecord{},
-		pending:    map[int]PendingWork{},
-		completed:  map[int][]coordruntime.CompletedProgressRecord{},
-		unavailableReplicas: map[string]map[int]bool{},
-		lastRecoveryReports: map[string]storage.NodeRecoveryReport{},
-		livenessPolicy: cfg.LivenessPolicy,
-		clock:          cfg.Clock,
+		rt:                     rt,
+		nodes:                  clonedNodes,
+		heartbeats:             map[string]storage.NodeStatus{},
+		liveness:               map[string]coordruntime.NodeLivenessRecord{},
+		pending:                map[int]PendingWork{},
+		completed:              map[int][]coordruntime.CompletedProgressRecord{},
+		unavailableReplicas:    map[string]map[int]bool{},
+		lastRecoveryReports:    map[string]storage.NodeRecoveryReport{},
+		livenessPolicy:         cfg.LivenessPolicy,
+		clock:                  cfg.Clock,
 		dispatchTimeout:        cfg.DispatchTimeout,
 		recoveryCommandTimeout: cfg.RecoveryCommandTimeout,
 		nodeClientFactory:      cfg.NodeClientFactory,
+		logger:                 coordLoggerFromConfig(cfg.Logger),
+		metrics:                newServerMetrics(cfg.MetricsRegistry),
+		events:                 newServerEventRecorder(),
 	}
 	if server.clock == nil {
 		server.clock = realClock{}
@@ -216,15 +227,23 @@ func (s *Server) clientForNodeID(nodeID string) (StorageNodeClient, error) {
 }
 
 func (s *Server) Bootstrap(ctx context.Context, cmd coordruntime.Command) (coordruntime.State, error) {
+	defer s.refreshMetricGauges()
 	if cmd.Kind != coordruntime.CommandKindBootstrap || cmd.Bootstrap == nil {
-		return coordruntime.State{}, fmt.Errorf("%w: bootstrap requires bootstrap command payload", ErrInvalidServerCommand)
+		err := fmt.Errorf("%w: bootstrap requires bootstrap command payload", ErrInvalidServerCommand)
+		s.observeCommandResult("bootstrap", err)
+		return coordruntime.State{}, err
 	}
 	state, err := s.rt.Bootstrap(ctx, cmd)
 	if err != nil {
-		return coordruntime.State{}, fmt.Errorf("err in s.rt.Bootstrap: %w", err)
+		err = fmt.Errorf("err in s.rt.Bootstrap: %w", err)
+		s.observeCommandResult("bootstrap", err)
+		s.observeTimeoutOrFailure("bootstrap", err)
+		return coordruntime.State{}, err
 	}
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
+	s.observeCommandResult("bootstrap", nil)
+	s.events.record(s.logger, zerolog.InfoLevel, "bootstrap", "coordinator bootstrapped cluster", "", nil, ops.Uint64Ptr(state.Version), "", cmd.ID, nil)
 	return state, nil
 }
 
@@ -241,6 +260,7 @@ func (s *Server) MarkNodeDead(ctx context.Context, cmd coordruntime.Command) (co
 }
 
 func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int, commandID string) (coordruntime.State, error) {
+	defer s.refreshMetricGauges()
 	state := s.rt.Current()
 	slotVersion := state.SlotVersions[slot]
 	pending, ok := s.pending[slot]
@@ -306,10 +326,12 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
 	}
+	s.events.record(s.logger, zerolog.InfoLevel, "replica_ready", "coordinator accepted replica ready progress", nodeID, ops.IntPtr(slot), ops.Uint64Ptr(slotVersion), "", commandID, nil)
 	return s.rt.Current(), nil
 }
 
 func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot int, commandID string) (coordruntime.State, error) {
+	defer s.refreshMetricGauges()
 	state := s.rt.Current()
 	slotVersion := state.SlotVersions[slot]
 	pending, ok := s.pending[slot]
@@ -376,13 +398,14 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
 	}
+	s.events.record(s.logger, zerolog.InfoLevel, "replica_removed", "coordinator accepted replica removed progress", nodeID, ops.IntPtr(slot), ops.Uint64Ptr(slotVersion), "", commandID, nil)
 	return updated, nil
 }
 
 func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeStatus) error {
 	if _, ok := s.rt.Current().Cluster.NodesByID[status.NodeID]; !ok {
 		if _, fallbackOK := s.nodes[status.NodeID]; !fallbackOK {
-		return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
+			return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
 		}
 	}
 	current := s.rt.Current()
@@ -400,7 +423,9 @@ func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeSta
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("err in s.rt.Heartbeat: %w", err)
+		err = fmt.Errorf("err in s.rt.Heartbeat: %w", err)
+		s.observeTimeoutOrFailure("heartbeat", err)
+		return err
 	}
 	s.syncViewsFromRuntime()
 	if wasDead && s.liveness[status.NodeID].State != coordruntime.NodeLivenessStateDead {
@@ -412,12 +437,17 @@ func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeSta
 			return err
 		}
 	}
+	s.events.record(s.logger, zerolog.DebugLevel, "heartbeat", "coordinator recorded node heartbeat", status.NodeID, nil, nil, "", "", nil)
+	s.refreshMetricGauges()
 	return nil
 }
 
 func (s *Server) EvaluateLiveness(ctx context.Context) error {
 	if s.livenessPolicy.SuspectAfter <= 0 || s.livenessPolicy.DeadAfter <= 0 {
 		return nil
+	}
+	if s.metrics != nil {
+		s.metrics.livenessEvaluations.Inc()
 	}
 	nowUnix := s.clock.Now().UnixNano()
 
@@ -446,6 +476,10 @@ func (s *Server) EvaluateLiveness(ctx context.Context) error {
 				return err
 			}
 			record = updated
+			if target == coordruntime.NodeLivenessStateDead && s.metrics != nil {
+				s.metrics.deadDetections.Inc()
+			}
+			s.events.record(s.logger, zerolog.InfoLevel, "liveness_transition", "coordinator node liveness transitioned", nodeID, nil, nil, "", "", nil)
 		}
 
 		if record.State == coordruntime.NodeLivenessStateDead && !record.DeadActionFired {
@@ -479,15 +513,18 @@ func (s *Server) EvaluateLiveness(ctx context.Context) error {
 			if _, err := s.applyLivenessTransition(ctx, nodeID, coordruntime.NodeLivenessStateDead, nowUnix, true); err != nil {
 				return err
 			}
+			s.observeRepair("mark_dead", "success", nodeID, nil, nil)
 		}
 	}
+	s.refreshMetricGauges()
 	return nil
 }
 
 func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRecoveryReport) error {
+	defer s.refreshMetricGauges()
 	if _, ok := s.rt.Current().Cluster.NodesByID[report.NodeID]; !ok {
 		if _, fallbackOK := s.nodes[report.NodeID]; !fallbackOK {
-		return fmt.Errorf("%w: %q", ErrUnknownNode, report.NodeID)
+			return fmt.Errorf("%w: %q", ErrUnknownNode, report.NodeID)
 		}
 	}
 	if prior, ok := s.lastRecoveryReports[report.NodeID]; ok && reflect.DeepEqual(prior, report) && !s.nodeHasUnavailableSlots(report.NodeID) {
@@ -531,6 +568,7 @@ func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRec
 
 	s.lastRecoveryReports[report.NodeID] = cloneRecoveryReport(report)
 	s.rebuildRoutingSnapshot()
+	s.events.record(s.logger, zerolog.InfoLevel, "node_recovered_report", "coordinator processed node recovered report", report.NodeID, nil, nil, "", "", nil)
 	return nil
 }
 
@@ -539,28 +577,39 @@ func (s *Server) applyMembershipMutation(
 	cmd coordruntime.Command,
 	expectedEvent coordinator.EventKind,
 ) (coordruntime.State, error) {
+	defer s.refreshMetricGauges()
 	if cmd.Kind != coordruntime.CommandKindReconfigure || cmd.Reconfigure == nil {
-		return coordruntime.State{}, fmt.Errorf("%w: mutation requires reconfigure command payload", ErrInvalidServerCommand)
+		err := fmt.Errorf("%w: mutation requires reconfigure command payload", ErrInvalidServerCommand)
+		s.observeCommandResult(string(expectedEvent), err)
+		return coordruntime.State{}, err
 	}
 	if len(cmd.Reconfigure.Events) != 1 || cmd.Reconfigure.Events[0].Kind != expectedEvent {
-		return coordruntime.State{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: expected exactly one %q event",
 			ErrInvalidServerCommand,
 			expectedEvent,
 		)
+		s.observeCommandResult(string(expectedEvent), err)
+		return coordruntime.State{}, err
 	}
 
 	plan, state, err := s.rt.Reconfigure(ctx, cmd)
 	if err != nil {
-		return coordruntime.State{}, fmt.Errorf("err in s.rt.Reconfigure: %w", err)
+		err = fmt.Errorf("err in s.rt.Reconfigure: %w", err)
+		s.observeCommandResult(string(expectedEvent), err)
+		s.observeTimeoutOrFailure(string(expectedEvent), err)
+		return coordruntime.State{}, err
 	}
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 	s.lastPolicy = cmd.Reconfigure.Policy
 
 	if err := s.dispatchPlan(ctx, state.Version, plan); err != nil {
+		s.observeCommandResult(string(expectedEvent), err)
 		return coordruntime.State{}, err
 	}
+	s.observeCommandResult(string(expectedEvent), nil)
+	s.events.record(s.logger, zerolog.InfoLevel, "membership_mutation", "coordinator applied membership mutation", "", nil, ops.Uint64Ptr(state.Version), "", cmd.ID, nil)
 	return state, nil
 }
 
@@ -624,6 +673,7 @@ func (s *Server) dispatchPlan(ctx context.Context, chainVersion uint64, plan coo
 }
 
 func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, slotPlan coordinator.SlotPlan) error {
+	start := time.Now()
 	state := s.rt.Current()
 	addedNodeID := ""
 	replacedNodeID := ""
@@ -651,6 +701,7 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
 	defer cancel()
 	if err := client.AddReplicaAsTail(dispatchCtx, storage.AddReplicaAsTailCommand{Assignment: addAssignment}); err != nil {
+		s.observeDispatchResult("add_replica_as_tail", start, err)
 		if isContextTimeoutOrCancel(err) {
 			return fmt.Errorf("%w: err in node[%q].AddReplicaAsTail: %w", ErrDispatchTimeout, addedNodeID, err)
 		}
@@ -679,17 +730,21 @@ func (s *Server) dispatchAppendTail(ctx context.Context, chainVersion uint64, sl
 		err = client.UpdateChainPeers(updateCtx, storage.UpdateChainPeersCommand{Assignment: assignment})
 		updateCancel()
 		if err != nil {
+			s.observeDispatchResult("update_chain_peers", start, err)
 			if isContextTimeoutOrCancel(err) {
 				return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %w", ErrDispatchTimeout, nodeID, err)
 			}
 			return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %v", ErrDispatchFailed, nodeID, err)
 		}
 	}
+	s.observeDispatchResult("add_replica_as_tail", start, nil)
+	s.observeRepair("append_tail_started", "success", addedNodeID, ops.IntPtr(slotPlan.Slot), nil)
 	_ = replacedNodeID
 	return nil
 }
 
 func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, slotPlan coordinator.SlotPlan) error {
+	start := time.Now()
 	state := s.rt.Current()
 	leavingNodeID := ""
 	for _, step := range slotPlan.Steps {
@@ -720,6 +775,7 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 		err = client.UpdateChainPeers(updateCtx, storage.UpdateChainPeersCommand{Assignment: assignment})
 		updateCancel()
 		if err != nil {
+			s.observeDispatchResult("update_chain_peers", start, err)
 			if isContextTimeoutOrCancel(err) {
 				return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %w", ErrDispatchTimeout, nodeID, err)
 			}
@@ -734,6 +790,7 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
 	defer cancel()
 	if err := client.MarkReplicaLeaving(dispatchCtx, storage.MarkReplicaLeavingCommand{Slot: slotPlan.Slot}); err != nil {
+		s.observeDispatchResult("mark_replica_leaving", start, err)
 		if isContextTimeoutOrCancel(err) {
 			return fmt.Errorf("%w: err in node[%q].MarkReplicaLeaving: %w", ErrDispatchTimeout, leavingNodeID, err)
 		}
@@ -745,6 +802,8 @@ func (s *Server) dispatchMarkLeaving(ctx context.Context, chainVersion uint64, s
 		Kind:        pendingKindRemoved,
 		SlotVersion: chainVersion,
 	}
+	s.observeDispatchResult("mark_replica_leaving", start, nil)
+	s.observeRepair("mark_leaving_started", "success", leavingNodeID, ops.IntPtr(slotPlan.Slot), nil)
 	return nil
 }
 
@@ -753,6 +812,7 @@ func (s *Server) resumeRecoveredReplica(
 	nodeID string,
 	assignment storage.ReplicaAssignment,
 ) error {
+	start := time.Now()
 	client, err := s.clientForNodeID(nodeID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
@@ -760,12 +820,16 @@ func (s *Server) resumeRecoveredReplica(
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
 	defer cancel()
 	if err := client.ResumeRecoveredReplica(dispatchCtx, storage.ResumeRecoveredReplicaCommand{Assignment: assignment}); err != nil {
+		s.observeDispatchResult("resume_recovered_replica", start, err)
+		s.observeRepair("resume_recovered_replica", "error", nodeID, ops.IntPtr(assignment.Slot), err)
 		if isContextTimeoutOrCancel(err) {
 			return fmt.Errorf("%w: err in node[%q].ResumeRecoveredReplica: %w", ErrDispatchTimeout, nodeID, err)
 		}
 		return fmt.Errorf("%w: err in node[%q].ResumeRecoveredReplica: %v", ErrRecoveryFailed, nodeID, err)
 	}
 	s.clearUnavailable(nodeID, assignment.Slot)
+	s.observeDispatchResult("resume_recovered_replica", start, nil)
+	s.observeRepair("resume_recovered_replica", "success", nodeID, ops.IntPtr(assignment.Slot), nil)
 	return nil
 }
 
@@ -775,6 +839,7 @@ func (s *Server) recoverReplica(
 	assignment storage.ReplicaAssignment,
 	sourceNodeID string,
 ) error {
+	start := time.Now()
 	client, err := s.clientForNodeID(nodeID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
@@ -788,16 +853,21 @@ func (s *Server) recoverReplica(
 		Assignment:   assignment,
 		SourceNodeID: sourceNodeID,
 	}); err != nil {
+		s.observeDispatchResult("recover_replica", start, err)
+		s.observeRepair("recover_replica", "error", nodeID, ops.IntPtr(assignment.Slot), err)
 		if isContextTimeoutOrCancel(err) {
 			return fmt.Errorf("%w: err in node[%q].RecoverReplica: %w", ErrDispatchTimeout, nodeID, err)
 		}
 		return fmt.Errorf("%w: err in node[%q].RecoverReplica: %v", ErrRecoveryFailed, nodeID, err)
 	}
 	s.clearUnavailable(nodeID, assignment.Slot)
+	s.observeDispatchResult("recover_replica", start, nil)
+	s.observeRepair("recover_replica", "success", nodeID, ops.IntPtr(assignment.Slot), nil)
 	return nil
 }
 
 func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot int) error {
+	start := time.Now()
 	client, err := s.clientForNodeID(nodeID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
@@ -805,12 +875,16 @@ func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot i
 	dispatchCtx, cancel := deriveDeadlineContext(ctx, s.recoveryCommandTimeout)
 	defer cancel()
 	if err := client.DropRecoveredReplica(dispatchCtx, storage.DropRecoveredReplicaCommand{Slot: slot}); err != nil {
+		s.observeDispatchResult("drop_recovered_replica", start, err)
+		s.observeRepair("drop_recovered_replica", "error", nodeID, ops.IntPtr(slot), err)
 		if isContextTimeoutOrCancel(err) {
 			return fmt.Errorf("%w: err in node[%q].DropRecoveredReplica: %w", ErrDispatchTimeout, nodeID, err)
 		}
 		return fmt.Errorf("%w: err in node[%q].DropRecoveredReplica: %v", ErrRecoveryFailed, nodeID, err)
 	}
 	s.clearUnavailable(nodeID, slot)
+	s.observeDispatchResult("drop_recovered_replica", start, nil)
+	s.observeRepair("drop_recovered_replica", "success", nodeID, ops.IntPtr(slot), nil)
 	return nil
 }
 

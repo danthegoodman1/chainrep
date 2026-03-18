@@ -8,8 +8,9 @@ import (
 	"github.com/danthegoodman1/chainrep/coordinator"
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
 	"github.com/danthegoodman1/chainrep/coordserver"
-	"github.com/danthegoodman1/chainrep/storage"
 	grpcproto "github.com/danthegoodman1/chainrep/proto/chainrep/v1"
+	"github.com/danthegoodman1/chainrep/storage"
+	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 )
 
@@ -19,6 +20,8 @@ type CoordinatorGRPCServer struct {
 	grpc       *grpc.Server
 	lis        net.Listener
 	authorizer *rpcAuthorizer
+	logger     zerolog.Logger
+	observer   *grpcObserver
 }
 
 func NewCoordinatorGRPCServer(server *coordserver.Server) *CoordinatorGRPCServer {
@@ -32,22 +35,30 @@ func NewCoordinatorGRPCServer(server *coordserver.Server) *CoordinatorGRPCServer
 func NewCoordinatorGRPCServerWithTLS(server *coordserver.Server, cfg *ServerTLSConfig) (*CoordinatorGRPCServer, error) {
 	var opts []grpc.ServerOption
 	authorizer := (*rpcAuthorizer)(nil)
+	var logger zerolog.Logger
+	var observer *grpcObserver
 	if cfg != nil {
 		creds, err := newServerTransportCredentials(*cfg)
 		if err != nil {
 			return nil, err
 		}
-		authorizer = newRPCAuthorizer(*cfg)
+		authorizer = newRPCAuthorizer()
+		logger = transportLoggerFromConfig(cfg.Logger)
+		observer = newGRPCObserver(cfg.Logger, cfg.MetricsRegistry)
 		opts = append(opts,
 			grpc.Creds(creds),
-			grpc.UnaryInterceptor(authorizer.unaryInterceptor(coordinatorRPCPlane)),
-			grpc.StreamInterceptor(authorizer.streamInterceptor(coordinatorRPCPlane)),
+			grpc.UnaryInterceptor(chainUnaryInterceptors(observer.unaryInterceptor("coordinator"), authorizer.unaryInterceptor(coordinatorRPCPlane))),
+			grpc.StreamInterceptor(chainStreamInterceptors(observer.streamInterceptor("coordinator"), authorizer.streamInterceptor(coordinatorRPCPlane))),
 		)
+	} else {
+		logger = transportLoggerFromConfig(nil)
 	}
 	s := &CoordinatorGRPCServer{
 		server:     server,
 		grpc:       grpc.NewServer(opts...),
 		authorizer: authorizer,
+		logger:     logger,
+		observer:   observer,
 	}
 	grpcproto.RegisterCoordinatorServiceServer(s.grpc, s)
 	return s, nil
@@ -55,10 +66,12 @@ func NewCoordinatorGRPCServerWithTLS(server *coordserver.Server, cfg *ServerTLSC
 
 func (s *CoordinatorGRPCServer) Serve(lis net.Listener) error {
 	s.lis = lis
+	s.logger.Info().Str("component", "grpc").Str("grpc_component", "coordinator").Str("address", lis.Addr().String()).Msg("grpc server listening")
 	return s.grpc.Serve(lis)
 }
 
 func (s *CoordinatorGRPCServer) Close() error {
+	s.logger.Info().Str("component", "grpc").Str("grpc_component", "coordinator").Msg("grpc server closing")
 	if s.grpc != nil {
 		s.grpc.Stop()
 	}
@@ -218,6 +231,8 @@ type StorageGRPCServer struct {
 	grpc       *grpc.Server
 	lis        net.Listener
 	authorizer *rpcAuthorizer
+	logger     zerolog.Logger
+	observer   *grpcObserver
 }
 
 func NewStorageGRPCServer(node *storage.Node) *StorageGRPCServer {
@@ -231,22 +246,30 @@ func NewStorageGRPCServer(node *storage.Node) *StorageGRPCServer {
 func NewStorageGRPCServerWithTLS(node *storage.Node, cfg *ServerTLSConfig) (*StorageGRPCServer, error) {
 	var opts []grpc.ServerOption
 	authorizer := (*rpcAuthorizer)(nil)
+	var logger zerolog.Logger
+	var observer *grpcObserver
 	if cfg != nil {
 		creds, err := newServerTransportCredentials(*cfg)
 		if err != nil {
 			return nil, err
 		}
-		authorizer = newRPCAuthorizer(*cfg)
+		authorizer = newRPCAuthorizer()
+		logger = transportLoggerFromConfig(cfg.Logger)
+		observer = newGRPCObserver(cfg.Logger, cfg.MetricsRegistry)
 		opts = append(opts,
 			grpc.Creds(creds),
-			grpc.UnaryInterceptor(authorizer.unaryInterceptor(storageRPCPlane)),
-			grpc.StreamInterceptor(authorizer.streamInterceptor(storageRPCPlane)),
+			grpc.UnaryInterceptor(chainUnaryInterceptors(observer.unaryInterceptor("storage"), authorizer.unaryInterceptor(storageRPCPlane))),
+			grpc.StreamInterceptor(chainStreamInterceptors(observer.streamInterceptor("storage"), authorizer.streamInterceptor(storageRPCPlane))),
 		)
+	} else {
+		logger = transportLoggerFromConfig(nil)
 	}
 	s := &StorageGRPCServer{
 		node:       node,
 		grpc:       grpc.NewServer(opts...),
 		authorizer: authorizer,
+		logger:     logger,
+		observer:   observer,
 	}
 	grpcproto.RegisterStorageServiceServer(s.grpc, s)
 	return s, nil
@@ -254,10 +277,12 @@ func NewStorageGRPCServerWithTLS(node *storage.Node, cfg *ServerTLSConfig) (*Sto
 
 func (s *StorageGRPCServer) Serve(lis net.Listener) error {
 	s.lis = lis
+	s.logger.Info().Str("component", "grpc").Str("grpc_component", "storage").Str("address", lis.Addr().String()).Msg("grpc server listening")
 	return s.grpc.Serve(lis)
 }
 
 func (s *StorageGRPCServer) Close() error {
+	s.logger.Info().Str("component", "grpc").Str("grpc_component", "storage").Msg("grpc server closing")
 	if s.grpc != nil {
 		s.grpc.Stop()
 	}

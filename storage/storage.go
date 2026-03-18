@@ -7,6 +7,11 @@ import (
 	"reflect"
 	"sort"
 	"time"
+
+	"github.com/danthegoodman1/chainrep/gologger"
+	"github.com/danthegoodman1/chainrep/ops"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
 )
 
 var (
@@ -39,6 +44,8 @@ type Config struct {
 	MaxConcurrentCatchups             int
 	WriteCommitTimeout                time.Duration
 	Clock                             Clock
+	Logger                            *zerolog.Logger
+	MetricsRegistry                   *prometheus.Registry
 }
 
 type Clock interface {
@@ -466,6 +473,9 @@ type Node struct {
 	inFlightCatchups                  int
 	closeErr                          error
 	closed                            bool
+	logger                            zerolog.Logger
+	metrics                           *nodeMetrics
+	events                            *eventRecorder
 }
 
 const defaultWriteCommitTimeout = 5 * time.Second
@@ -542,6 +552,9 @@ func OpenNode(
 		maxConcurrentCatchups:             cfg.MaxConcurrentCatchups,
 		writeCommitTimeout:                cfg.WriteCommitTimeout,
 		clock:                             cfg.Clock,
+		logger:                            loggerFromConfig(cfg.Logger),
+		metrics:                           newNodeMetrics(cfg.MetricsRegistry),
+		events:                            newEventRecorder("storage", cfg.NodeID),
 	}
 	if node.maxBufferedReplicaMessagesPerSlot == 0 {
 		node.maxBufferedReplicaMessagesPerSlot = 64
@@ -587,15 +600,21 @@ func OpenNode(
 }
 
 func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand) error {
+	start := time.Now()
 	if cmd.Assignment.Slot < 0 {
-		return fmt.Errorf("%w: slot must be >= 0", ErrInvalidConfig)
+		err := fmt.Errorf("%w: slot must be >= 0", ErrInvalidConfig)
+		n.events.record(n.logger, zerolog.ErrorLevel, "add_replica_failed", "storage add replica as tail failed", ops.IntPtr(cmd.Assignment.Slot), nil, nil, cmd.Assignment.Peers.PredecessorNodeID, "", err)
+		return err
 	}
 	if _, exists := n.replicas[cmd.Assignment.Slot]; exists {
-		return fmt.Errorf("%w: slot %d", ErrReplicaExists, cmd.Assignment.Slot)
+		err := fmt.Errorf("%w: slot %d", ErrReplicaExists, cmd.Assignment.Slot)
+		n.events.record(n.logger, zerolog.ErrorLevel, "add_replica_failed", "storage add replica as tail failed", ops.IntPtr(cmd.Assignment.Slot), ops.Uint64Ptr(cmd.Assignment.ChainVersion), nil, cmd.Assignment.Peers.PredecessorNodeID, "", err)
+		return err
 	}
 	needsCatchup := cmd.Assignment.Peers.PredecessorNodeID != ""
 	if needsCatchup {
 		if err := n.admitCatchup(); err != nil {
+			n.observeBackpressure(err)
 			return err
 		}
 		defer n.releaseCatchup()
@@ -661,6 +680,12 @@ func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
 	rollback = false
+	if n.metrics != nil {
+		n.metrics.catchupOps.WithLabelValues("add_replica_as_tail", "success").Inc()
+		n.metrics.catchupDuration.Observe(time.Since(start).Seconds())
+	}
+	n.refreshMetricGauges()
+	n.events.record(n.logger, zerolog.InfoLevel, "add_replica", "storage replica added as tail", ops.IntPtr(cmd.Assignment.Slot), ops.Uint64Ptr(cmd.Assignment.ChainVersion), nil, cmd.Assignment.Peers.PredecessorNodeID, "", nil)
 	return nil
 }
 
@@ -683,6 +708,7 @@ func (n *Node) ActivateReplica(ctx context.Context, cmd ActivateReplicaCommand) 
 	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
+	n.events.record(n.logger, zerolog.InfoLevel, "activate_replica", "storage replica activated", ops.IntPtr(cmd.Slot), ops.Uint64Ptr(record.assignment.ChainVersion), nil, "", "", nil)
 	return nil
 }
 
@@ -701,6 +727,7 @@ func (n *Node) MarkReplicaLeaving(ctx context.Context, cmd MarkReplicaLeavingCom
 	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
+	n.events.record(n.logger, zerolog.InfoLevel, "mark_leaving", "storage replica marked leaving", ops.IntPtr(cmd.Slot), ops.Uint64Ptr(record.assignment.ChainVersion), nil, "", "", nil)
 	return nil
 }
 
@@ -730,6 +757,8 @@ func (n *Node) RemoveReplica(ctx context.Context, cmd RemoveReplicaCommand) erro
 	}
 
 	delete(n.replicas, cmd.Slot)
+	n.refreshMetricGauges()
+	n.events.record(n.logger, zerolog.InfoLevel, "remove_replica", "storage replica removed", ops.IntPtr(cmd.Slot), nil, nil, "", "", nil)
 	return nil
 }
 
@@ -747,6 +776,7 @@ func (n *Node) UpdateChainPeers(ctx context.Context, cmd UpdateChainPeersCommand
 	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
+	n.events.record(n.logger, zerolog.InfoLevel, "update_chain_peers", "storage replica peers updated", ops.IntPtr(cmd.Assignment.Slot), ops.Uint64Ptr(cmd.Assignment.ChainVersion), nil, "", "", nil)
 	return nil
 }
 
@@ -801,15 +831,18 @@ func (n *Node) ResumeRecoveredReplica(ctx context.Context, cmd ResumeRecoveredRe
 	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
+	n.events.record(n.logger, zerolog.InfoLevel, "resume_recovered_replica", "storage recovered replica resumed", ops.IntPtr(cmd.Assignment.Slot), ops.Uint64Ptr(cmd.Assignment.ChainVersion), nil, "", "", nil)
 	return nil
 }
 
 func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) error {
+	start := time.Now()
 	record, exists := n.replicas[cmd.Assignment.Slot]
 	if exists && record.state != ReplicaStateRecovered {
 		return fmt.Errorf("%w: slot %d is %q", ErrInvalidTransition, cmd.Assignment.Slot, record.state)
 	}
 	if err := n.admitCatchup(); err != nil {
+		n.observeBackpressure(err)
 		return err
 	}
 	defer n.releaseCatchup()
@@ -852,6 +885,12 @@ func (n *Node) RecoverReplica(ctx context.Context, cmd RecoverReplicaCommand) er
 	if err := n.persistReplica(ctx, record); err != nil {
 		return fmt.Errorf("err in n.persistReplica: %w", err)
 	}
+	if n.metrics != nil {
+		n.metrics.catchupOps.WithLabelValues("recover_replica", "success").Inc()
+		n.metrics.catchupDuration.Observe(time.Since(start).Seconds())
+	}
+	n.refreshMetricGauges()
+	n.events.record(n.logger, zerolog.InfoLevel, "recover_replica", "storage replica recovered from peer", ops.IntPtr(cmd.Assignment.Slot), ops.Uint64Ptr(cmd.Assignment.ChainVersion), nil, cmd.SourceNodeID, "", nil)
 	return nil
 }
 
@@ -870,6 +909,7 @@ func (n *Node) DropRecoveredReplica(ctx context.Context, cmd DropRecoveredReplic
 		return fmt.Errorf("err in n.local.DeleteReplica: %w", err)
 	}
 	delete(n.replicas, cmd.Slot)
+	n.events.record(n.logger, zerolog.InfoLevel, "drop_recovered_replica", "storage recovered replica dropped", ops.IntPtr(cmd.Slot), nil, nil, "", "", nil)
 	return nil
 }
 
@@ -914,6 +954,9 @@ func (n *Node) HandleClientGet(_ context.Context, req ClientGetRequest) (ReadRes
 
 	object, found, err := n.backend.GetCommitted(req.Slot, req.Key)
 	if err != nil {
+		if n.metrics != nil {
+			n.metrics.clientReads.WithLabelValues("error").Inc()
+		}
 		return ReadResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", err)
 	}
 	result := ReadResult{
@@ -925,16 +968,32 @@ func (n *Node) HandleClientGet(_ context.Context, req ClientGetRequest) (ReadRes
 		result.Value = object.Value
 		result.Metadata = cloneObjectMetadataPtr(&object.Metadata)
 	}
+	if n.metrics != nil {
+		resultLabel := "miss"
+		if found {
+			resultLabel = "hit"
+		}
+		n.metrics.clientReads.WithLabelValues(resultLabel).Inc()
+	}
 	return result, nil
 }
 
 func (n *Node) HandleClientPut(ctx context.Context, req ClientPutRequest) (CommitResult, error) {
+	start := time.Now()
 	if err := n.validateClientWrite(req.Slot, req.ExpectedChainVersion); err != nil {
+		if n.metrics != nil {
+			n.metrics.clientWrites.WithLabelValues("put", "routing_mismatch").Inc()
+		}
 		return CommitResult{}, err
 	}
 	result, err := n.submitWrite(ctx, req.Slot, OperationKindPut, req.Key, req.Value, req.Conditions)
 	if err != nil {
 		if errors.Is(err, ErrConditionFailed) {
+			if n.metrics != nil {
+				n.metrics.clientWrites.WithLabelValues("put", "condition_failed").Inc()
+				n.metrics.conditionFailures.Inc()
+			}
+			n.events.record(n.logger, zerolog.WarnLevel, "condition_failed", "storage conditional put failed", ops.IntPtr(req.Slot), ops.Uint64Ptr(req.ExpectedChainVersion), nil, "", "", err)
 			current, found, currentErr := n.backend.GetCommitted(req.Slot, req.Key)
 			if currentErr != nil {
 				return CommitResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", currentErr)
@@ -942,20 +1001,42 @@ func (n *Node) HandleClientPut(ctx context.Context, req ClientPutRequest) (Commi
 			return CommitResult{}, newConditionFailedError(req.Slot, OperationKindPut, req.ExpectedChainVersion, found, current)
 		}
 		if isAmbiguousWriteCause(err) {
+			if n.metrics != nil {
+				n.metrics.clientWrites.WithLabelValues("put", "ambiguous").Inc()
+				n.metrics.ambiguousWrites.Inc()
+			}
+			n.events.record(n.logger, gologger.LvlForErr(err), "ambiguous_write", "storage put outcome is ambiguous", ops.IntPtr(req.Slot), ops.Uint64Ptr(req.ExpectedChainVersion), nil, "", "", err)
 			return CommitResult{}, newAmbiguousWriteError(req.Slot, OperationKindPut, req.ExpectedChainVersion, err)
 		}
+		n.observeBackpressure(err)
+		if n.metrics != nil {
+			n.metrics.clientWrites.WithLabelValues("put", "error").Inc()
+		}
 		return CommitResult{}, err
+	}
+	if n.metrics != nil {
+		n.metrics.clientWrites.WithLabelValues("put", "success").Inc()
+		n.metrics.writeWaitDuration.Observe(time.Since(start).Seconds())
 	}
 	return result, nil
 }
 
 func (n *Node) HandleClientDelete(ctx context.Context, req ClientDeleteRequest) (CommitResult, error) {
+	start := time.Now()
 	if err := n.validateClientWrite(req.Slot, req.ExpectedChainVersion); err != nil {
+		if n.metrics != nil {
+			n.metrics.clientWrites.WithLabelValues("delete", "routing_mismatch").Inc()
+		}
 		return CommitResult{}, err
 	}
 	result, err := n.submitWrite(ctx, req.Slot, OperationKindDelete, req.Key, "", req.Conditions)
 	if err != nil {
 		if errors.Is(err, ErrConditionFailed) {
+			if n.metrics != nil {
+				n.metrics.clientWrites.WithLabelValues("delete", "condition_failed").Inc()
+				n.metrics.conditionFailures.Inc()
+			}
+			n.events.record(n.logger, zerolog.WarnLevel, "condition_failed", "storage conditional delete failed", ops.IntPtr(req.Slot), ops.Uint64Ptr(req.ExpectedChainVersion), nil, "", "", err)
 			current, found, currentErr := n.backend.GetCommitted(req.Slot, req.Key)
 			if currentErr != nil {
 				return CommitResult{}, fmt.Errorf("err in n.backend.GetCommitted: %w", currentErr)
@@ -963,9 +1044,22 @@ func (n *Node) HandleClientDelete(ctx context.Context, req ClientDeleteRequest) 
 			return CommitResult{}, newConditionFailedError(req.Slot, OperationKindDelete, req.ExpectedChainVersion, found, current)
 		}
 		if isAmbiguousWriteCause(err) {
+			if n.metrics != nil {
+				n.metrics.clientWrites.WithLabelValues("delete", "ambiguous").Inc()
+				n.metrics.ambiguousWrites.Inc()
+			}
+			n.events.record(n.logger, gologger.LvlForErr(err), "ambiguous_write", "storage delete outcome is ambiguous", ops.IntPtr(req.Slot), ops.Uint64Ptr(req.ExpectedChainVersion), nil, "", "", err)
 			return CommitResult{}, newAmbiguousWriteError(req.Slot, OperationKindDelete, req.ExpectedChainVersion, err)
 		}
+		n.observeBackpressure(err)
+		if n.metrics != nil {
+			n.metrics.clientWrites.WithLabelValues("delete", "error").Inc()
+		}
 		return CommitResult{}, err
+	}
+	if n.metrics != nil {
+		n.metrics.clientWrites.WithLabelValues("delete", "success").Inc()
+		n.metrics.writeWaitDuration.Observe(time.Since(start).Seconds())
 	}
 	return result, nil
 }
@@ -973,6 +1067,9 @@ func (n *Node) HandleClientDelete(ctx context.Context, req ClientDeleteRequest) 
 func (n *Node) HandleForwardWrite(ctx context.Context, req ForwardWriteRequest) error {
 	record, err := n.activeReplicaRecord(req.Operation.Slot)
 	if err != nil {
+		if n.metrics != nil {
+			n.metrics.replicationForwards.WithLabelValues("error").Inc()
+		}
 		return err
 	}
 	record = n.ensureProtocolState(record)
@@ -992,18 +1089,40 @@ func (n *Node) HandleForwardWrite(ctx context.Context, req ForwardWriteRequest) 
 	case req.Operation.Sequence > record.nextSequence:
 		record, err = n.bufferFutureForward(record, req)
 		if err != nil {
+			n.observeBackpressure(err)
+			if n.metrics != nil {
+				n.metrics.replicationForwards.WithLabelValues("buffer_error").Inc()
+			}
 			return err
 		}
 		n.replicas[req.Operation.Slot] = record
+		n.refreshMetricGauges()
+		if n.metrics != nil {
+			n.metrics.replicationForwards.WithLabelValues("buffered").Inc()
+		}
 		return nil
 	default:
-		return n.applyForward(ctx, record, req)
+		err = n.applyForward(ctx, record, req)
+		if n.metrics != nil {
+			label := "success"
+			if err != nil {
+				label = "error"
+			}
+			n.metrics.replicationForwards.WithLabelValues(label).Inc()
+		}
+		if err != nil {
+			n.events.record(n.logger, zerolog.ErrorLevel, "replication_forward_failed", "storage forward write failed", ops.IntPtr(req.Operation.Slot), nil, ops.Uint64Ptr(req.Operation.Sequence), req.FromNodeID, "", err)
+		}
+		return err
 	}
 }
 
 func (n *Node) HandleCommitWrite(ctx context.Context, req CommitWriteRequest) error {
 	record, err := n.activeReplicaRecord(req.Slot)
 	if err != nil {
+		if n.metrics != nil {
+			n.metrics.replicationCommits.WithLabelValues("error").Inc()
+		}
 		return err
 	}
 	record = n.ensureProtocolState(record)
@@ -1023,12 +1142,31 @@ func (n *Node) HandleCommitWrite(ctx context.Context, req CommitWriteRequest) er
 	case req.Sequence > record.highestCommittedSequence+1 || !n.hasCommittableSequence(record, req.Sequence):
 		record, err = n.bufferFutureCommit(record, req)
 		if err != nil {
+			n.observeBackpressure(err)
+			if n.metrics != nil {
+				n.metrics.replicationCommits.WithLabelValues("buffer_error").Inc()
+			}
 			return err
 		}
 		n.replicas[req.Slot] = record
+		n.refreshMetricGauges()
+		if n.metrics != nil {
+			n.metrics.replicationCommits.WithLabelValues("buffered").Inc()
+		}
 		return nil
 	default:
-		return n.applyCommit(ctx, record, req)
+		err = n.applyCommit(ctx, record, req)
+		if n.metrics != nil {
+			label := "success"
+			if err != nil {
+				label = "error"
+			}
+			n.metrics.replicationCommits.WithLabelValues(label).Inc()
+		}
+		if err != nil {
+			n.events.record(n.logger, zerolog.ErrorLevel, "replication_commit_failed", "storage commit write failed", ops.IntPtr(req.Slot), nil, ops.Uint64Ptr(req.Sequence), req.FromNodeID, "", err)
+		}
+		return err
 	}
 }
 
@@ -1502,6 +1640,7 @@ func (n *Node) admitClientWrite(slot int) error {
 	record.inFlightClientWrites++
 	n.replicas[slot] = record
 	n.inFlightClientWrites++
+	n.refreshMetricGauges()
 	return nil
 }
 
@@ -1520,6 +1659,7 @@ func (n *Node) releaseClientWrite(slot int) {
 	if n.inFlightClientWrites > 0 {
 		n.inFlightClientWrites--
 	}
+	n.refreshMetricGauges()
 }
 
 func (n *Node) admitCatchup() error {
@@ -1527,6 +1667,7 @@ func (n *Node) admitCatchup() error {
 		return newCatchupBackpressureError(n.inFlightCatchups, n.maxConcurrentCatchups)
 	}
 	n.inFlightCatchups++
+	n.refreshMetricGauges()
 	return nil
 }
 
@@ -1534,6 +1675,7 @@ func (n *Node) releaseCatchup() {
 	if n.inFlightCatchups > 0 {
 		n.inFlightCatchups--
 	}
+	n.refreshMetricGauges()
 }
 
 func (n *Node) bufferedReplicaMessagesForNode() int {

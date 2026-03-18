@@ -1,0 +1,279 @@
+package storage
+
+import (
+	"errors"
+	"time"
+
+	"github.com/danthegoodman1/chainrep/gologger"
+	"github.com/danthegoodman1/chainrep/ops"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
+)
+
+type ResourceUsage struct {
+	InFlightClientWritesPerNode    int         `json:"in_flight_client_writes_per_node"`
+	InFlightClientWritesPerSlot    map[int]int `json:"in_flight_client_writes_per_slot"`
+	BufferedReplicaMessagesPerNode int         `json:"buffered_replica_messages_per_node"`
+	BufferedReplicaMessagesPerSlot map[int]int `json:"buffered_replica_messages_per_slot"`
+	ActiveCatchups                 int         `json:"active_catchups"`
+}
+
+type AdminState struct {
+	Node      NodeState     `json:"node"`
+	Resources ResourceUsage `json:"resources"`
+	Recent    []ops.Event   `json:"recent_events"`
+}
+
+type eventRecorder struct {
+	component string
+	nodeID    string
+	ring      *ops.EventRing
+}
+
+type nodeMetrics struct {
+	registry               *prometheus.Registry
+	clientReads            *prometheus.CounterVec
+	clientWrites           *prometheus.CounterVec
+	ambiguousWrites        prometheus.Counter
+	conditionFailures      prometheus.Counter
+	writeWaitDuration      prometheus.Histogram
+	replicationForwards    *prometheus.CounterVec
+	replicationCommits     *prometheus.CounterVec
+	catchupOps             *prometheus.CounterVec
+	catchupDuration        prometheus.Histogram
+	backpressureRejections *prometheus.CounterVec
+	inFlightWrites         prometheus.Gauge
+	bufferedReplicaMsgs    prometheus.Gauge
+	catchups               prometheus.Gauge
+}
+
+func loggerFromConfig(logger *zerolog.Logger) zerolog.Logger {
+	if logger != nil {
+		return logger.With().Logger()
+	}
+	return gologger.NewLogger()
+}
+
+func newEventRecorder(component string, nodeID string) *eventRecorder {
+	return &eventRecorder{
+		component: component,
+		nodeID:    nodeID,
+		ring:      ops.NewEventRing(64),
+	}
+}
+
+func (r *eventRecorder) record(
+	logger zerolog.Logger,
+	level zerolog.Level,
+	kind string,
+	message string,
+	slot *int,
+	chainVersion *uint64,
+	sequence *uint64,
+	peerNodeID string,
+	commandID string,
+	err error,
+) {
+	if r == nil {
+		return
+	}
+	event := ops.Event{
+		Time:         time.Now().UTC(),
+		Level:        level.String(),
+		Component:    r.component,
+		Kind:         kind,
+		Message:      message,
+		NodeID:       r.nodeID,
+		Slot:         slot,
+		ChainVersion: chainVersion,
+		Sequence:     sequence,
+		PeerNodeID:   peerNodeID,
+		CommandID:    commandID,
+	}
+	if err != nil {
+		event.Error = err.Error()
+	}
+	r.ring.Add(event)
+
+	scoped := logger.With().
+		Str("component", r.component).
+		Str("node_id", r.nodeID).
+		Str("kind", kind).
+		Logger()
+	entry := scoped.WithLevel(level)
+	if slot != nil {
+		entry = entry.Int("slot", *slot)
+	}
+	if chainVersion != nil {
+		entry = entry.Uint64("chain_version", *chainVersion)
+	}
+	if sequence != nil {
+		entry = entry.Uint64("sequence", *sequence)
+	}
+	if peerNodeID != "" {
+		entry = entry.Str("peer_node_id", peerNodeID)
+	}
+	if commandID != "" {
+		entry = entry.Str("command_id", commandID)
+	}
+	if err != nil {
+		entry = entry.AnErr("error", err)
+	}
+	entry.Msg(message)
+}
+
+func (r *eventRecorder) snapshot() []ops.Event {
+	if r == nil {
+		return nil
+	}
+	return r.ring.Snapshot()
+}
+
+func newNodeMetrics(registry *prometheus.Registry) *nodeMetrics {
+	if registry == nil {
+		registry = prometheus.NewRegistry()
+	}
+	m := &nodeMetrics{
+		registry: registry,
+		clientReads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "chainrep_storage_client_reads_total",
+			Help: "Client read requests handled by storage nodes.",
+		}, []string{"result"}),
+		clientWrites: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "chainrep_storage_client_writes_total",
+			Help: "Client write and delete requests handled by storage nodes.",
+		}, []string{"kind", "result"}),
+		ambiguousWrites: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainrep_storage_ambiguous_writes_total",
+			Help: "Ambiguous writes returned by storage nodes.",
+		}),
+		conditionFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainrep_storage_condition_failures_total",
+			Help: "Conditional write failures returned by storage nodes.",
+		}),
+		writeWaitDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "chainrep_storage_write_wait_seconds",
+			Help:    "Client write latency observed at storage nodes.",
+			Buckets: prometheus.DefBuckets,
+		}),
+		replicationForwards: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "chainrep_storage_replication_forwards_total",
+			Help: "Forward write RPCs handled by storage nodes.",
+		}, []string{"result"}),
+		replicationCommits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "chainrep_storage_replication_commits_total",
+			Help: "Commit write RPCs handled by storage nodes.",
+		}, []string{"result"}),
+		catchupOps: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "chainrep_storage_catchup_operations_total",
+			Help: "Catch-up and recovery operations handled by storage nodes.",
+		}, []string{"kind", "result"}),
+		catchupDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "chainrep_storage_catchup_duration_seconds",
+			Help:    "Catch-up and recovery operation durations.",
+			Buckets: prometheus.DefBuckets,
+		}),
+		backpressureRejections: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "chainrep_storage_backpressure_rejections_total",
+			Help: "Backpressure rejections by resource.",
+		}, []string{"resource"}),
+		inFlightWrites: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "chainrep_storage_in_flight_client_writes",
+			Help: "Current admitted in-flight client writes.",
+		}),
+		bufferedReplicaMsgs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "chainrep_storage_buffered_replica_messages",
+			Help: "Current buffered replica messages across slots.",
+		}),
+		catchups: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "chainrep_storage_active_catchups",
+			Help: "Current active catch-up operations.",
+		}),
+	}
+	registry.MustRegister(
+		m.clientReads,
+		m.clientWrites,
+		m.ambiguousWrites,
+		m.conditionFailures,
+		m.writeWaitDuration,
+		m.replicationForwards,
+		m.replicationCommits,
+		m.catchupOps,
+		m.catchupDuration,
+		m.backpressureRejections,
+		m.inFlightWrites,
+		m.bufferedReplicaMsgs,
+		m.catchups,
+	)
+	return m
+}
+
+func (m *nodeMetrics) Registry() *prometheus.Registry {
+	if m == nil {
+		return prometheus.NewRegistry()
+	}
+	return m.registry
+}
+
+func (n *Node) MetricsRegistry() *prometheus.Registry {
+	return n.metrics.Registry()
+}
+
+func (n *Node) RecentEvents() []ops.Event {
+	return n.events.snapshot()
+}
+
+func (n *Node) ResourceUsage() ResourceUsage {
+	usage := ResourceUsage{
+		InFlightClientWritesPerNode:    n.inFlightClientWrites,
+		InFlightClientWritesPerSlot:    make(map[int]int, len(n.replicas)),
+		BufferedReplicaMessagesPerNode: n.bufferedReplicaMessagesForNode(),
+		BufferedReplicaMessagesPerSlot: make(map[int]int, len(n.replicas)),
+		ActiveCatchups:                 n.inFlightCatchups,
+	}
+	for slot, record := range n.replicas {
+		usage.InFlightClientWritesPerSlot[slot] = record.inFlightClientWrites
+		usage.BufferedReplicaMessagesPerSlot[slot] = len(record.bufferedForwards) + len(record.bufferedCommits)
+	}
+	return usage
+}
+
+func (n *Node) AdminState() AdminState {
+	n.refreshMetricGauges()
+	return AdminState{
+		Node:      n.State(),
+		Resources: n.ResourceUsage(),
+		Recent:    n.RecentEvents(),
+	}
+}
+
+func (n *Node) refreshMetricGauges() {
+	if n.metrics == nil {
+		return
+	}
+	n.metrics.inFlightWrites.Set(float64(n.inFlightClientWrites))
+	n.metrics.bufferedReplicaMsgs.Set(float64(n.bufferedReplicaMessagesForNode()))
+	n.metrics.catchups.Set(float64(n.inFlightCatchups))
+}
+
+func (n *Node) observeBackpressure(err error) {
+	var pressure *BackpressureError
+	if !errors.As(err, &pressure) {
+		return
+	}
+	if n.metrics != nil {
+		n.metrics.backpressureRejections.WithLabelValues(string(pressure.Resource)).Inc()
+	}
+	n.events.record(
+		n.logger,
+		zerolog.WarnLevel,
+		"backpressure_rejected",
+		"storage backpressure rejected work",
+		ops.IntPtr(pressure.Slot),
+		nil,
+		nil,
+		"",
+		"",
+		err,
+	)
+}

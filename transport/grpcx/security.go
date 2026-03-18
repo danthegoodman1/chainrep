@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/danthegoodman1/chainrep/gologger"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -24,17 +27,21 @@ const (
 )
 
 type ClientTLSConfig struct {
-	CAFile     string
-	CertFile   string
-	KeyFile    string
-	ServerName string
+	CAFile          string
+	CertFile        string
+	KeyFile         string
+	ServerName      string
+	Logger          *zerolog.Logger
+	MetricsRegistry *prometheus.Registry
 }
 
 type ServerTLSConfig struct {
-	CAFile     string
-	CertFile   string
-	KeyFile    string
-	ClientAuth ClientAuthMode
+	CAFile          string
+	CertFile        string
+	KeyFile         string
+	ClientAuth      ClientAuthMode
+	Logger          *zerolog.Logger
+	MetricsRegistry *prometheus.Registry
 }
 
 type rpcPlane string
@@ -47,8 +54,7 @@ const (
 	rpcPlaneStorageReplica    rpcPlane = "storage_replication"
 )
 
-type rpcAuthorizer struct {
-}
+type rpcAuthorizer struct{}
 
 const (
 	peerRoleCoordinator = "coordinator"
@@ -58,6 +64,13 @@ const (
 type peerIdentity struct {
 	role      string
 	logicalID string
+}
+
+func transportLoggerFromConfig(logger *zerolog.Logger) zerolog.Logger {
+	if logger != nil {
+		return logger.With().Logger()
+	}
+	return gologger.NewLogger()
 }
 
 func newClientTransportCredentials(cfg ClientTLSConfig) (credentials.TransportCredentials, error) {
@@ -159,7 +172,7 @@ func loadCertPool(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-func newRPCAuthorizer(cfg ServerTLSConfig) *rpcAuthorizer {
+func newRPCAuthorizer() *rpcAuthorizer {
 	return &rpcAuthorizer{}
 }
 
