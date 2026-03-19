@@ -147,6 +147,81 @@ func TestCoordinatorFailoverClientsSkipUnavailableAndStandbyEndpoints(t *testing
 	}
 }
 
+func TestStorageNodeAutoJoinWorksAgainstHACoordinatorsOverGRPC(t *testing.T) {
+	ctx := context.Background()
+	clock := &haFakeClock{now: time.Unix(300, 0).UTC()}
+	haStore := coordserver.NewInMemoryHAStore()
+
+	leader := mustOpenHAServer(t, clock, haStore, "coord-a", "leader")
+	defer func() { _ = leader.server.Close() }()
+	defer func() { _ = leader.grpc.Close() }()
+
+	standby := mustOpenHAServer(t, clock, haStore, "coord-b", "standby")
+	defer func() { _ = standby.server.Close() }()
+	defer func() { _ = standby.grpc.Close() }()
+
+	if isLeader, err := leader.server.StepHA(ctx); err != nil {
+		t.Fatalf("leader StepHA returned error: %v", err)
+	} else if !isLeader {
+		t.Fatal("leader did not acquire initial lease")
+	}
+	if isLeader, err := standby.server.StepHA(ctx); err != nil {
+		t.Fatalf("standby StepHA returned error: %v", err)
+	} else if isLeader {
+		t.Fatal("standby unexpectedly acquired initial lease")
+	}
+
+	pool := grpcx.NewConnPool()
+	t.Cleanup(func() { _ = pool.Close() })
+
+	admin := grpcx.NewCoordinatorAdminFailoverClient([]string{standby.address, leader.address}, pool)
+	reporter := grpcx.NewCoordinatorReporterFailoverClient("n1", []string{standby.address, leader.address}, pool)
+
+	if _, err := admin.Bootstrap(ctx, coordruntime.Command{
+		ID:              "bootstrap",
+		ExpectedVersion: 0,
+		Kind:            coordruntime.CommandKindBootstrap,
+		Bootstrap: &coordruntime.BootstrapCommand{
+			Config: coordinator.Config{SlotCount: 1, ReplicationFactor: 2},
+		},
+	}); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	node := mustOpenNode(t, ctx, storage.Config{
+		NodeID:         "n1",
+		RPCAddress:     "storage-n1",
+		FailureDomains: map[string]string{"host": "h1"},
+	}, storage.NewInMemoryBackend(), reporter, storage.NewInMemoryReplicationTransport())
+
+	if err := node.ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat before failover returned error: %v", err)
+	}
+	if _, ok := leader.server.Current().Cluster.NodesByID["n1"]; !ok {
+		t.Fatalf("leader cluster missing auto-joined node: %#v", leader.server.Current().Cluster.NodesByID)
+	}
+	if !leader.server.Current().Cluster.ReadyNodeIDs["n1"] {
+		t.Fatalf("leader cluster did not mark n1 ready: %#v", leader.server.Current().Cluster.ReadyNodeIDs)
+	}
+
+	clock.Advance(3 * time.Second)
+	if isLeader, err := standby.server.StepHA(ctx); err != nil {
+		t.Fatalf("standby StepHA takeover returned error: %v", err)
+	} else if !isLeader {
+		t.Fatal("standby did not acquire takeover lease")
+	}
+
+	if err := node.ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat after failover returned error: %v", err)
+	}
+	if _, ok := standby.server.Current().Cluster.NodesByID["n1"]; !ok {
+		t.Fatalf("standby cluster missing auto-joined node after failover: %#v", standby.server.Current().Cluster.NodesByID)
+	}
+	if !standby.server.Current().Cluster.ReadyNodeIDs["n1"] {
+		t.Fatalf("standby cluster did not mark n1 ready after failover: %#v", standby.server.Current().Cluster.ReadyNodeIDs)
+	}
+}
+
 type haServerHarness struct {
 	server  *coordserver.Server
 	grpc    *grpcx.CoordinatorGRPCServer

@@ -104,6 +104,18 @@ func (s *CoordinatorGRPCServer) Bootstrap(ctx context.Context, req *grpcproto.Bo
 	return protoServerState(state), nil
 }
 
+func (s *CoordinatorGRPCServer) RegisterNode(ctx context.Context, req *grpcproto.RegisterNodeRequest) (*grpcproto.ServerState, error) {
+	state, err := s.server.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         req.Node.Id,
+		RPCAddress:     req.Node.RpcAddress,
+		FailureDomains: fromProtoNode(req.Node).FailureDomains,
+	})
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	return protoServerState(state), nil
+}
+
 func (s *CoordinatorGRPCServer) AddNode(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
 	return s.applyMembership(ctx, coordinator.EventKindAddNode, req)
 }

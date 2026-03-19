@@ -506,14 +506,20 @@ func TestPlanReconfigurationRepairImpossibleWhenNoEligibleReplacementExists(t *t
 		ReplicationFactor: 3,
 	}
 
-	_, err := PlanReconfiguration(state, []Event{
+	plan, err := PlanReconfiguration(state, []Event{
 		{Kind: EventKindMarkNodeDead, NodeID: "b"},
 	}, ReconfigurationPolicy{})
-	if err == nil {
-		t.Fatal("PlanReconfiguration unexpectedly succeeded")
+	if err != nil {
+		t.Fatalf("PlanReconfiguration returned error: %v", err)
 	}
-	if !errors.Is(err, ErrPlacementImpossible) {
-		t.Fatalf("error = %v, want placement impossible", err)
+	if got, want := replicaNodeStates(plan.UpdatedState.Chains[0]), []string{"a:active", "c:active"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("updated chain = %v, want %v", got, want)
+	}
+	if len(plan.ChangedSlots) != 1 {
+		t.Fatalf("changed slot count = %d, want 1", len(plan.ChangedSlots))
+	}
+	if len(plan.ChangedSlots[0].Steps) != 0 {
+		t.Fatalf("repair steps = %#v, want none until a replacement becomes eligible later", plan.ChangedSlots[0].Steps)
 	}
 }
 

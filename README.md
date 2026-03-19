@@ -7,6 +7,8 @@
 - Conditional writes with per-object metadata
 - Optional TLS/mTLS security for gRPC transports
 - Read-only HTTP admin/health endpoints plus Prometheus metrics
+- Non-HA coordinator mode now has a durable local control outbox with retry/restart recovery
+- Storage nodes can auto-register and join dynamically from coordinator heartbeats instead of requiring a static node list
 
 - [Architecture](./ARCHITECTURE.md)
 - [Coordinator HA Store](./HA_STORE.md)

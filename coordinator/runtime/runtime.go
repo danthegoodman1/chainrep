@@ -26,7 +26,42 @@ type State struct {
 	SlotVersions     map[int]uint64
 	CompletedProgressBySlot map[int][]CompletedProgressRecord
 	NodeLivenessByID map[string]NodeLivenessRecord
+	PendingBySlot    map[int]PendingWork
+	Outbox           []OutboxEntry
+	LastPolicy       coordinator.ReconfigurationPolicy
 	AppliedCommands  map[string]AppliedCommand
+}
+
+type PendingKind string
+
+const (
+	PendingKindReady   PendingKind = "ready"
+	PendingKindRemoved PendingKind = "removed"
+)
+
+type PendingWork struct {
+	Slot        int
+	NodeID      string
+	Kind        PendingKind
+	SlotVersion uint64
+	CommandID   string
+}
+
+type OutboxCommandKind string
+
+const (
+	OutboxCommandKindAddReplicaAsTail OutboxCommandKind = "add_replica_as_tail"
+	OutboxCommandKindMarkReplicaLeaving OutboxCommandKind = "mark_replica_leaving"
+	OutboxCommandKindUpdateChainPeers OutboxCommandKind = "update_chain_peers"
+)
+
+type OutboxEntry struct {
+	ID         string
+	Slot       int
+	NodeID     string
+	Kind       OutboxCommandKind
+	CommandID  string
+	Assignment storage.ReplicaAssignment
 }
 
 type CompletedProgressKind string
@@ -65,6 +100,9 @@ type AppliedCommand struct {
 	SlotVersions           map[int]uint64
 	CompletedProgressBySlot map[int][]CompletedProgressRecord
 	NodeLivenessByID       map[string]NodeLivenessRecord
+	PendingBySlot          map[int]PendingWork
+	Outbox                 []OutboxEntry
+	LastPolicy             coordinator.ReconfigurationPolicy
 	Plan                   *coordinator.ReconfigurationPlan
 }
 
@@ -76,6 +114,7 @@ const (
 	CommandKindProgress    CommandKind = "progress"
 	CommandKindHeartbeat   CommandKind = "heartbeat"
 	CommandKindLiveness    CommandKind = "liveness"
+	CommandKindAcknowledgeOutbox CommandKind = "acknowledge_outbox"
 )
 
 type Command struct {
@@ -87,6 +126,7 @@ type Command struct {
 	Progress        *ProgressCommand
 	Heartbeat       *HeartbeatCommand
 	Liveness        *LivenessCommand
+	AcknowledgeOutbox *AcknowledgeOutboxCommand
 }
 
 type BootstrapCommand struct {
@@ -113,6 +153,10 @@ type LivenessCommand struct {
 	State               NodeLivenessState
 	EvaluatedAtUnixNano int64
 	DeadActionFired     bool
+}
+
+type AcknowledgeOutboxCommand struct {
+	EntryID string
 }
 
 type LogRecord struct {
@@ -308,6 +352,23 @@ func (r *Runtime) ApplyLiveness(ctx context.Context, cmd Command) (State, error)
 	return cloneState(r.state), nil
 }
 
+func (r *Runtime) AcknowledgeOutbox(ctx context.Context, cmd Command) (State, error) {
+	_, _, duplicate, err := r.executeAcknowledgeOutbox(cmd)
+	if err != nil {
+		return State{}, fmt.Errorf("err in r.executeAcknowledgeOutbox: %w", err)
+	}
+	if duplicate != nil {
+		return r.snapshotForApplied(*duplicate), nil
+	}
+
+	record, nextState := r.commitCandidate(cmd, r.state.Cluster, nil)
+	if err := r.store.AppendWAL(ctx, record); err != nil {
+		return State{}, fmt.Errorf("err in r.store.AppendWAL: %w", err)
+	}
+	r.state = nextState
+	return cloneState(r.state), nil
+}
+
 func (r *Runtime) Checkpoint(ctx context.Context) error {
 	checkpointState := cloneState(r.state)
 	checkpointState.AppliedCommands = map[string]AppliedCommand{}
@@ -354,6 +415,10 @@ func (r *Runtime) executeHeartbeat(cmd Command) (coordinator.ClusterState, *coor
 }
 
 func (r *Runtime) executeLiveness(cmd Command) (coordinator.ClusterState, *coordinator.ReconfigurationPlan, *AppliedCommand, error) {
+	return r.executeCommand(cmd)
+}
+
+func (r *Runtime) executeAcknowledgeOutbox(cmd Command) (coordinator.ClusterState, *coordinator.ReconfigurationPlan, *AppliedCommand, error) {
 	return r.executeCommand(cmd)
 }
 
@@ -411,6 +476,14 @@ func (r *Runtime) executeCommand(cmd Command) (coordinator.ClusterState, *coordi
 			return coordinator.ClusterState{}, nil, nil, fmt.Errorf("%w: liveness node ID must not be empty", ErrInvalidCommand)
 		}
 		return cloneClusterState(r.state.Cluster), nil, nil, nil
+	case CommandKindAcknowledgeOutbox:
+		if !isInitialized(r.state) {
+			return coordinator.ClusterState{}, nil, nil, ErrNotInitialized
+		}
+		if !outboxEntryExists(r.state.Outbox, cmd.AcknowledgeOutbox.EntryID) {
+			return cloneClusterState(r.state.Cluster), nil, nil, nil
+		}
+		return cloneClusterState(r.state.Cluster), nil, nil, nil
 	default:
 		return coordinator.ClusterState{}, nil, nil, fmt.Errorf(
 			"%w: unsupported command kind %q",
@@ -451,30 +524,37 @@ func (r *Runtime) validateCommand(cmd Command) (*AppliedCommand, error) {
 func validateCommandPayload(cmd Command) error {
 	switch cmd.Kind {
 	case CommandKindBootstrap:
-		if cmd.Bootstrap == nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
+		if cmd.Bootstrap == nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil || cmd.AcknowledgeOutbox != nil {
 			return fmt.Errorf("%w: bootstrap command must set only bootstrap payload", ErrInvalidCommand)
 		}
 	case CommandKindReconfigure:
-		if cmd.Reconfigure == nil || cmd.Bootstrap != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
+		if cmd.Reconfigure == nil || cmd.Bootstrap != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil || cmd.AcknowledgeOutbox != nil {
 			return fmt.Errorf("%w: reconfigure command must set only reconfigure payload", ErrInvalidCommand)
 		}
 	case CommandKindProgress:
-		if cmd.Progress == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
+		if cmd.Progress == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Heartbeat != nil || cmd.Liveness != nil || cmd.AcknowledgeOutbox != nil {
 			return fmt.Errorf("%w: progress command must set only progress payload", ErrInvalidCommand)
 		}
 	case CommandKindHeartbeat:
-		if cmd.Heartbeat == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Liveness != nil {
+		if cmd.Heartbeat == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Liveness != nil || cmd.AcknowledgeOutbox != nil {
 			return fmt.Errorf("%w: heartbeat command must set only heartbeat payload", ErrInvalidCommand)
 		}
 		if cmd.Heartbeat.Status.NodeID == "" {
 			return fmt.Errorf("%w: heartbeat node ID must not be empty", ErrInvalidCommand)
 		}
 	case CommandKindLiveness:
-		if cmd.Liveness == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil {
+		if cmd.Liveness == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.AcknowledgeOutbox != nil {
 			return fmt.Errorf("%w: liveness command must set only liveness payload", ErrInvalidCommand)
 		}
 		if cmd.Liveness.NodeID == "" {
 			return fmt.Errorf("%w: liveness node ID must not be empty", ErrInvalidCommand)
+		}
+	case CommandKindAcknowledgeOutbox:
+		if cmd.AcknowledgeOutbox == nil || cmd.Bootstrap != nil || cmd.Reconfigure != nil || cmd.Progress != nil || cmd.Heartbeat != nil || cmd.Liveness != nil {
+			return fmt.Errorf("%w: acknowledge outbox command must set only outbox payload", ErrInvalidCommand)
+		}
+		if cmd.AcknowledgeOutbox.EntryID == "" {
+			return fmt.Errorf("%w: outbox entry id must not be empty", ErrInvalidCommand)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported command kind %q", ErrInvalidCommand, cmd.Kind)
@@ -505,9 +585,13 @@ func (r *Runtime) nextStateForApplied(
 	next.Version++
 	next.LastLogIndex = logIndex
 	next.Cluster = cloneClusterState(cluster)
+	next.Cluster = nextClusterState(next.Cluster, cmd)
 	next.SlotVersions = nextSlotVersions(next.SlotVersions, next.Version, cmd.Kind, cluster, plan)
 	next.CompletedProgressBySlot = nextCompletedProgress(next.CompletedProgressBySlot, next.SlotVersions, cmd)
 	next.NodeLivenessByID = nextNodeLiveness(next.NodeLivenessByID, cmd)
+	next.PendingBySlot = nextPending(next.PendingBySlot, next.Version, next.SlotVersions, cluster, cmd, plan)
+	next.Outbox = nextOutbox(next.Outbox, next.Version, next.SlotVersions, cluster, cmd, plan)
+	next.LastPolicy = nextLastPolicy(next.LastPolicy, cmd)
 	if next.AppliedCommands == nil {
 		next.AppliedCommands = make(map[string]AppliedCommand)
 	}
@@ -515,11 +599,28 @@ func (r *Runtime) nextStateForApplied(
 		Command:                 cloneCommand(cmd),
 		Version:                 next.Version,
 		LastLogIndex:            logIndex,
-		Cluster:                 cloneClusterState(cluster),
+		Cluster:                 cloneClusterState(next.Cluster),
 		SlotVersions:            cloneSlotVersions(next.SlotVersions),
 		CompletedProgressBySlot: cloneCompletedProgressMap(next.CompletedProgressBySlot),
 		NodeLivenessByID:        cloneNodeLivenessMap(next.NodeLivenessByID),
+		PendingBySlot:           clonePendingMap(next.PendingBySlot),
+		Outbox:                  cloneOutbox(next.Outbox),
+		LastPolicy:              next.LastPolicy,
 		Plan:                    clonePlan(plan),
+	}
+	return next
+}
+
+func nextClusterState(current coordinator.ClusterState, cmd Command) coordinator.ClusterState {
+	next := cloneClusterState(current)
+	if cmd.Kind == CommandKindHeartbeat && cmd.Heartbeat != nil {
+		nodeID := cmd.Heartbeat.Status.NodeID
+		if next.NodeHealthByID[nodeID] != coordinator.NodeHealthDead {
+			if next.ReadyNodeIDs == nil {
+				next.ReadyNodeIDs = map[string]bool{}
+			}
+			next.ReadyNodeIDs[nodeID] = true
+		}
 	}
 	return next
 }
@@ -532,6 +633,9 @@ func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 		SlotVersions:           cloneSlotVersions(applied.SlotVersions),
 		CompletedProgressBySlot: cloneCompletedProgressMap(applied.CompletedProgressBySlot),
 		NodeLivenessByID: cloneNodeLivenessMap(applied.NodeLivenessByID),
+		PendingBySlot:          clonePendingMap(applied.PendingBySlot),
+		Outbox:                 cloneOutbox(applied.Outbox),
+		LastPolicy:             applied.LastPolicy,
 		AppliedCommands:        make(map[string]AppliedCommand),
 	}
 	for id, existing := range r.state.AppliedCommands {
@@ -547,6 +651,8 @@ func zeroState() State {
 		SlotVersions:            map[int]uint64{},
 		CompletedProgressBySlot: map[int][]CompletedProgressRecord{},
 		NodeLivenessByID:        map[string]NodeLivenessRecord{},
+		PendingBySlot:           map[int]PendingWork{},
+		Outbox:                  []OutboxEntry{},
 		AppliedCommands:         map[string]AppliedCommand{},
 	}
 }
@@ -563,6 +669,9 @@ func cloneState(state State) State {
 		SlotVersions:           cloneSlotVersions(state.SlotVersions),
 		CompletedProgressBySlot: cloneCompletedProgressMap(state.CompletedProgressBySlot),
 		NodeLivenessByID: cloneNodeLivenessMap(state.NodeLivenessByID),
+		PendingBySlot:          clonePendingMap(state.PendingBySlot),
+		Outbox:                 cloneOutbox(state.Outbox),
+		LastPolicy:             state.LastPolicy,
 		AppliedCommands:        make(map[string]AppliedCommand, len(state.AppliedCommands)),
 	}
 	for id, applied := range state.AppliedCommands {
@@ -580,6 +689,9 @@ func cloneAppliedCommand(applied AppliedCommand) AppliedCommand {
 		SlotVersions:            cloneSlotVersions(applied.SlotVersions),
 		CompletedProgressBySlot: cloneCompletedProgressMap(applied.CompletedProgressBySlot),
 		NodeLivenessByID:        cloneNodeLivenessMap(applied.NodeLivenessByID),
+		PendingBySlot:           clonePendingMap(applied.PendingBySlot),
+		Outbox:                  cloneOutbox(applied.Outbox),
+		LastPolicy:              applied.LastPolicy,
 		Plan:                    clonePlan(applied.Plan),
 	}
 }
@@ -697,6 +809,9 @@ func cloneCommand(cmd Command) Command {
 			DeadActionFired:     cmd.Liveness.DeadActionFired,
 		}
 	}
+	if cmd.AcknowledgeOutbox != nil {
+		cloned.AcknowledgeOutbox = &AcknowledgeOutboxCommand{EntryID: cmd.AcknowledgeOutbox.EntryID}
+	}
 	return cloned
 }
 
@@ -740,6 +855,233 @@ func cloneNodeLivenessMap(current map[string]NodeLivenessRecord) map[string]Node
 	return cloned
 }
 
+func clonePendingMap(current map[int]PendingWork) map[int]PendingWork {
+	cloned := make(map[int]PendingWork, len(current))
+	for slot, pending := range current {
+		cloned[slot] = pending
+	}
+	return cloned
+}
+
+func cloneOutbox(current []OutboxEntry) []OutboxEntry {
+	cloned := make([]OutboxEntry, len(current))
+	for i, entry := range current {
+		cloned[i] = OutboxEntry{
+			ID:        entry.ID,
+			Slot:      entry.Slot,
+			NodeID:    entry.NodeID,
+			Kind:      entry.Kind,
+			CommandID: entry.CommandID,
+			Assignment: storage.ReplicaAssignment{
+				Slot:         entry.Assignment.Slot,
+				ChainVersion: entry.Assignment.ChainVersion,
+				Role:         entry.Assignment.Role,
+				Peers:        entry.Assignment.Peers,
+			},
+		}
+	}
+	return cloned
+}
+
+func nextLastPolicy(current coordinator.ReconfigurationPolicy, cmd Command) coordinator.ReconfigurationPolicy {
+	if cmd.Kind == CommandKindReconfigure && cmd.Reconfigure != nil {
+		return cmd.Reconfigure.Policy
+	}
+	return current
+}
+
+func nextPending(
+	current map[int]PendingWork,
+	version uint64,
+	slotVersions map[int]uint64,
+	cluster coordinator.ClusterState,
+	cmd Command,
+	plan *coordinator.ReconfigurationPlan,
+) map[int]PendingWork {
+	next := clonePendingMap(current)
+	switch cmd.Kind {
+	case CommandKindBootstrap:
+		return map[int]PendingWork{}
+	case CommandKindReconfigure:
+		if plan == nil {
+			return next
+		}
+		return pendingFromPlan(version, slotVersions, cluster, cmd, plan)
+	case CommandKindProgress:
+		if cmd.Progress != nil {
+			delete(next, cmd.Progress.Event.Slot)
+		}
+	case CommandKindHeartbeat, CommandKindLiveness, CommandKindAcknowledgeOutbox:
+		return next
+	}
+	return next
+}
+
+func pendingFromPlan(
+	version uint64,
+	slotVersions map[int]uint64,
+	cluster coordinator.ClusterState,
+	cmd Command,
+	plan *coordinator.ReconfigurationPlan,
+) map[int]PendingWork {
+	next := map[int]PendingWork{}
+	for _, slotPlan := range plan.ChangedSlots {
+		stepKinds := distinctStepKinds(slotPlan.Steps)
+		switch {
+		case len(stepKinds) == 1 && stepKinds[0] == coordinator.StepKindAppendTail:
+			nodeID := firstStepNodeID(slotPlan.Steps, coordinator.StepKindAppendTail)
+			if nodeID == "" {
+				continue
+			}
+			next[slotPlan.Slot] = PendingWork{
+				Slot:        slotPlan.Slot,
+				NodeID:      nodeID,
+				Kind:        PendingKindReady,
+				SlotVersion: slotVersions[slotPlan.Slot],
+			}
+		case len(stepKinds) == 1 && stepKinds[0] == coordinator.StepKindMarkLeaving:
+			nodeID := firstStepNodeID(slotPlan.Steps, coordinator.StepKindMarkLeaving)
+			if nodeID == "" {
+				continue
+			}
+			next[slotPlan.Slot] = PendingWork{
+				Slot:        slotPlan.Slot,
+				NodeID:      nodeID,
+				Kind:        PendingKindRemoved,
+				SlotVersion: slotVersions[slotPlan.Slot],
+			}
+		}
+	}
+	return next
+}
+
+func nextOutbox(
+	current []OutboxEntry,
+	version uint64,
+	slotVersions map[int]uint64,
+	cluster coordinator.ClusterState,
+	cmd Command,
+	plan *coordinator.ReconfigurationPlan,
+) []OutboxEntry {
+	switch cmd.Kind {
+	case CommandKindBootstrap:
+		return []OutboxEntry{}
+	case CommandKindReconfigure:
+		if plan == nil {
+			return cloneOutbox(current)
+		}
+		return outboxFromPlan(version, slotVersions, cluster, plan)
+	case CommandKindProgress:
+		if cmd.Progress == nil {
+			return cloneOutbox(current)
+		}
+		next := make([]OutboxEntry, 0, len(current))
+		for _, entry := range current {
+			if entry.Slot != cmd.Progress.Event.Slot {
+				next = append(next, entry)
+			}
+		}
+		return next
+	case CommandKindAcknowledgeOutbox:
+		if cmd.AcknowledgeOutbox == nil {
+			return cloneOutbox(current)
+		}
+		next := make([]OutboxEntry, 0, len(current))
+		for _, entry := range current {
+			if entry.ID != cmd.AcknowledgeOutbox.EntryID {
+				next = append(next, entry)
+			}
+		}
+		return next
+	default:
+		return cloneOutbox(current)
+	}
+}
+
+func outboxFromPlan(
+	version uint64,
+	slotVersions map[int]uint64,
+	cluster coordinator.ClusterState,
+	plan *coordinator.ReconfigurationPlan,
+) []OutboxEntry {
+	var outbox []OutboxEntry
+	for _, slotPlan := range plan.ChangedSlots {
+		stepKinds := distinctStepKinds(slotPlan.Steps)
+		switch {
+		case len(stepKinds) == 1 && stepKinds[0] == coordinator.StepKindAppendTail:
+			addedNodeID := firstStepNodeID(slotPlan.Steps, coordinator.StepKindAppendTail)
+			if addedNodeID == "" {
+				continue
+			}
+			assignment, err := assignmentForNode(slotPlan.After, cluster.NodesByID, addedNodeID, slotVersions[slotPlan.Slot])
+			if err == nil {
+				outbox = append(outbox, OutboxEntry{
+					ID:         outboxEntryID(version, slotPlan.Slot, addedNodeID, OutboxCommandKindAddReplicaAsTail),
+					Slot:       slotPlan.Slot,
+					NodeID:     addedNodeID,
+					Kind:       OutboxCommandKindAddReplicaAsTail,
+					CommandID:  outboxCommandID(version, slotPlan.Slot, addedNodeID, "ready"),
+					Assignment: assignment,
+				})
+			}
+			skipped := map[string]bool{addedNodeID: true}
+			servingChain := activeServingChain(slotPlan.After)
+			for _, nodeID := range activeAfterNodeIDs(servingChain, skipped) {
+				assignment, err := assignmentForNode(servingChain, cluster.NodesByID, nodeID, slotVersions[slotPlan.Slot])
+				if err != nil {
+					continue
+				}
+				outbox = append(outbox, OutboxEntry{
+					ID:         outboxEntryID(version, slotPlan.Slot, nodeID, OutboxCommandKindUpdateChainPeers),
+					Slot:       slotPlan.Slot,
+					NodeID:     nodeID,
+					Kind:       OutboxCommandKindUpdateChainPeers,
+					CommandID:  outboxCommandID(version, slotPlan.Slot, nodeID, "update"),
+					Assignment: assignment,
+				})
+			}
+		case len(stepKinds) == 1 && stepKinds[0] == coordinator.StepKindMarkLeaving:
+			leavingNodeID := firstStepNodeID(slotPlan.Steps, coordinator.StepKindMarkLeaving)
+			if leavingNodeID == "" {
+				continue
+			}
+			skipped := map[string]bool{leavingNodeID: true}
+			servingChain := activeServingChain(slotPlan.After)
+			for _, nodeID := range activeAfterNodeIDs(servingChain, skipped) {
+				assignment, err := assignmentForNode(servingChain, cluster.NodesByID, nodeID, slotVersions[slotPlan.Slot])
+				if err != nil {
+					continue
+				}
+				outbox = append(outbox, OutboxEntry{
+					ID:         outboxEntryID(version, slotPlan.Slot, nodeID, OutboxCommandKindUpdateChainPeers),
+					Slot:       slotPlan.Slot,
+					NodeID:     nodeID,
+					Kind:       OutboxCommandKindUpdateChainPeers,
+					CommandID:  outboxCommandID(version, slotPlan.Slot, nodeID, "update"),
+					Assignment: assignment,
+				})
+			}
+			outbox = append(outbox, OutboxEntry{
+				ID:        outboxEntryID(version, slotPlan.Slot, leavingNodeID, OutboxCommandKindMarkReplicaLeaving),
+				Slot:      slotPlan.Slot,
+				NodeID:    leavingNodeID,
+				Kind:      OutboxCommandKindMarkReplicaLeaving,
+				CommandID: outboxCommandID(version, slotPlan.Slot, leavingNodeID, "removed"),
+			})
+		}
+	}
+	return outbox
+}
+
+func outboxEntryExists(current []OutboxEntry, entryID string) bool {
+	for _, entry := range current {
+		if entry.ID == entryID {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneNodeStatus(status storage.NodeStatus) storage.NodeStatus {
 	return storage.NodeStatus{
 		NodeID:          status.NodeID,
@@ -775,6 +1117,7 @@ func cloneClusterState(state coordinator.ClusterState) coordinator.ClusterState 
 		Chains:            make([]coordinator.Chain, len(state.Chains)),
 		NodesByID:         make(map[string]coordinator.Node, len(state.NodesByID)),
 		NodeHealthByID:    make(map[string]coordinator.NodeHealth, len(state.NodeHealthByID)),
+		ReadyNodeIDs:      make(map[string]bool, len(state.ReadyNodeIDs)),
 		DrainingNodeIDs:   make(map[string]bool, len(state.DrainingNodeIDs)),
 		NodeOrder:         append([]string(nil), state.NodeOrder...),
 		SlotCount:         state.SlotCount,
@@ -792,6 +1135,11 @@ func cloneClusterState(state coordinator.ClusterState) coordinator.ClusterState 
 	}
 	for id, health := range state.NodeHealthByID {
 		cloned.NodeHealthByID[id] = health
+	}
+	for id, ready := range state.ReadyNodeIDs {
+		if ready {
+			cloned.ReadyNodeIDs[id] = true
+		}
 	}
 	for id, draining := range state.DrainingNodeIDs {
 		cloned.DrainingNodeIDs[id] = draining
@@ -850,4 +1198,104 @@ func cloneFailureDomains(domains map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func distinctStepKinds(steps []coordinator.ReconfigurationStep) []coordinator.StepKind {
+	seen := map[coordinator.StepKind]bool{}
+	kinds := make([]coordinator.StepKind, 0, len(steps))
+	for _, step := range steps {
+		if seen[step.Kind] {
+			continue
+		}
+		seen[step.Kind] = true
+		kinds = append(kinds, step.Kind)
+	}
+	return kinds
+}
+
+func firstStepNodeID(steps []coordinator.ReconfigurationStep, kind coordinator.StepKind) string {
+	for _, step := range steps {
+		if step.Kind == kind {
+			return step.NodeID
+		}
+	}
+	return ""
+}
+
+func outboxEntryID(version uint64, slot int, nodeID string, kind OutboxCommandKind) string {
+	return fmt.Sprintf("outbox-v%d-slot%d-%s-%s", version, slot, nodeID, kind)
+}
+
+func outboxCommandID(version uint64, slot int, nodeID string, suffix string) string {
+	return fmt.Sprintf("server-v%d-slot%d-%s-%s", version, slot, nodeID, suffix)
+}
+
+func assignmentForNode(
+	chain coordinator.Chain,
+	nodesByID map[string]coordinator.Node,
+	nodeID string,
+	chainVersion uint64,
+) (storage.ReplicaAssignment, error) {
+	position := -1
+	for i, replica := range chain.Replicas {
+		if replica.NodeID == nodeID {
+			position = i
+			break
+		}
+	}
+	if position < 0 {
+		return storage.ReplicaAssignment{}, fmt.Errorf("node %q not found in chain %d", nodeID, chain.Slot)
+	}
+
+	role := storage.ReplicaRoleMiddle
+	switch len(chain.Replicas) {
+	case 1:
+		role = storage.ReplicaRoleSingle
+	default:
+		switch position {
+		case 0:
+			role = storage.ReplicaRoleHead
+		case len(chain.Replicas) - 1:
+			role = storage.ReplicaRoleTail
+		}
+	}
+
+	assignment := storage.ReplicaAssignment{
+		Slot:         chain.Slot,
+		ChainVersion: chainVersion,
+		Role:         role,
+	}
+	if position > 0 {
+		assignment.Peers.PredecessorNodeID = chain.Replicas[position-1].NodeID
+		assignment.Peers.PredecessorTarget = nodesByID[assignment.Peers.PredecessorNodeID].RPCAddress
+	}
+	if position+1 < len(chain.Replicas) {
+		assignment.Peers.SuccessorNodeID = chain.Replicas[position+1].NodeID
+		assignment.Peers.SuccessorTarget = nodesByID[assignment.Peers.SuccessorNodeID].RPCAddress
+	}
+	return assignment, nil
+}
+
+func activeServingChain(chain coordinator.Chain) coordinator.Chain {
+	serving := coordinator.Chain{Slot: chain.Slot, Replicas: make([]coordinator.Replica, 0, len(chain.Replicas))}
+	for _, replica := range chain.Replicas {
+		if replica.State == coordinator.ReplicaStateActive {
+			serving.Replicas = append(serving.Replicas, replica)
+		}
+	}
+	return serving
+}
+
+func activeAfterNodeIDs(chain coordinator.Chain, skipped map[string]bool) []string {
+	nodeIDs := make([]string, 0, len(chain.Replicas))
+	for _, replica := range chain.Replicas {
+		if replica.State != coordinator.ReplicaStateActive {
+			continue
+		}
+		if skipped[replica.NodeID] {
+			continue
+		}
+		nodeIDs = append(nodeIDs, replica.NodeID)
+	}
+	return nodeIDs
 }

@@ -118,6 +118,7 @@ func (s *Server) StepHA(ctx context.Context) (bool, error) {
 
 func (s *Server) syncFromHASnapshot(snapshot HASnapshot) {
 	s.rt = coordruntime.OpenInMemoryFromState(snapshot.State)
+	s.syncViewsFromRuntime()
 	s.pending = make(map[int]PendingWork, len(snapshot.Pending))
 	for slot, pending := range snapshot.Pending {
 		s.pending[slot] = pending
@@ -135,7 +136,6 @@ func (s *Server) syncFromHASnapshot(snapshot HASnapshot) {
 	for nodeID, report := range snapshot.LastRecoveryReports {
 		s.lastRecoveryReports[nodeID] = cloneRecoveryReport(report)
 	}
-	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
 }
 

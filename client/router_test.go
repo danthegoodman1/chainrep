@@ -332,7 +332,7 @@ func TestEndToEndRouterPutGetDeleteAndRefreshAfterReconfiguration(t *testing.T) 
 	if !ok {
 		t.Fatal("router snapshot missing after stale read refresh")
 	}
-	if got, want := snapshot.Slots[1].ChainVersion, uint64(4); got != want {
+	if got, want := snapshot.Slots[1].ChainVersion, h.server.Current().SlotVersions[1]; got != want {
 		t.Fatalf("router chain version after stale read refresh = %d, want %d", got, want)
 	}
 	if !snapshot.Slots[1].Writable {

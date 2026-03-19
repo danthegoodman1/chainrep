@@ -440,7 +440,7 @@ func TestValidationAndBootstrapFailures(t *testing.T) {
 			name:  "empty node list",
 			cfg:   Config{SlotCount: 1, ReplicationFactor: 1},
 			nodes: nil,
-			want:  ErrInvalidConfig,
+			want:  nil,
 		},
 		{
 			name:  "empty node ID",
@@ -467,7 +467,16 @@ func TestValidationAndBootstrapFailures(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := BuildInitialPlacement(tc.cfg, tc.nodes)
+			state, err := BuildInitialPlacement(tc.cfg, tc.nodes)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("BuildInitialPlacement returned error: %v", err)
+				}
+				if got, want := len(state.Chains), tc.cfg.SlotCount; got != want {
+					t.Fatalf("chain count = %d, want %d", got, want)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("BuildInitialPlacement unexpectedly succeeded")
 			}

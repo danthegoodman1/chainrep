@@ -176,6 +176,51 @@ func TestHARestartResumesUndispatchedOutboxWork(t *testing.T) {
 	}
 }
 
+func TestHADynamicAutoJoinRepairsAfterFailover(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b", "c", "d"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 1, 3, []string{"a", "b", "c"})
+
+	current := h.leader.Current()
+	if _, err := h.leader.MarkNodeDead(ctx, reconfigureCommand("dead-c", current.Version, coordinator.Event{
+		Kind:   coordinator.EventKindMarkNodeDead,
+		NodeID: "c",
+	}, coordinator.ReconfigurationPolicy{})); err != nil {
+		t.Fatalf("MarkNodeDead returned error: %v", err)
+	}
+	if got, want := replicaNodeStates(h.leader.Current().Cluster.Chains[0]), []string{"a:active", "b:active"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("degraded chain after dead mark = %v, want %v", got, want)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	h.mustStepStandby(t)
+	if got, want := h.standby.Pending()[0].Kind, pendingKindReady; got != want {
+		t.Fatalf("pending kind after dynamic join = %q, want %q", got, want)
+	}
+	if got, want := h.standby.Pending()[0].NodeID, "d"; got != want {
+		t.Fatalf("pending node after dynamic join = %q, want %q", got, want)
+	}
+
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if got, want := replicaNodeStates(h.standby.Current().Cluster.Chains[0]), []string{"a:active", "b:active", "d:active"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("final repaired chain after dynamic join = %v, want %v", got, want)
+	}
+}
+
 func TestPostgresHAStoreConcurrentAcquireAndStaleSave(t *testing.T) {
 	dsn := postgresTestDSN(t)
 	if dsn == "" {

@@ -234,6 +234,19 @@ func (c *CoordinatorReporterClient) ReportReplicaReady(ctx context.Context, slot
 	})
 }
 
+func (c *CoordinatorReporterClient) RegisterNode(ctx context.Context, reg storage.NodeRegistration) error {
+	return c.withFailover(ctx, func(client grpcproto.CoordinatorServiceClient) error {
+		_, err := client.RegisterNode(ctx, &grpcproto.RegisterNodeRequest{
+			Node: protoNode(coordinator.Node{
+				ID:             reg.NodeID,
+				RPCAddress:     reg.RPCAddress,
+				FailureDomains: reg.FailureDomains,
+			}),
+		})
+		return decodeError(err)
+	})
+}
+
 func (c *CoordinatorReporterClient) ReportReplicaRemoved(ctx context.Context, slot int, epoch uint64) error {
 	return c.withFailover(ctx, func(client grpcproto.CoordinatorServiceClient) error {
 		_, err := client.ReportReplicaRemoved(ctx, &grpcproto.ReplicaRemovedReport{

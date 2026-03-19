@@ -36,8 +36,13 @@ func TestAddNodeDispatchTimeoutReturnsBoundedErrorAndNoPendingWork(t *testing.T)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want deadline exceeded", err)
 	}
-	if got := server.Pending(); len(got) != 0 {
-		t.Fatalf("pending work = %#v, want empty", got)
+	if got, want := server.Pending()[1], (PendingWork{
+		Slot:        1,
+		NodeID:      "d",
+		Kind:        pendingKindReady,
+		SlotVersion: server.Current().SlotVersions[1],
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending work = %#v, want %#v", got, want)
 	}
 }
 
@@ -156,8 +161,13 @@ func TestLivenessTriggeredDeadRepairRespectsDispatchTimeout(t *testing.T) {
 	if got, want := server.Liveness()["b"].State, coordruntime.NodeLivenessStateDead; got != want {
 		t.Fatalf("liveness state = %q, want %q", got, want)
 	}
-	if got := server.Pending(); len(got) != 0 {
-		t.Fatalf("pending work = %#v, want empty", got)
+	if got, want := server.Pending()[0], (PendingWork{
+		Slot:        0,
+		NodeID:      "d",
+		Kind:        pendingKindReady,
+		SlotVersion: server.Current().SlotVersions[0],
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending work = %#v, want %#v", got, want)
 	}
 }
 

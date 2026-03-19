@@ -3,6 +3,7 @@ package coordinator
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -58,6 +59,7 @@ type ClusterState struct {
 	Chains            []Chain
 	NodesByID         map[string]Node
 	NodeHealthByID    map[string]NodeHealth
+	ReadyNodeIDs      map[string]bool
 	DrainingNodeIDs   map[string]bool
 	NodeOrder         []string
 	SlotCount         int
@@ -84,6 +86,7 @@ func (e *PlacementError) Is(target error) bool {
 type EventKind string
 
 const (
+	EventKindRegisterNode        EventKind = "register_node"
 	EventKindAddNode             EventKind = "add_node"
 	EventKindBeginDrainNode      EventKind = "begin_drain_node"
 	EventKindMarkNodeDead        EventKind = "mark_node_dead"
@@ -140,6 +143,19 @@ func BuildInitialPlacement(cfg Config, nodes []Node) (*ClusterState, error) {
 		return nil, fmt.Errorf("err in validateConfig: %w", err)
 	}
 
+	if len(nodes) == 0 {
+		return &ClusterState{
+			Chains:            emptyChains(cfg.SlotCount),
+			NodesByID:         map[string]Node{},
+			NodeHealthByID:    map[string]NodeHealth{},
+			ReadyNodeIDs:      map[string]bool{},
+			DrainingNodeIDs:   map[string]bool{},
+			NodeOrder:         []string{},
+			SlotCount:         cfg.SlotCount,
+			ReplicationFactor: cfg.ReplicationFactor,
+		}, nil
+	}
+
 	normalizedNodes, nodesByID, nodeOrder, err := normalizeNodes(nodes)
 	if err != nil {
 		return nil, fmt.Errorf("err in normalizeNodes: %w", err)
@@ -159,14 +175,17 @@ func BuildInitialPlacement(cfg Config, nodes []Node) (*ClusterState, error) {
 	}
 
 	nodeHealthByID := make(map[string]NodeHealth, len(normalizedNodes))
+	readyNodeIDs := make(map[string]bool, len(normalizedNodes))
 	for _, node := range normalizedNodes {
 		nodeHealthByID[node.ID] = NodeHealthAlive
+		readyNodeIDs[node.ID] = true
 	}
 
 	return &ClusterState{
 		Chains:            chains,
 		NodesByID:         nodesByID,
 		NodeHealthByID:    nodeHealthByID,
+		ReadyNodeIDs:      readyNodeIDs,
 		DrainingNodeIDs:   map[string]bool{},
 		NodeOrder:         nodeOrder,
 		SlotCount:         cfg.SlotCount,
@@ -300,14 +319,12 @@ func cloneAndValidateState(state ClusterState) (ClusterState, error) {
 			state.SlotCount,
 		)
 	}
-	if len(state.NodesByID) == 0 {
-		return ClusterState{}, fmt.Errorf("%w: nodes must not be empty", ErrInvalidConfig)
-	}
 
 	cloned := ClusterState{
 		Chains:            make([]Chain, len(state.Chains)),
 		NodesByID:         make(map[string]Node, len(state.NodesByID)),
 		NodeHealthByID:    make(map[string]NodeHealth, len(state.NodeHealthByID)),
+		ReadyNodeIDs:      make(map[string]bool, len(state.ReadyNodeIDs)),
 		DrainingNodeIDs:   make(map[string]bool, len(state.DrainingNodeIDs)),
 		NodeOrder:         append([]string(nil), state.NodeOrder...),
 		SlotCount:         state.SlotCount,
@@ -329,6 +346,11 @@ func cloneAndValidateState(state ClusterState) (ClusterState, error) {
 	}
 	for id, health := range state.NodeHealthByID {
 		cloned.NodeHealthByID[id] = health
+	}
+	for id, ready := range state.ReadyNodeIDs {
+		if ready {
+			cloned.ReadyNodeIDs[id] = true
+		}
 	}
 	for id, draining := range state.DrainingNodeIDs {
 		if draining {
@@ -373,6 +395,14 @@ func cloneAndValidateState(state ClusterState) (ClusterState, error) {
 	return cloned, nil
 }
 
+func emptyChains(slotCount int) []Chain {
+	chains := make([]Chain, slotCount)
+	for slot := 0; slot < slotCount; slot++ {
+		chains[slot] = Chain{Slot: slot, Replicas: []Replica{}}
+	}
+	return chains
+}
+
 func buildSteadyStateChains(
 	slotCount int,
 	replicationFactor int,
@@ -403,8 +433,10 @@ func buildSteadyStateChains(
 
 func applyEvent(state *ClusterState, event Event) error {
 	switch event.Kind {
+	case EventKindRegisterNode:
+		return addNode(state, event.Node, false)
 	case EventKindAddNode:
-		return addNode(state, event.Node)
+		return addNode(state, event.Node, true)
 	case EventKindBeginDrainNode:
 		return beginDrainNode(state, event.NodeID)
 	case EventKindMarkNodeDead:
@@ -416,19 +448,33 @@ func applyEvent(state *ClusterState, event Event) error {
 	}
 }
 
-func addNode(state *ClusterState, node Node) error {
+func addNode(state *ClusterState, node Node, ready bool) error {
 	normalizedNodes, nodesByID, nodeOrder, err := normalizeNodes([]Node{node})
 	if err != nil {
 		return err
 	}
 	normalizedNode := normalizedNodes[0]
 	nodeID := nodeOrder[0]
-	if _, exists := state.NodesByID[nodeID]; exists {
-		return fmt.Errorf("%w: node %q already exists", ErrInvalidEvent, nodeID)
+	if existing, exists := state.NodesByID[nodeID]; exists {
+		if state.NodeHealthByID[nodeID] == NodeHealthDead {
+			return fmt.Errorf("%w: node %q is permanently tombstoned", ErrInvalidEvent, nodeID)
+		}
+		if nodeIdentityConflict(existing, normalizedNode) {
+			return fmt.Errorf("%w: node %q already exists with conflicting identity", ErrInvalidEvent, nodeID)
+		}
+		if ready {
+			state.ReadyNodeIDs[nodeID] = true
+		}
+		return nil
 	}
 
 	state.NodesByID[nodeID] = nodesByID[nodeID]
 	state.NodeHealthByID[nodeID] = NodeHealthAlive
+	if ready {
+		state.ReadyNodeIDs[nodeID] = true
+	} else {
+		delete(state.ReadyNodeIDs, nodeID)
+	}
 	state.NodeOrder = append(state.NodeOrder, nodeID)
 	delete(state.DrainingNodeIDs, normalizedNode.ID)
 	return nil
@@ -456,6 +502,7 @@ func markNodeDead(state *ClusterState, nodeID string) error {
 		return fmt.Errorf("%w: unknown node %q", ErrInvalidEvent, nodeID)
 	}
 	state.NodeHealthByID[nodeID] = NodeHealthDead
+	delete(state.ReadyNodeIDs, nodeID)
 	delete(state.DrainingNodeIDs, nodeID)
 	return nil
 }
@@ -549,6 +596,21 @@ func reconcileState(state *ClusterState, policy ReconfigurationPolicy) ([]SlotPl
 		return changedSlots, nil
 	}
 
+	if haveDesired {
+		for slot := 0; slot < state.SlotCount; slot++ {
+			slotPlan, changed, err := appendMissingDesiredReplicas(state, slot, desiredChains[slot])
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				changedSlots = append(changedSlots, slotPlan)
+			}
+		}
+	}
+	if len(changedSlots) > 0 {
+		return changedSlots, nil
+	}
+
 	for slot := 0; slot < state.SlotCount; slot++ {
 		slotPlan, changed, err := appendDrainReplacement(state, slot)
 		if err != nil {
@@ -576,6 +638,51 @@ func reconcileState(state *ClusterState, policy ReconfigurationPolicy) ([]SlotPl
 	return changedSlots, nil
 }
 
+func appendMissingDesiredReplicas(state *ClusterState, slot int, desired Chain) (SlotPlan, bool, error) {
+	chain := &state.Chains[slot]
+	if hasPendingReplicaState(*chain) {
+		return SlotPlan{}, false, nil
+	}
+	if len(chain.Replicas) >= state.ReplicationFactor {
+		return SlotPlan{}, false, nil
+	}
+	if len(desired.Replicas) == 0 {
+		return SlotPlan{}, false, nil
+	}
+
+	currentIDs := replicaIDs(chain.Replicas)
+	desiredIDs := replicaIDs(desired.Replicas)
+	if len(currentIDs) > len(desiredIDs) || !isPrefix(currentIDs, desiredIDs[:len(currentIDs)]) {
+		return SlotPlan{}, false, nil
+	}
+
+	nextNodeID := desiredIDs[len(currentIDs)]
+	if state.NodeHealthByID[nextNodeID] != NodeHealthAlive || !state.ReadyNodeIDs[nextNodeID] || state.DrainingNodeIDs[nextNodeID] {
+		return SlotPlan{}, false, nil
+	}
+	if containsNodeID(currentIDs, nextNodeID) {
+		return SlotPlan{}, false, nil
+	}
+
+	before := cloneChain(*chain)
+	replacedNodeID := ""
+	if len(desiredIDs) >= state.ReplicationFactor {
+		replacedNodeID = desiredIDs[state.ReplicationFactor-1]
+	}
+	chain.Replicas = append(chain.Replicas, Replica{NodeID: nextNodeID, State: ReplicaStateJoining})
+	return SlotPlan{
+		Slot:   slot,
+		Before: before,
+		After:  cloneChain(*chain),
+		Steps: []ReconfigurationStep{{
+			Kind:           StepKindAppendTail,
+			Slot:           slot,
+			NodeID:         nextNodeID,
+			ReplacedNodeID: replacedNodeID,
+		}},
+	}, true, nil
+}
+
 func repairDeadReplicas(state *ClusterState, slot int) (SlotPlan, bool, error) {
 	chain := &state.Chains[slot]
 	if !chainContainsDeadReplica(*chain, state.NodeHealthByID) {
@@ -598,10 +705,7 @@ func repairDeadReplicas(state *ClusterState, slot int) (SlotPlan, bool, error) {
 	for len(chain.Replicas) < state.ReplicationFactor {
 		candidate, ok := selectTailRepairCandidate(*state, *chain)
 		if !ok {
-			return SlotPlan{}, false, &PlacementError{
-				Slot:            slot,
-				ReplicaPosition: len(chain.Replicas),
-			}
+			break
 		}
 		chain.Replicas = append(chain.Replicas, Replica{
 			NodeID: candidate.ID,
@@ -619,7 +723,7 @@ func repairDeadReplicas(state *ClusterState, slot int) (SlotPlan, bool, error) {
 		Before: before,
 		After:  cloneChain(*chain),
 		Steps:  steps,
-	}, true, nil
+	}, !reflect.DeepEqual(before, *chain), nil
 }
 
 func appendDrainReplacement(state *ClusterState, slot int) (SlotPlan, bool, error) {
@@ -806,7 +910,7 @@ func appendJoinRebalance(state *ClusterState, slot int, desired Chain) (SlotPlan
 
 func buildDesiredPlacementFromState(state ClusterState) ([]Chain, bool, error) {
 	eligibleNodes := orderedNodes(state, func(nodeID string) bool {
-		return state.NodeHealthByID[nodeID] == NodeHealthAlive && !state.DrainingNodeIDs[nodeID]
+		return state.NodeHealthByID[nodeID] == NodeHealthAlive && state.ReadyNodeIDs[nodeID] && !state.DrainingNodeIDs[nodeID]
 	})
 	if len(eligibleNodes) < state.ReplicationFactor {
 		return nil, false, nil
@@ -869,7 +973,7 @@ func deriveAssignmentCounts(state ClusterState) map[string]assignmentCounts {
 func selectTailRepairCandidate(state ClusterState, chain Chain) (Node, bool) {
 	counts := deriveAssignmentCounts(state)
 	nodes := orderedNodes(state, func(nodeID string) bool {
-		return state.NodeHealthByID[nodeID] == NodeHealthAlive && !state.DrainingNodeIDs[nodeID]
+		return state.NodeHealthByID[nodeID] == NodeHealthAlive && state.ReadyNodeIDs[nodeID] && !state.DrainingNodeIDs[nodeID]
 	})
 	return selectReplicaCandidate(nodes, chain, state.NodesByID, counts)
 }
@@ -1230,6 +1334,9 @@ func collectUnassignedNodeIDs(state ClusterState) []string {
 		if state.NodeHealthByID[nodeID] != NodeHealthAlive {
 			continue
 		}
+		if !state.ReadyNodeIDs[nodeID] {
+			continue
+		}
 		if state.DrainingNodeIDs[nodeID] {
 			continue
 		}
@@ -1252,6 +1359,38 @@ func lastActiveReplicaID(chain Chain) (string, bool) {
 func containsNodeID(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrefix(values []string, prefix []string) bool {
+	if len(values) != len(prefix) {
+		return false
+	}
+	for i := range values {
+		if values[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func nodeIdentityConflict(left Node, right Node) bool {
+	if left.ID != right.ID {
+		return true
+	}
+	if left.RPCAddress != "" && right.RPCAddress != "" && left.RPCAddress != right.RPCAddress {
+		return true
+	}
+	for key, leftValue := range left.FailureDomains {
+		if rightValue, ok := right.FailureDomains[key]; ok && leftValue != rightValue {
+			return true
+		}
+	}
+	for key, rightValue := range right.FailureDomains {
+		if leftValue, ok := left.FailureDomains[key]; ok && leftValue != rightValue {
 			return true
 		}
 	}

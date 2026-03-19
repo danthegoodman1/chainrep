@@ -241,6 +241,9 @@ func coordserverCloneSnapshot(snapshot coordserver.HASnapshot) coordserver.HASna
 	if cloned.State.Cluster.NodeHealthByID == nil {
 		cloned.State.Cluster.NodeHealthByID = map[string]coordinator.NodeHealth{}
 	}
+	if cloned.State.Cluster.ReadyNodeIDs == nil {
+		cloned.State.Cluster.ReadyNodeIDs = map[string]bool{}
+	}
 	if cloned.State.Cluster.DrainingNodeIDs == nil {
 		cloned.State.Cluster.DrainingNodeIDs = map[string]bool{}
 	}
@@ -252,6 +255,12 @@ func coordserverCloneSnapshot(snapshot coordserver.HASnapshot) coordserver.HASna
 	}
 	if cloned.State.NodeLivenessByID == nil {
 		cloned.State.NodeLivenessByID = map[string]coordruntime.NodeLivenessRecord{}
+	}
+	if cloned.State.PendingBySlot == nil {
+		cloned.State.PendingBySlot = map[int]coordruntime.PendingWork{}
+	}
+	if cloned.State.Outbox == nil {
+		cloned.State.Outbox = []coordruntime.OutboxEntry{}
 	}
 	if cloned.State.AppliedCommands == nil {
 		cloned.State.AppliedCommands = map[string]coordruntime.AppliedCommand{}

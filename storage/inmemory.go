@@ -237,10 +237,12 @@ func (b *InMemoryBackend) Close() error {
 }
 
 type InMemoryCoordinatorClient struct {
+	Registrations    []NodeRegistration
 	ReadySlots      []int
 	RemovedSlots    []int
 	RecoveryReports []NodeRecoveryReport
 	Heartbeats      []NodeStatus
+	RegisterErr     error
 	ReadyErr        error
 	RemovedErr      error
 	RecoveredErr    error
@@ -249,6 +251,18 @@ type InMemoryCoordinatorClient struct {
 
 func NewInMemoryCoordinatorClient() *InMemoryCoordinatorClient {
 	return &InMemoryCoordinatorClient{}
+}
+
+func (c *InMemoryCoordinatorClient) RegisterNode(_ context.Context, reg NodeRegistration) error {
+	if c.RegisterErr != nil {
+		return c.RegisterErr
+	}
+	c.Registrations = append(c.Registrations, NodeRegistration{
+		NodeID:         reg.NodeID,
+		RPCAddress:     reg.RPCAddress,
+		FailureDomains: cloneFailureDomains(reg.FailureDomains),
+	})
+	return nil
 }
 
 func (c *InMemoryCoordinatorClient) ReportReplicaReady(_ context.Context, slot int, _ uint64) error {

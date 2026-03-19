@@ -69,6 +69,14 @@ func (a *InMemoryNodeAdapter) BindServer(server *Server) {
 	a.sink = server
 }
 
+func (a *InMemoryNodeAdapter) RegisterNode(ctx context.Context, reg storage.NodeRegistration) error {
+	if a.sink == nil {
+		return fmt.Errorf("%w: coordinator server not bound", ErrStateMismatch)
+	}
+	_, err := a.sink.RegisterNode(ctx, reg)
+	return err
+}
+
 func (a *InMemoryNodeAdapter) EnableQueuedProgress() {
 	a.queued = true
 }

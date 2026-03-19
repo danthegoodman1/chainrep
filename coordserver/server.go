@@ -102,6 +102,7 @@ type ServerConfig struct {
 	LivenessPolicy         LivenessPolicy
 	Clock                  Clock
 	DispatchTimeout        time.Duration
+	DispatchRetryInterval  time.Duration
 	RecoveryCommandTimeout time.Duration
 	NodeClientFactory      NodeClientFactory
 	HA                     *HAConfig
@@ -127,6 +128,7 @@ type Server struct {
 	livenessPolicy         LivenessPolicy
 	clock                  Clock
 	dispatchTimeout        time.Duration
+	dispatchRetryInterval  time.Duration
 	recoveryCommandTimeout time.Duration
 	nodeClientFactory      NodeClientFactory
 	logger                 zerolog.Logger
@@ -139,6 +141,7 @@ type Server struct {
 
 const (
 	defaultDispatchTimeout        = 5 * time.Second
+	defaultDispatchRetryInterval  = 200 * time.Millisecond
 	defaultRecoveryCommandTimeout = 5 * time.Second
 )
 
@@ -177,6 +180,7 @@ func OpenWithConfig(
 		livenessPolicy:         cfg.LivenessPolicy,
 		clock:                  cfg.Clock,
 		dispatchTimeout:        cfg.DispatchTimeout,
+		dispatchRetryInterval:  cfg.DispatchRetryInterval,
 		recoveryCommandTimeout: cfg.RecoveryCommandTimeout,
 		nodeClientFactory:      cfg.NodeClientFactory,
 		logger:                 coordLoggerFromConfig(cfg.Logger),
@@ -190,6 +194,9 @@ func OpenWithConfig(
 	if server.dispatchTimeout == 0 {
 		server.dispatchTimeout = defaultDispatchTimeout
 	}
+	if server.dispatchRetryInterval == 0 {
+		server.dispatchRetryInterval = defaultDispatchRetryInterval
+	}
 	if server.recoveryCommandTimeout == 0 {
 		server.recoveryCommandTimeout = defaultRecoveryCommandTimeout
 	}
@@ -199,6 +206,8 @@ func OpenWithConfig(
 		if err := server.enableHA(*cfg.HA); err != nil {
 			return nil, fmt.Errorf("err in server.enableHA: %w", err)
 		}
+	} else {
+		server.startDispatchLoop()
 	}
 	return server, nil
 }
@@ -409,7 +418,6 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	}
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
-	delete(s.pending, slot)
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
@@ -494,7 +502,6 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 	}
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
-	delete(s.pending, slot)
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
@@ -514,14 +521,18 @@ func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeSta
 		return err
 	}
 	if _, ok := s.rt.Current().Cluster.NodesByID[status.NodeID]; !ok {
-		if _, fallbackOK := s.nodes[status.NodeID]; !fallbackOK {
-			return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
-		}
+		return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
 	}
 	current := s.rt.Current()
 	currentRecord, hadCurrentRecord := current.NodeLivenessByID[status.NodeID]
 	wasDead := currentRecord.State == coordruntime.NodeLivenessStateDead ||
 		nodeMarkedDead(current.Cluster, status.NodeID)
+	if nodeMarkedDead(current.Cluster, status.NodeID) {
+		if _, err := s.applyLivenessTransition(ctx, status.NodeID, coordruntime.NodeLivenessStateDead, s.clock.Now().UnixNano(), true); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %q", ErrUnknownNode, status.NodeID)
+	}
 	observedAt := s.clock.Now().UnixNano()
 	_, err := s.rt.Heartbeat(ctx, coordruntime.Command{
 		ID:              fmt.Sprintf("server-heartbeat-%s-%d", status.NodeID, observedAt),
@@ -538,6 +549,14 @@ func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeSta
 		return err
 	}
 	s.syncViewsFromRuntime()
+	s.rebuildRoutingSnapshot()
+	if err := s.reconcileAndDispatch(ctx); err != nil {
+		if errors.Is(err, ErrDispatchFailed) || errors.Is(err, ErrDispatchTimeout) {
+			s.logger.Warn().Err(err).Str("component", "coordserver").Str("node_id", status.NodeID).Msg("coordinator heartbeat triggered durable repair work that will retry later")
+		} else {
+			return err
+		}
+	}
 	if wasDead && s.liveness[status.NodeID].State != coordruntime.NodeLivenessStateDead {
 		deadActionFired := hadCurrentRecord && currentRecord.DeadActionFired
 		if nodeMarkedDead(current.Cluster, status.NodeID) {
@@ -700,6 +719,30 @@ func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRec
 	return nil
 }
 
+func (s *Server) RegisterNode(ctx context.Context, reg storage.NodeRegistration) (coordruntime.State, error) {
+	if s.ha != nil {
+		return s.applyHAWithPlanner(ctx, []string{reg.NodeID}, func(planner *Server) (coordruntime.State, error) {
+			return planner.RegisterNode(ctx, reg)
+		})
+	}
+	return s.applyMembershipMutation(ctx, coordruntime.Command{
+		ID:              fmt.Sprintf("server-register-%s-v%d", reg.NodeID, s.rt.Current().Version),
+		ExpectedVersion: s.rt.Current().Version,
+		Kind:            coordruntime.CommandKindReconfigure,
+		Reconfigure: &coordruntime.ReconfigureCommand{
+			Policy: s.lastPolicy,
+			Events: []coordinator.Event{{
+				Kind: coordinator.EventKindRegisterNode,
+				Node: coordinator.Node{
+					ID:             reg.NodeID,
+					RPCAddress:     reg.RPCAddress,
+					FailureDomains: cloneFailureDomains(reg.FailureDomains),
+				},
+			}},
+		},
+	}, coordinator.EventKindRegisterNode)
+}
+
 func (s *Server) applyMembershipMutation(
 	ctx context.Context,
 	cmd coordruntime.Command,
@@ -721,7 +764,7 @@ func (s *Server) applyMembershipMutation(
 		return coordruntime.State{}, err
 	}
 
-	plan, state, err := s.rt.Reconfigure(ctx, cmd)
+	_, state, err := s.rt.Reconfigure(ctx, cmd)
 	if err != nil {
 		err = fmt.Errorf("err in s.rt.Reconfigure: %w", err)
 		s.observeCommandResult(string(expectedEvent), err)
@@ -730,9 +773,7 @@ func (s *Server) applyMembershipMutation(
 	}
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
-	s.lastPolicy = cmd.Reconfigure.Policy
-
-	if err := s.dispatchPlan(ctx, state.Version, plan); err != nil {
+	if err := s.dispatchRuntimeOutbox(ctx); err != nil {
 		s.observeCommandResult(string(expectedEvent), err)
 		return coordruntime.State{}, err
 	}
@@ -760,16 +801,105 @@ func (s *Server) reconcileAndDispatch(ctx context.Context) error {
 			Policy: s.lastPolicy,
 		},
 	}
-	plan, state, err := s.rt.Reconfigure(ctx, cmd)
+	_, _, err = s.rt.Reconfigure(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("err in s.rt.Reconcile: %w", err)
 	}
 	s.syncViewsFromRuntime()
 	s.rebuildRoutingSnapshot()
-	if err := s.dispatchPlan(ctx, state.Version, plan); err != nil {
+	if err := s.dispatchRuntimeOutbox(ctx); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) startDispatchLoop() {
+	go func() {
+		ticker := time.NewTicker(s.dispatchRetryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.closeCh:
+				return
+			case <-ticker.C:
+				if err := s.dispatchRuntimeOutbox(context.Background()); err != nil && !errors.Is(err, ErrDispatchFailed) && !errors.Is(err, ErrDispatchTimeout) {
+					s.logger.Warn().Err(err).Str("component", "coordserver").Msg("non-ha dispatch loop observed error")
+				}
+			}
+		}
+	}()
+}
+
+func (s *Server) dispatchRuntimeOutbox(ctx context.Context) error {
+	entries := cloneRuntimeOutbox(s.rt.Current().Outbox)
+	for _, entry := range entries {
+		if err := s.dispatchRuntimeOutboxEntry(ctx, entry); err != nil {
+			return err
+		}
+		if _, err := s.rt.AcknowledgeOutbox(ctx, coordruntime.Command{
+			ID:              fmt.Sprintf("server-ack-outbox-%s-v%d", entry.ID, s.rt.Current().Version),
+			ExpectedVersion: s.rt.Current().Version,
+			Kind:            coordruntime.CommandKindAcknowledgeOutbox,
+			AcknowledgeOutbox: &coordruntime.AcknowledgeOutboxCommand{
+				EntryID: entry.ID,
+			},
+		}); err != nil {
+			return fmt.Errorf("err in s.rt.AcknowledgeOutbox: %w", err)
+		}
+		s.syncViewsFromRuntime()
+	}
+	s.rebuildRoutingSnapshot()
+	return nil
+}
+
+func (s *Server) dispatchRuntimeOutboxEntry(ctx context.Context, entry coordruntime.OutboxEntry) error {
+	start := time.Now()
+	client, err := s.clientForNodeID(entry.NodeID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrDispatchFailed, err)
+	}
+	switch entry.Kind {
+	case coordruntime.OutboxCommandKindAddReplicaAsTail:
+		dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+		defer cancel()
+		if err := client.AddReplicaAsTail(dispatchCtx, storage.AddReplicaAsTailCommand{Assignment: entry.Assignment}); err != nil {
+			s.observeDispatchResult(string(entry.Kind), start, err)
+			if isContextTimeoutOrCancel(err) {
+				return fmt.Errorf("%w: err in node[%q].AddReplicaAsTail: %w", ErrDispatchTimeout, entry.NodeID, err)
+			}
+			return fmt.Errorf("%w: err in node[%q].AddReplicaAsTail: %v", ErrDispatchFailed, entry.NodeID, err)
+		}
+	case coordruntime.OutboxCommandKindMarkReplicaLeaving:
+		dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+		defer cancel()
+		if err := client.MarkReplicaLeaving(dispatchCtx, storage.MarkReplicaLeavingCommand{Slot: entry.Slot}); err != nil {
+			s.observeDispatchResult(string(entry.Kind), start, err)
+			if isContextTimeoutOrCancel(err) {
+				return fmt.Errorf("%w: err in node[%q].MarkReplicaLeaving: %w", ErrDispatchTimeout, entry.NodeID, err)
+			}
+			return fmt.Errorf("%w: err in node[%q].MarkReplicaLeaving: %v", ErrDispatchFailed, entry.NodeID, err)
+		}
+	case coordruntime.OutboxCommandKindUpdateChainPeers:
+		dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+		defer cancel()
+		if err := client.UpdateChainPeers(dispatchCtx, storage.UpdateChainPeersCommand{Assignment: entry.Assignment}); err != nil {
+			s.observeDispatchResult(string(entry.Kind), start, err)
+			if isContextTimeoutOrCancel(err) {
+				return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %w", ErrDispatchTimeout, entry.NodeID, err)
+			}
+			return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %v", ErrDispatchFailed, entry.NodeID, err)
+		}
+	default:
+		return fmt.Errorf("%w: unsupported outbox command %q", ErrDispatchFailed, entry.Kind)
+	}
+	s.observeDispatchResult(string(entry.Kind), start, nil)
+	return nil
+}
+
+func cloneRuntimeOutbox(current []coordruntime.OutboxEntry) []coordruntime.OutboxEntry {
+	cloned := make([]coordruntime.OutboxEntry, len(current))
+	copy(cloned, current)
+	return cloned
 }
 
 func (s *Server) dispatchPlan(ctx context.Context, chainVersion uint64, plan coordinator.ReconfigurationPlan) error {
@@ -1437,14 +1567,25 @@ func (s *Server) syncViewsFromRuntime() {
 	current := s.rt.Current()
 	s.heartbeats = make(map[string]storage.NodeStatus, len(current.NodeLivenessByID))
 	s.liveness = make(map[string]coordruntime.NodeLivenessRecord, len(current.NodeLivenessByID))
+	s.pending = make(map[int]PendingWork, len(current.PendingBySlot))
 	s.completed = make(map[int][]coordruntime.CompletedProgressRecord, len(current.CompletedProgressBySlot))
 	for nodeID, record := range current.NodeLivenessByID {
 		s.heartbeats[nodeID] = cloneNodeStatus(record.LastStatus)
 		s.liveness[nodeID] = cloneLivenessRecord(record)
 	}
+	for slot, pending := range current.PendingBySlot {
+		s.pending[slot] = PendingWork{
+			Slot:        pending.Slot,
+			NodeID:      pending.NodeID,
+			Kind:        pendingKind(pending.Kind),
+			SlotVersion: pending.SlotVersion,
+			CommandID:   pending.CommandID,
+		}
+	}
 	for slot, records := range current.CompletedProgressBySlot {
 		s.completed[slot] = append([]coordruntime.CompletedProgressRecord(nil), records...)
 	}
+	s.lastPolicy = current.LastPolicy
 }
 
 func validateServerConfig(cfg ServerConfig) error {
@@ -1458,6 +1599,9 @@ func validateServerConfig(cfg ServerConfig) error {
 	}
 	if cfg.DispatchTimeout < 0 {
 		return fmt.Errorf("%w: dispatch timeout must be >= 0", ErrInvalidServerConfig)
+	}
+	if cfg.DispatchRetryInterval < 0 {
+		return fmt.Errorf("%w: dispatch retry interval must be >= 0", ErrInvalidServerConfig)
 	}
 	if cfg.RecoveryCommandTimeout < 0 {
 		return fmt.Errorf("%w: recovery command timeout must be >= 0", ErrInvalidServerConfig)
@@ -1518,6 +1662,14 @@ func cloneNodeStatus(status storage.NodeStatus) storage.NodeStatus {
 		CatchingUpCount: status.CatchingUpCount,
 		LeavingCount:    status.LeavingCount,
 	}
+}
+
+func cloneFailureDomains(domains map[string]string) map[string]string {
+	cloned := make(map[string]string, len(domains))
+	for key, value := range domains {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func nodeMarkedDead(cluster coordinator.ClusterState, nodeID string) bool {

@@ -303,6 +303,10 @@ type updatingCoordinatorClient struct {
 	node *Node
 }
 
+func (c *updatingCoordinatorClient) RegisterNode(context.Context, NodeRegistration) error {
+	return nil
+}
+
 func (c *updatingCoordinatorClient) ReportReplicaReady(ctx context.Context, slot int, _ uint64) error {
 	return c.node.UpdateChainPeers(ctx, UpdateChainPeersCommand{
 		Assignment: ReplicaAssignment{

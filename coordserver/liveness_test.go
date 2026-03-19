@@ -18,6 +18,12 @@ func TestHeartbeatPersistsHealthyLiveness(t *testing.T) {
 		LivenessPolicy: LivenessPolicy{SuspectAfter: 5 * time.Second, DeadAfter: 10 * time.Second},
 		Clock:          clock,
 	})
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{NodeID: "a"}); err != nil {
+		t.Fatalf("RegisterNode returned error: %v", err)
+	}
 
 	status := storage.NodeStatus{NodeID: "a", ReplicaCount: 2, ActiveCount: 1}
 	if err := server.ReportNodeHeartbeat(ctx, status); err != nil {
@@ -120,11 +126,11 @@ func TestDeadTransitionTriggersRepairAndDoesNotDuplicate(t *testing.T) {
 	if err := server.EvaluateLiveness(ctx); err != nil {
 		t.Fatalf("second EvaluateLiveness returned error: %v", err)
 	}
-	if err := h.adapters["b"].Node().ReportHeartbeat(ctx); err != nil {
-		t.Fatalf("ReportHeartbeat after dead returned error: %v", err)
+	if err := h.adapters["b"].Node().ReportHeartbeat(ctx); err == nil {
+		t.Fatal("ReportHeartbeat after dead unexpectedly succeeded")
 	}
-	if got, want := server.Liveness()["b"].State, coordruntime.NodeLivenessStateDead; got != want {
-		t.Fatalf("dead state after later heartbeat = %q, want %q", got, want)
+	if !nodeMarkedDead(server.Current().Cluster, "b") {
+		t.Fatal("node b was unexpectedly allowed back into cluster membership")
 	}
 	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
 		t.Fatalf("ActivateReplica returned error: %v", err)

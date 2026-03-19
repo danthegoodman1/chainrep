@@ -647,6 +647,50 @@ func (x *MembershipMutationRequest) GetNodeId() string {
 	return ""
 }
 
+type RegisterNodeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Node          *Node                  `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterNodeRequest) Reset() {
+	*x = RegisterNodeRequest{}
+	mi := &file_chainrep_v1_transport_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterNodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterNodeRequest) ProtoMessage() {}
+
+func (x *RegisterNodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chainrep_v1_transport_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterNodeRequest.ProtoReflect.Descriptor instead.
+func (*RegisterNodeRequest) Descriptor() ([]byte, []int) {
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RegisterNodeRequest) GetNode() *Node {
+	if x != nil {
+		return x.Node
+	}
+	return nil
+}
+
 type ServerState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       uint64                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
@@ -656,7 +700,7 @@ type ServerState struct {
 
 func (x *ServerState) Reset() {
 	*x = ServerState{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[10]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -668,7 +712,7 @@ func (x *ServerState) String() string {
 func (*ServerState) ProtoMessage() {}
 
 func (x *ServerState) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[10]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -681,7 +725,7 @@ func (x *ServerState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerState.ProtoReflect.Descriptor instead.
 func (*ServerState) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{10}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ServerState) GetVersion() uint64 {
@@ -699,7 +743,7 @@ type RoutingSnapshotRequest struct {
 
 func (x *RoutingSnapshotRequest) Reset() {
 	*x = RoutingSnapshotRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[11]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -711,7 +755,7 @@ func (x *RoutingSnapshotRequest) String() string {
 func (*RoutingSnapshotRequest) ProtoMessage() {}
 
 func (x *RoutingSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[11]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -724,7 +768,7 @@ func (x *RoutingSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoutingSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*RoutingSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{11}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{12}
 }
 
 type SlotRoute struct {
@@ -743,7 +787,7 @@ type SlotRoute struct {
 
 func (x *SlotRoute) Reset() {
 	*x = SlotRoute{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[12]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +799,7 @@ func (x *SlotRoute) String() string {
 func (*SlotRoute) ProtoMessage() {}
 
 func (x *SlotRoute) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[12]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +812,7 @@ func (x *SlotRoute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SlotRoute.ProtoReflect.Descriptor instead.
 func (*SlotRoute) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{12}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SlotRoute) GetSlot() int32 {
@@ -838,7 +882,7 @@ type RoutingSnapshotResponse struct {
 
 func (x *RoutingSnapshotResponse) Reset() {
 	*x = RoutingSnapshotResponse{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[13]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -850,7 +894,7 @@ func (x *RoutingSnapshotResponse) String() string {
 func (*RoutingSnapshotResponse) ProtoMessage() {}
 
 func (x *RoutingSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[13]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -863,7 +907,7 @@ func (x *RoutingSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoutingSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*RoutingSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{13}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RoutingSnapshotResponse) GetVersion() uint64 {
@@ -899,7 +943,7 @@ type ReplicaReadyReport struct {
 
 func (x *ReplicaReadyReport) Reset() {
 	*x = ReplicaReadyReport{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[14]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +955,7 @@ func (x *ReplicaReadyReport) String() string {
 func (*ReplicaReadyReport) ProtoMessage() {}
 
 func (x *ReplicaReadyReport) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[14]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +968,7 @@ func (x *ReplicaReadyReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaReadyReport.ProtoReflect.Descriptor instead.
 func (*ReplicaReadyReport) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{14}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReplicaReadyReport) GetNodeId() string {
@@ -967,7 +1011,7 @@ type ReplicaRemovedReport struct {
 
 func (x *ReplicaRemovedReport) Reset() {
 	*x = ReplicaRemovedReport{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[15]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -979,7 +1023,7 @@ func (x *ReplicaRemovedReport) String() string {
 func (*ReplicaRemovedReport) ProtoMessage() {}
 
 func (x *ReplicaRemovedReport) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[15]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -992,7 +1036,7 @@ func (x *ReplicaRemovedReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaRemovedReport.ProtoReflect.Descriptor instead.
 func (*ReplicaRemovedReport) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{15}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ReplicaRemovedReport) GetNodeId() string {
@@ -1036,7 +1080,7 @@ type NodeStatus struct {
 
 func (x *NodeStatus) Reset() {
 	*x = NodeStatus{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[16]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1048,7 +1092,7 @@ func (x *NodeStatus) String() string {
 func (*NodeStatus) ProtoMessage() {}
 
 func (x *NodeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[16]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1061,7 +1105,7 @@ func (x *NodeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
 func (*NodeStatus) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{16}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *NodeStatus) GetNodeId() string {
@@ -1111,7 +1155,7 @@ type ChainPeers struct {
 
 func (x *ChainPeers) Reset() {
 	*x = ChainPeers{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[17]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1123,7 +1167,7 @@ func (x *ChainPeers) String() string {
 func (*ChainPeers) ProtoMessage() {}
 
 func (x *ChainPeers) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[17]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1136,7 +1180,7 @@ func (x *ChainPeers) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChainPeers.ProtoReflect.Descriptor instead.
 func (*ChainPeers) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{17}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ChainPeers) GetPredecessorNodeId() string {
@@ -1179,7 +1223,7 @@ type ReplicaAssignment struct {
 
 func (x *ReplicaAssignment) Reset() {
 	*x = ReplicaAssignment{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[18]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1191,7 +1235,7 @@ func (x *ReplicaAssignment) String() string {
 func (*ReplicaAssignment) ProtoMessage() {}
 
 func (x *ReplicaAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[18]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1204,7 +1248,7 @@ func (x *ReplicaAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaAssignment.ProtoReflect.Descriptor instead.
 func (*ReplicaAssignment) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{18}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ReplicaAssignment) GetSlot() int32 {
@@ -1247,7 +1291,7 @@ type RecoveredReplica struct {
 
 func (x *RecoveredReplica) Reset() {
 	*x = RecoveredReplica{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[19]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1259,7 +1303,7 @@ func (x *RecoveredReplica) String() string {
 func (*RecoveredReplica) ProtoMessage() {}
 
 func (x *RecoveredReplica) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[19]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1272,7 +1316,7 @@ func (x *RecoveredReplica) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoveredReplica.ProtoReflect.Descriptor instead.
 func (*RecoveredReplica) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{19}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RecoveredReplica) GetAssignment() *ReplicaAssignment {
@@ -1313,7 +1357,7 @@ type NodeRecoveryReport struct {
 
 func (x *NodeRecoveryReport) Reset() {
 	*x = NodeRecoveryReport{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[20]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1325,7 +1369,7 @@ func (x *NodeRecoveryReport) String() string {
 func (*NodeRecoveryReport) ProtoMessage() {}
 
 func (x *NodeRecoveryReport) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[20]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1338,7 +1382,7 @@ func (x *NodeRecoveryReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeRecoveryReport.ProtoReflect.Descriptor instead.
 func (*NodeRecoveryReport) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{20}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *NodeRecoveryReport) GetNodeId() string {
@@ -1365,7 +1409,7 @@ type AddReplicaAsTailCommand struct {
 
 func (x *AddReplicaAsTailCommand) Reset() {
 	*x = AddReplicaAsTailCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[21]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1377,7 +1421,7 @@ func (x *AddReplicaAsTailCommand) String() string {
 func (*AddReplicaAsTailCommand) ProtoMessage() {}
 
 func (x *AddReplicaAsTailCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[21]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1390,7 +1434,7 @@ func (x *AddReplicaAsTailCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddReplicaAsTailCommand.ProtoReflect.Descriptor instead.
 func (*AddReplicaAsTailCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{21}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *AddReplicaAsTailCommand) GetAssignment() *ReplicaAssignment {
@@ -1417,7 +1461,7 @@ type ActivateReplicaCommand struct {
 
 func (x *ActivateReplicaCommand) Reset() {
 	*x = ActivateReplicaCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[22]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1429,7 +1473,7 @@ func (x *ActivateReplicaCommand) String() string {
 func (*ActivateReplicaCommand) ProtoMessage() {}
 
 func (x *ActivateReplicaCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[22]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1442,7 +1486,7 @@ func (x *ActivateReplicaCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivateReplicaCommand.ProtoReflect.Descriptor instead.
 func (*ActivateReplicaCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{22}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ActivateReplicaCommand) GetSlot() int32 {
@@ -1469,7 +1513,7 @@ type MarkReplicaLeavingCommand struct {
 
 func (x *MarkReplicaLeavingCommand) Reset() {
 	*x = MarkReplicaLeavingCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[23]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1481,7 +1525,7 @@ func (x *MarkReplicaLeavingCommand) String() string {
 func (*MarkReplicaLeavingCommand) ProtoMessage() {}
 
 func (x *MarkReplicaLeavingCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[23]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1494,7 +1538,7 @@ func (x *MarkReplicaLeavingCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MarkReplicaLeavingCommand.ProtoReflect.Descriptor instead.
 func (*MarkReplicaLeavingCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{23}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *MarkReplicaLeavingCommand) GetSlot() int32 {
@@ -1521,7 +1565,7 @@ type RemoveReplicaCommand struct {
 
 func (x *RemoveReplicaCommand) Reset() {
 	*x = RemoveReplicaCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[24]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1533,7 +1577,7 @@ func (x *RemoveReplicaCommand) String() string {
 func (*RemoveReplicaCommand) ProtoMessage() {}
 
 func (x *RemoveReplicaCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[24]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1546,7 +1590,7 @@ func (x *RemoveReplicaCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveReplicaCommand.ProtoReflect.Descriptor instead.
 func (*RemoveReplicaCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{24}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *RemoveReplicaCommand) GetSlot() int32 {
@@ -1573,7 +1617,7 @@ type UpdateChainPeersCommand struct {
 
 func (x *UpdateChainPeersCommand) Reset() {
 	*x = UpdateChainPeersCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[25]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1585,7 +1629,7 @@ func (x *UpdateChainPeersCommand) String() string {
 func (*UpdateChainPeersCommand) ProtoMessage() {}
 
 func (x *UpdateChainPeersCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[25]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1598,7 +1642,7 @@ func (x *UpdateChainPeersCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateChainPeersCommand.ProtoReflect.Descriptor instead.
 func (*UpdateChainPeersCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{25}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *UpdateChainPeersCommand) GetAssignment() *ReplicaAssignment {
@@ -1625,7 +1669,7 @@ type ResumeRecoveredReplicaCommand struct {
 
 func (x *ResumeRecoveredReplicaCommand) Reset() {
 	*x = ResumeRecoveredReplicaCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[26]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1637,7 +1681,7 @@ func (x *ResumeRecoveredReplicaCommand) String() string {
 func (*ResumeRecoveredReplicaCommand) ProtoMessage() {}
 
 func (x *ResumeRecoveredReplicaCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[26]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1650,7 +1694,7 @@ func (x *ResumeRecoveredReplicaCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeRecoveredReplicaCommand.ProtoReflect.Descriptor instead.
 func (*ResumeRecoveredReplicaCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{26}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ResumeRecoveredReplicaCommand) GetAssignment() *ReplicaAssignment {
@@ -1678,7 +1722,7 @@ type RecoverReplicaCommand struct {
 
 func (x *RecoverReplicaCommand) Reset() {
 	*x = RecoverReplicaCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[27]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1690,7 +1734,7 @@ func (x *RecoverReplicaCommand) String() string {
 func (*RecoverReplicaCommand) ProtoMessage() {}
 
 func (x *RecoverReplicaCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[27]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1703,7 +1747,7 @@ func (x *RecoverReplicaCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverReplicaCommand.ProtoReflect.Descriptor instead.
 func (*RecoverReplicaCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{27}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *RecoverReplicaCommand) GetAssignment() *ReplicaAssignment {
@@ -1737,7 +1781,7 @@ type DropRecoveredReplicaCommand struct {
 
 func (x *DropRecoveredReplicaCommand) Reset() {
 	*x = DropRecoveredReplicaCommand{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[28]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1749,7 +1793,7 @@ func (x *DropRecoveredReplicaCommand) String() string {
 func (*DropRecoveredReplicaCommand) ProtoMessage() {}
 
 func (x *DropRecoveredReplicaCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[28]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1762,7 +1806,7 @@ func (x *DropRecoveredReplicaCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropRecoveredReplicaCommand.ProtoReflect.Descriptor instead.
 func (*DropRecoveredReplicaCommand) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{28}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *DropRecoveredReplicaCommand) GetSlot() int32 {
@@ -1790,7 +1834,7 @@ type ClientGetRequest struct {
 
 func (x *ClientGetRequest) Reset() {
 	*x = ClientGetRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[29]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1802,7 +1846,7 @@ func (x *ClientGetRequest) String() string {
 func (*ClientGetRequest) ProtoMessage() {}
 
 func (x *ClientGetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[29]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1815,7 +1859,7 @@ func (x *ClientGetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientGetRequest.ProtoReflect.Descriptor instead.
 func (*ClientGetRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{29}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ClientGetRequest) GetSlot() int32 {
@@ -1852,7 +1896,7 @@ type ClientPutRequest struct {
 
 func (x *ClientPutRequest) Reset() {
 	*x = ClientPutRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[30]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1864,7 +1908,7 @@ func (x *ClientPutRequest) String() string {
 func (*ClientPutRequest) ProtoMessage() {}
 
 func (x *ClientPutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[30]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1877,7 +1921,7 @@ func (x *ClientPutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientPutRequest.ProtoReflect.Descriptor instead.
 func (*ClientPutRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{30}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ClientPutRequest) GetSlot() int32 {
@@ -1927,7 +1971,7 @@ type ClientDeleteRequest struct {
 
 func (x *ClientDeleteRequest) Reset() {
 	*x = ClientDeleteRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[31]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1939,7 +1983,7 @@ func (x *ClientDeleteRequest) String() string {
 func (*ClientDeleteRequest) ProtoMessage() {}
 
 func (x *ClientDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[31]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1952,7 +1996,7 @@ func (x *ClientDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientDeleteRequest.ProtoReflect.Descriptor instead.
 func (*ClientDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{31}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ClientDeleteRequest) GetSlot() int32 {
@@ -1995,7 +2039,7 @@ type CommitResult struct {
 
 func (x *CommitResult) Reset() {
 	*x = CommitResult{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[32]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2007,7 +2051,7 @@ func (x *CommitResult) String() string {
 func (*CommitResult) ProtoMessage() {}
 
 func (x *CommitResult) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[32]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2020,7 +2064,7 @@ func (x *CommitResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitResult.ProtoReflect.Descriptor instead.
 func (*CommitResult) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{32}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *CommitResult) GetSlot() int32 {
@@ -2064,7 +2108,7 @@ type ReadResult struct {
 
 func (x *ReadResult) Reset() {
 	*x = ReadResult{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[33]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2076,7 +2120,7 @@ func (x *ReadResult) String() string {
 func (*ReadResult) ProtoMessage() {}
 
 func (x *ReadResult) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[33]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2089,7 +2133,7 @@ func (x *ReadResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadResult.ProtoReflect.Descriptor instead.
 func (*ReadResult) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{33}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ReadResult) GetSlot() int32 {
@@ -2141,7 +2185,7 @@ type WriteOperation struct {
 
 func (x *WriteOperation) Reset() {
 	*x = WriteOperation{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[34]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2153,7 +2197,7 @@ func (x *WriteOperation) String() string {
 func (*WriteOperation) ProtoMessage() {}
 
 func (x *WriteOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[34]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2166,7 +2210,7 @@ func (x *WriteOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteOperation.ProtoReflect.Descriptor instead.
 func (*WriteOperation) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{34}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *WriteOperation) GetSlot() int32 {
@@ -2221,7 +2265,7 @@ type ForwardWriteRequest struct {
 
 func (x *ForwardWriteRequest) Reset() {
 	*x = ForwardWriteRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[35]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2233,7 +2277,7 @@ func (x *ForwardWriteRequest) String() string {
 func (*ForwardWriteRequest) ProtoMessage() {}
 
 func (x *ForwardWriteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[35]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2246,7 +2290,7 @@ func (x *ForwardWriteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardWriteRequest.ProtoReflect.Descriptor instead.
 func (*ForwardWriteRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{35}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ForwardWriteRequest) GetOperation() *WriteOperation {
@@ -2274,7 +2318,7 @@ type CommitWriteRequest struct {
 
 func (x *CommitWriteRequest) Reset() {
 	*x = CommitWriteRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[36]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2286,7 +2330,7 @@ func (x *CommitWriteRequest) String() string {
 func (*CommitWriteRequest) ProtoMessage() {}
 
 func (x *CommitWriteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[36]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2299,7 +2343,7 @@ func (x *CommitWriteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitWriteRequest.ProtoReflect.Descriptor instead.
 func (*CommitWriteRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{36}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *CommitWriteRequest) GetSlot() int32 {
@@ -2332,7 +2376,7 @@ type FetchSnapshotRequest struct {
 
 func (x *FetchSnapshotRequest) Reset() {
 	*x = FetchSnapshotRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[37]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2344,7 +2388,7 @@ func (x *FetchSnapshotRequest) String() string {
 func (*FetchSnapshotRequest) ProtoMessage() {}
 
 func (x *FetchSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[37]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2357,7 +2401,7 @@ func (x *FetchSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*FetchSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{37}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *FetchSnapshotRequest) GetSlot() int32 {
@@ -2378,7 +2422,7 @@ type SnapshotEntry struct {
 
 func (x *SnapshotEntry) Reset() {
 	*x = SnapshotEntry{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[38]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2390,7 +2434,7 @@ func (x *SnapshotEntry) String() string {
 func (*SnapshotEntry) ProtoMessage() {}
 
 func (x *SnapshotEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[38]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2403,7 +2447,7 @@ func (x *SnapshotEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotEntry.ProtoReflect.Descriptor instead.
 func (*SnapshotEntry) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{38}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SnapshotEntry) GetKey() string {
@@ -2436,7 +2480,7 @@ type FetchCommittedSequenceRequest struct {
 
 func (x *FetchCommittedSequenceRequest) Reset() {
 	*x = FetchCommittedSequenceRequest{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[39]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2448,7 +2492,7 @@ func (x *FetchCommittedSequenceRequest) String() string {
 func (*FetchCommittedSequenceRequest) ProtoMessage() {}
 
 func (x *FetchCommittedSequenceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[39]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2461,7 +2505,7 @@ func (x *FetchCommittedSequenceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchCommittedSequenceRequest.ProtoReflect.Descriptor instead.
 func (*FetchCommittedSequenceRequest) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{39}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *FetchCommittedSequenceRequest) GetSlot() int32 {
@@ -2480,7 +2524,7 @@ type FetchCommittedSequenceResponse struct {
 
 func (x *FetchCommittedSequenceResponse) Reset() {
 	*x = FetchCommittedSequenceResponse{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[40]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2492,7 +2536,7 @@ func (x *FetchCommittedSequenceResponse) String() string {
 func (*FetchCommittedSequenceResponse) ProtoMessage() {}
 
 func (x *FetchCommittedSequenceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[40]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2505,7 +2549,7 @@ func (x *FetchCommittedSequenceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchCommittedSequenceResponse.ProtoReflect.Descriptor instead.
 func (*FetchCommittedSequenceResponse) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{40}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *FetchCommittedSequenceResponse) GetSequence() uint64 {
@@ -2529,7 +2573,7 @@ type RoutingMismatchDetail struct {
 
 func (x *RoutingMismatchDetail) Reset() {
 	*x = RoutingMismatchDetail{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[41]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2541,7 +2585,7 @@ func (x *RoutingMismatchDetail) String() string {
 func (*RoutingMismatchDetail) ProtoMessage() {}
 
 func (x *RoutingMismatchDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[41]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2554,7 +2598,7 @@ func (x *RoutingMismatchDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoutingMismatchDetail.ProtoReflect.Descriptor instead.
 func (*RoutingMismatchDetail) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{41}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *RoutingMismatchDetail) GetSlot() int32 {
@@ -2611,7 +2655,7 @@ type AmbiguousWriteDetail struct {
 
 func (x *AmbiguousWriteDetail) Reset() {
 	*x = AmbiguousWriteDetail{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[42]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2623,7 +2667,7 @@ func (x *AmbiguousWriteDetail) String() string {
 func (*AmbiguousWriteDetail) ProtoMessage() {}
 
 func (x *AmbiguousWriteDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[42]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2636,7 +2680,7 @@ func (x *AmbiguousWriteDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AmbiguousWriteDetail.ProtoReflect.Descriptor instead.
 func (*AmbiguousWriteDetail) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{42}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *AmbiguousWriteDetail) GetSlot() int32 {
@@ -2680,7 +2724,7 @@ type ConditionFailedDetail struct {
 
 func (x *ConditionFailedDetail) Reset() {
 	*x = ConditionFailedDetail{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[43]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2692,7 +2736,7 @@ func (x *ConditionFailedDetail) String() string {
 func (*ConditionFailedDetail) ProtoMessage() {}
 
 func (x *ConditionFailedDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[43]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2705,7 +2749,7 @@ func (x *ConditionFailedDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConditionFailedDetail.ProtoReflect.Descriptor instead.
 func (*ConditionFailedDetail) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{43}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ConditionFailedDetail) GetSlot() int32 {
@@ -2756,7 +2800,7 @@ type BackpressureDetail struct {
 
 func (x *BackpressureDetail) Reset() {
 	*x = BackpressureDetail{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[44]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2768,7 +2812,7 @@ func (x *BackpressureDetail) String() string {
 func (*BackpressureDetail) ProtoMessage() {}
 
 func (x *BackpressureDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[44]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2781,7 +2825,7 @@ func (x *BackpressureDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackpressureDetail.ProtoReflect.Descriptor instead.
 func (*BackpressureDetail) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{44}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *BackpressureDetail) GetSlot() int32 {
@@ -2831,7 +2875,7 @@ type DomainErrorDetail struct {
 
 func (x *DomainErrorDetail) Reset() {
 	*x = DomainErrorDetail{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[45]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2843,7 +2887,7 @@ func (x *DomainErrorDetail) String() string {
 func (*DomainErrorDetail) ProtoMessage() {}
 
 func (x *DomainErrorDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[45]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2856,7 +2900,7 @@ func (x *DomainErrorDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DomainErrorDetail.ProtoReflect.Descriptor instead.
 func (*DomainErrorDetail) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{45}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *DomainErrorDetail) GetKind() string {
@@ -2896,7 +2940,7 @@ type NotLeaderDetail struct {
 
 func (x *NotLeaderDetail) Reset() {
 	*x = NotLeaderDetail{}
-	mi := &file_chainrep_v1_transport_proto_msgTypes[46]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2908,7 +2952,7 @@ func (x *NotLeaderDetail) String() string {
 func (*NotLeaderDetail) ProtoMessage() {}
 
 func (x *NotLeaderDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_chainrep_v1_transport_proto_msgTypes[46]
+	mi := &file_chainrep_v1_transport_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2921,7 +2965,7 @@ func (x *NotLeaderDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotLeaderDetail.ProtoReflect.Descriptor instead.
 func (*NotLeaderDetail) Descriptor() ([]byte, []int) {
-	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{46}
+	return file_chainrep_v1_transport_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *NotLeaderDetail) GetLeaderEndpoint() string {
@@ -2976,7 +3020,9 @@ const file_chainrep_v1_transport_proto_rawDesc = "" +
 	"\x10expected_version\x18\x02 \x01(\x04R\x0fexpectedVersion\x12,\n" +
 	"\x12max_changed_chains\x18\x03 \x01(\x05R\x10maxChangedChains\x12%\n" +
 	"\x04node\x18\x04 \x01(\v2\x11.chainrep.v1.NodeR\x04node\x12\x17\n" +
-	"\anode_id\x18\x05 \x01(\tR\x06nodeId\"'\n" +
+	"\anode_id\x18\x05 \x01(\tR\x06nodeId\"<\n" +
+	"\x13RegisterNodeRequest\x12%\n" +
+	"\x04node\x18\x01 \x01(\v2\x11.chainrep.v1.NodeR\x04node\"'\n" +
 	"\vServerState\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\"\x18\n" +
 	"\x16RoutingSnapshotRequest\"\x8a\x02\n" +
@@ -3163,9 +3209,10 @@ const file_chainrep_v1_transport_proto_rawDesc = "" +
 	"\x16COMPARISON_OPERATOR_LT\x10\x02\x12\x1b\n" +
 	"\x17COMPARISON_OPERATOR_LTE\x10\x03\x12\x1a\n" +
 	"\x16COMPARISON_OPERATOR_GT\x10\x04\x12\x1b\n" +
-	"\x17COMPARISON_OPERATOR_GTE\x10\x052\xa3\x06\n" +
+	"\x17COMPARISON_OPERATOR_GTE\x10\x052\xef\x06\n" +
 	"\x12CoordinatorService\x12D\n" +
-	"\tBootstrap\x12\x1d.chainrep.v1.BootstrapRequest\x1a\x18.chainrep.v1.ServerState\x12K\n" +
+	"\tBootstrap\x12\x1d.chainrep.v1.BootstrapRequest\x1a\x18.chainrep.v1.ServerState\x12J\n" +
+	"\fRegisterNode\x12 .chainrep.v1.RegisterNodeRequest\x1a\x18.chainrep.v1.ServerState\x12K\n" +
 	"\aAddNode\x12&.chainrep.v1.MembershipMutationRequest\x1a\x18.chainrep.v1.ServerState\x12R\n" +
 	"\x0eBeginDrainNode\x12&.chainrep.v1.MembershipMutationRequest\x1a\x18.chainrep.v1.ServerState\x12P\n" +
 	"\fMarkNodeDead\x12&.chainrep.v1.MembershipMutationRequest\x1a\x18.chainrep.v1.ServerState\x12\\\n" +
@@ -3205,7 +3252,7 @@ func file_chainrep_v1_transport_proto_rawDescGZIP() []byte {
 }
 
 var file_chainrep_v1_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_chainrep_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_chainrep_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
 var file_chainrep_v1_transport_proto_goTypes = []any{
 	(ComparisonOperator)(0),                // 0: chainrep.v1.ComparisonOperator
 	(*Empty)(nil),                          // 1: chainrep.v1.Empty
@@ -3218,43 +3265,44 @@ var file_chainrep_v1_transport_proto_goTypes = []any{
 	(*Node)(nil),                           // 8: chainrep.v1.Node
 	(*BootstrapRequest)(nil),               // 9: chainrep.v1.BootstrapRequest
 	(*MembershipMutationRequest)(nil),      // 10: chainrep.v1.MembershipMutationRequest
-	(*ServerState)(nil),                    // 11: chainrep.v1.ServerState
-	(*RoutingSnapshotRequest)(nil),         // 12: chainrep.v1.RoutingSnapshotRequest
-	(*SlotRoute)(nil),                      // 13: chainrep.v1.SlotRoute
-	(*RoutingSnapshotResponse)(nil),        // 14: chainrep.v1.RoutingSnapshotResponse
-	(*ReplicaReadyReport)(nil),             // 15: chainrep.v1.ReplicaReadyReport
-	(*ReplicaRemovedReport)(nil),           // 16: chainrep.v1.ReplicaRemovedReport
-	(*NodeStatus)(nil),                     // 17: chainrep.v1.NodeStatus
-	(*ChainPeers)(nil),                     // 18: chainrep.v1.ChainPeers
-	(*ReplicaAssignment)(nil),              // 19: chainrep.v1.ReplicaAssignment
-	(*RecoveredReplica)(nil),               // 20: chainrep.v1.RecoveredReplica
-	(*NodeRecoveryReport)(nil),             // 21: chainrep.v1.NodeRecoveryReport
-	(*AddReplicaAsTailCommand)(nil),        // 22: chainrep.v1.AddReplicaAsTailCommand
-	(*ActivateReplicaCommand)(nil),         // 23: chainrep.v1.ActivateReplicaCommand
-	(*MarkReplicaLeavingCommand)(nil),      // 24: chainrep.v1.MarkReplicaLeavingCommand
-	(*RemoveReplicaCommand)(nil),           // 25: chainrep.v1.RemoveReplicaCommand
-	(*UpdateChainPeersCommand)(nil),        // 26: chainrep.v1.UpdateChainPeersCommand
-	(*ResumeRecoveredReplicaCommand)(nil),  // 27: chainrep.v1.ResumeRecoveredReplicaCommand
-	(*RecoverReplicaCommand)(nil),          // 28: chainrep.v1.RecoverReplicaCommand
-	(*DropRecoveredReplicaCommand)(nil),    // 29: chainrep.v1.DropRecoveredReplicaCommand
-	(*ClientGetRequest)(nil),               // 30: chainrep.v1.ClientGetRequest
-	(*ClientPutRequest)(nil),               // 31: chainrep.v1.ClientPutRequest
-	(*ClientDeleteRequest)(nil),            // 32: chainrep.v1.ClientDeleteRequest
-	(*CommitResult)(nil),                   // 33: chainrep.v1.CommitResult
-	(*ReadResult)(nil),                     // 34: chainrep.v1.ReadResult
-	(*WriteOperation)(nil),                 // 35: chainrep.v1.WriteOperation
-	(*ForwardWriteRequest)(nil),            // 36: chainrep.v1.ForwardWriteRequest
-	(*CommitWriteRequest)(nil),             // 37: chainrep.v1.CommitWriteRequest
-	(*FetchSnapshotRequest)(nil),           // 38: chainrep.v1.FetchSnapshotRequest
-	(*SnapshotEntry)(nil),                  // 39: chainrep.v1.SnapshotEntry
-	(*FetchCommittedSequenceRequest)(nil),  // 40: chainrep.v1.FetchCommittedSequenceRequest
-	(*FetchCommittedSequenceResponse)(nil), // 41: chainrep.v1.FetchCommittedSequenceResponse
-	(*RoutingMismatchDetail)(nil),          // 42: chainrep.v1.RoutingMismatchDetail
-	(*AmbiguousWriteDetail)(nil),           // 43: chainrep.v1.AmbiguousWriteDetail
-	(*ConditionFailedDetail)(nil),          // 44: chainrep.v1.ConditionFailedDetail
-	(*BackpressureDetail)(nil),             // 45: chainrep.v1.BackpressureDetail
-	(*DomainErrorDetail)(nil),              // 46: chainrep.v1.DomainErrorDetail
-	(*NotLeaderDetail)(nil),                // 47: chainrep.v1.NotLeaderDetail
+	(*RegisterNodeRequest)(nil),            // 11: chainrep.v1.RegisterNodeRequest
+	(*ServerState)(nil),                    // 12: chainrep.v1.ServerState
+	(*RoutingSnapshotRequest)(nil),         // 13: chainrep.v1.RoutingSnapshotRequest
+	(*SlotRoute)(nil),                      // 14: chainrep.v1.SlotRoute
+	(*RoutingSnapshotResponse)(nil),        // 15: chainrep.v1.RoutingSnapshotResponse
+	(*ReplicaReadyReport)(nil),             // 16: chainrep.v1.ReplicaReadyReport
+	(*ReplicaRemovedReport)(nil),           // 17: chainrep.v1.ReplicaRemovedReport
+	(*NodeStatus)(nil),                     // 18: chainrep.v1.NodeStatus
+	(*ChainPeers)(nil),                     // 19: chainrep.v1.ChainPeers
+	(*ReplicaAssignment)(nil),              // 20: chainrep.v1.ReplicaAssignment
+	(*RecoveredReplica)(nil),               // 21: chainrep.v1.RecoveredReplica
+	(*NodeRecoveryReport)(nil),             // 22: chainrep.v1.NodeRecoveryReport
+	(*AddReplicaAsTailCommand)(nil),        // 23: chainrep.v1.AddReplicaAsTailCommand
+	(*ActivateReplicaCommand)(nil),         // 24: chainrep.v1.ActivateReplicaCommand
+	(*MarkReplicaLeavingCommand)(nil),      // 25: chainrep.v1.MarkReplicaLeavingCommand
+	(*RemoveReplicaCommand)(nil),           // 26: chainrep.v1.RemoveReplicaCommand
+	(*UpdateChainPeersCommand)(nil),        // 27: chainrep.v1.UpdateChainPeersCommand
+	(*ResumeRecoveredReplicaCommand)(nil),  // 28: chainrep.v1.ResumeRecoveredReplicaCommand
+	(*RecoverReplicaCommand)(nil),          // 29: chainrep.v1.RecoverReplicaCommand
+	(*DropRecoveredReplicaCommand)(nil),    // 30: chainrep.v1.DropRecoveredReplicaCommand
+	(*ClientGetRequest)(nil),               // 31: chainrep.v1.ClientGetRequest
+	(*ClientPutRequest)(nil),               // 32: chainrep.v1.ClientPutRequest
+	(*ClientDeleteRequest)(nil),            // 33: chainrep.v1.ClientDeleteRequest
+	(*CommitResult)(nil),                   // 34: chainrep.v1.CommitResult
+	(*ReadResult)(nil),                     // 35: chainrep.v1.ReadResult
+	(*WriteOperation)(nil),                 // 36: chainrep.v1.WriteOperation
+	(*ForwardWriteRequest)(nil),            // 37: chainrep.v1.ForwardWriteRequest
+	(*CommitWriteRequest)(nil),             // 38: chainrep.v1.CommitWriteRequest
+	(*FetchSnapshotRequest)(nil),           // 39: chainrep.v1.FetchSnapshotRequest
+	(*SnapshotEntry)(nil),                  // 40: chainrep.v1.SnapshotEntry
+	(*FetchCommittedSequenceRequest)(nil),  // 41: chainrep.v1.FetchCommittedSequenceRequest
+	(*FetchCommittedSequenceResponse)(nil), // 42: chainrep.v1.FetchCommittedSequenceResponse
+	(*RoutingMismatchDetail)(nil),          // 43: chainrep.v1.RoutingMismatchDetail
+	(*AmbiguousWriteDetail)(nil),           // 44: chainrep.v1.AmbiguousWriteDetail
+	(*ConditionFailedDetail)(nil),          // 45: chainrep.v1.ConditionFailedDetail
+	(*BackpressureDetail)(nil),             // 46: chainrep.v1.BackpressureDetail
+	(*DomainErrorDetail)(nil),              // 47: chainrep.v1.DomainErrorDetail
+	(*NotLeaderDetail)(nil),                // 48: chainrep.v1.NotLeaderDetail
 }
 var file_chainrep_v1_transport_proto_depIdxs = []int32{
 	0,  // 0: chainrep.v1.VersionComparison.operator:type_name -> chainrep.v1.ComparisonOperator
@@ -3265,77 +3313,80 @@ var file_chainrep_v1_transport_proto_depIdxs = []int32{
 	7,  // 5: chainrep.v1.Node.failure_domains:type_name -> chainrep.v1.FailureDomain
 	8,  // 6: chainrep.v1.BootstrapRequest.nodes:type_name -> chainrep.v1.Node
 	8,  // 7: chainrep.v1.MembershipMutationRequest.node:type_name -> chainrep.v1.Node
-	13, // 8: chainrep.v1.RoutingSnapshotResponse.slots:type_name -> chainrep.v1.SlotRoute
-	18, // 9: chainrep.v1.ReplicaAssignment.peers:type_name -> chainrep.v1.ChainPeers
-	19, // 10: chainrep.v1.RecoveredReplica.assignment:type_name -> chainrep.v1.ReplicaAssignment
-	20, // 11: chainrep.v1.NodeRecoveryReport.replicas:type_name -> chainrep.v1.RecoveredReplica
-	19, // 12: chainrep.v1.AddReplicaAsTailCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
-	19, // 13: chainrep.v1.UpdateChainPeersCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
-	19, // 14: chainrep.v1.ResumeRecoveredReplicaCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
-	19, // 15: chainrep.v1.RecoverReplicaCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
-	6,  // 16: chainrep.v1.ClientPutRequest.conditions:type_name -> chainrep.v1.WriteConditions
-	6,  // 17: chainrep.v1.ClientDeleteRequest.conditions:type_name -> chainrep.v1.WriteConditions
-	2,  // 18: chainrep.v1.CommitResult.metadata:type_name -> chainrep.v1.ObjectMetadata
-	2,  // 19: chainrep.v1.ReadResult.metadata:type_name -> chainrep.v1.ObjectMetadata
-	2,  // 20: chainrep.v1.WriteOperation.metadata:type_name -> chainrep.v1.ObjectMetadata
-	35, // 21: chainrep.v1.ForwardWriteRequest.operation:type_name -> chainrep.v1.WriteOperation
-	2,  // 22: chainrep.v1.SnapshotEntry.metadata:type_name -> chainrep.v1.ObjectMetadata
-	2,  // 23: chainrep.v1.ConditionFailedDetail.current_metadata:type_name -> chainrep.v1.ObjectMetadata
-	9,  // 24: chainrep.v1.CoordinatorService.Bootstrap:input_type -> chainrep.v1.BootstrapRequest
-	10, // 25: chainrep.v1.CoordinatorService.AddNode:input_type -> chainrep.v1.MembershipMutationRequest
-	10, // 26: chainrep.v1.CoordinatorService.BeginDrainNode:input_type -> chainrep.v1.MembershipMutationRequest
-	10, // 27: chainrep.v1.CoordinatorService.MarkNodeDead:input_type -> chainrep.v1.MembershipMutationRequest
-	12, // 28: chainrep.v1.CoordinatorService.RoutingSnapshot:input_type -> chainrep.v1.RoutingSnapshotRequest
-	15, // 29: chainrep.v1.CoordinatorService.ReportReplicaReady:input_type -> chainrep.v1.ReplicaReadyReport
-	16, // 30: chainrep.v1.CoordinatorService.ReportReplicaRemoved:input_type -> chainrep.v1.ReplicaRemovedReport
-	17, // 31: chainrep.v1.CoordinatorService.ReportNodeHeartbeat:input_type -> chainrep.v1.NodeStatus
-	21, // 32: chainrep.v1.CoordinatorService.ReportNodeRecovered:input_type -> chainrep.v1.NodeRecoveryReport
-	1,  // 33: chainrep.v1.CoordinatorService.EvaluateLiveness:input_type -> chainrep.v1.Empty
-	30, // 34: chainrep.v1.StorageService.Get:input_type -> chainrep.v1.ClientGetRequest
-	31, // 35: chainrep.v1.StorageService.Put:input_type -> chainrep.v1.ClientPutRequest
-	32, // 36: chainrep.v1.StorageService.Delete:input_type -> chainrep.v1.ClientDeleteRequest
-	22, // 37: chainrep.v1.StorageService.AddReplicaAsTail:input_type -> chainrep.v1.AddReplicaAsTailCommand
-	23, // 38: chainrep.v1.StorageService.ActivateReplica:input_type -> chainrep.v1.ActivateReplicaCommand
-	24, // 39: chainrep.v1.StorageService.MarkReplicaLeaving:input_type -> chainrep.v1.MarkReplicaLeavingCommand
-	25, // 40: chainrep.v1.StorageService.RemoveReplica:input_type -> chainrep.v1.RemoveReplicaCommand
-	26, // 41: chainrep.v1.StorageService.UpdateChainPeers:input_type -> chainrep.v1.UpdateChainPeersCommand
-	27, // 42: chainrep.v1.StorageService.ResumeRecoveredReplica:input_type -> chainrep.v1.ResumeRecoveredReplicaCommand
-	28, // 43: chainrep.v1.StorageService.RecoverReplica:input_type -> chainrep.v1.RecoverReplicaCommand
-	29, // 44: chainrep.v1.StorageService.DropRecoveredReplica:input_type -> chainrep.v1.DropRecoveredReplicaCommand
-	36, // 45: chainrep.v1.StorageService.ForwardWrite:input_type -> chainrep.v1.ForwardWriteRequest
-	37, // 46: chainrep.v1.StorageService.CommitWrite:input_type -> chainrep.v1.CommitWriteRequest
-	38, // 47: chainrep.v1.StorageService.FetchSnapshot:input_type -> chainrep.v1.FetchSnapshotRequest
-	40, // 48: chainrep.v1.StorageService.FetchCommittedSequence:input_type -> chainrep.v1.FetchCommittedSequenceRequest
-	11, // 49: chainrep.v1.CoordinatorService.Bootstrap:output_type -> chainrep.v1.ServerState
-	11, // 50: chainrep.v1.CoordinatorService.AddNode:output_type -> chainrep.v1.ServerState
-	11, // 51: chainrep.v1.CoordinatorService.BeginDrainNode:output_type -> chainrep.v1.ServerState
-	11, // 52: chainrep.v1.CoordinatorService.MarkNodeDead:output_type -> chainrep.v1.ServerState
-	14, // 53: chainrep.v1.CoordinatorService.RoutingSnapshot:output_type -> chainrep.v1.RoutingSnapshotResponse
-	11, // 54: chainrep.v1.CoordinatorService.ReportReplicaReady:output_type -> chainrep.v1.ServerState
-	11, // 55: chainrep.v1.CoordinatorService.ReportReplicaRemoved:output_type -> chainrep.v1.ServerState
-	1,  // 56: chainrep.v1.CoordinatorService.ReportNodeHeartbeat:output_type -> chainrep.v1.Empty
-	1,  // 57: chainrep.v1.CoordinatorService.ReportNodeRecovered:output_type -> chainrep.v1.Empty
-	11, // 58: chainrep.v1.CoordinatorService.EvaluateLiveness:output_type -> chainrep.v1.ServerState
-	34, // 59: chainrep.v1.StorageService.Get:output_type -> chainrep.v1.ReadResult
-	33, // 60: chainrep.v1.StorageService.Put:output_type -> chainrep.v1.CommitResult
-	33, // 61: chainrep.v1.StorageService.Delete:output_type -> chainrep.v1.CommitResult
-	1,  // 62: chainrep.v1.StorageService.AddReplicaAsTail:output_type -> chainrep.v1.Empty
-	1,  // 63: chainrep.v1.StorageService.ActivateReplica:output_type -> chainrep.v1.Empty
-	1,  // 64: chainrep.v1.StorageService.MarkReplicaLeaving:output_type -> chainrep.v1.Empty
-	1,  // 65: chainrep.v1.StorageService.RemoveReplica:output_type -> chainrep.v1.Empty
-	1,  // 66: chainrep.v1.StorageService.UpdateChainPeers:output_type -> chainrep.v1.Empty
-	1,  // 67: chainrep.v1.StorageService.ResumeRecoveredReplica:output_type -> chainrep.v1.Empty
-	1,  // 68: chainrep.v1.StorageService.RecoverReplica:output_type -> chainrep.v1.Empty
-	1,  // 69: chainrep.v1.StorageService.DropRecoveredReplica:output_type -> chainrep.v1.Empty
-	1,  // 70: chainrep.v1.StorageService.ForwardWrite:output_type -> chainrep.v1.Empty
-	1,  // 71: chainrep.v1.StorageService.CommitWrite:output_type -> chainrep.v1.Empty
-	39, // 72: chainrep.v1.StorageService.FetchSnapshot:output_type -> chainrep.v1.SnapshotEntry
-	41, // 73: chainrep.v1.StorageService.FetchCommittedSequence:output_type -> chainrep.v1.FetchCommittedSequenceResponse
-	49, // [49:74] is the sub-list for method output_type
-	24, // [24:49] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	8,  // 8: chainrep.v1.RegisterNodeRequest.node:type_name -> chainrep.v1.Node
+	14, // 9: chainrep.v1.RoutingSnapshotResponse.slots:type_name -> chainrep.v1.SlotRoute
+	19, // 10: chainrep.v1.ReplicaAssignment.peers:type_name -> chainrep.v1.ChainPeers
+	20, // 11: chainrep.v1.RecoveredReplica.assignment:type_name -> chainrep.v1.ReplicaAssignment
+	21, // 12: chainrep.v1.NodeRecoveryReport.replicas:type_name -> chainrep.v1.RecoveredReplica
+	20, // 13: chainrep.v1.AddReplicaAsTailCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
+	20, // 14: chainrep.v1.UpdateChainPeersCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
+	20, // 15: chainrep.v1.ResumeRecoveredReplicaCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
+	20, // 16: chainrep.v1.RecoverReplicaCommand.assignment:type_name -> chainrep.v1.ReplicaAssignment
+	6,  // 17: chainrep.v1.ClientPutRequest.conditions:type_name -> chainrep.v1.WriteConditions
+	6,  // 18: chainrep.v1.ClientDeleteRequest.conditions:type_name -> chainrep.v1.WriteConditions
+	2,  // 19: chainrep.v1.CommitResult.metadata:type_name -> chainrep.v1.ObjectMetadata
+	2,  // 20: chainrep.v1.ReadResult.metadata:type_name -> chainrep.v1.ObjectMetadata
+	2,  // 21: chainrep.v1.WriteOperation.metadata:type_name -> chainrep.v1.ObjectMetadata
+	36, // 22: chainrep.v1.ForwardWriteRequest.operation:type_name -> chainrep.v1.WriteOperation
+	2,  // 23: chainrep.v1.SnapshotEntry.metadata:type_name -> chainrep.v1.ObjectMetadata
+	2,  // 24: chainrep.v1.ConditionFailedDetail.current_metadata:type_name -> chainrep.v1.ObjectMetadata
+	9,  // 25: chainrep.v1.CoordinatorService.Bootstrap:input_type -> chainrep.v1.BootstrapRequest
+	11, // 26: chainrep.v1.CoordinatorService.RegisterNode:input_type -> chainrep.v1.RegisterNodeRequest
+	10, // 27: chainrep.v1.CoordinatorService.AddNode:input_type -> chainrep.v1.MembershipMutationRequest
+	10, // 28: chainrep.v1.CoordinatorService.BeginDrainNode:input_type -> chainrep.v1.MembershipMutationRequest
+	10, // 29: chainrep.v1.CoordinatorService.MarkNodeDead:input_type -> chainrep.v1.MembershipMutationRequest
+	13, // 30: chainrep.v1.CoordinatorService.RoutingSnapshot:input_type -> chainrep.v1.RoutingSnapshotRequest
+	16, // 31: chainrep.v1.CoordinatorService.ReportReplicaReady:input_type -> chainrep.v1.ReplicaReadyReport
+	17, // 32: chainrep.v1.CoordinatorService.ReportReplicaRemoved:input_type -> chainrep.v1.ReplicaRemovedReport
+	18, // 33: chainrep.v1.CoordinatorService.ReportNodeHeartbeat:input_type -> chainrep.v1.NodeStatus
+	22, // 34: chainrep.v1.CoordinatorService.ReportNodeRecovered:input_type -> chainrep.v1.NodeRecoveryReport
+	1,  // 35: chainrep.v1.CoordinatorService.EvaluateLiveness:input_type -> chainrep.v1.Empty
+	31, // 36: chainrep.v1.StorageService.Get:input_type -> chainrep.v1.ClientGetRequest
+	32, // 37: chainrep.v1.StorageService.Put:input_type -> chainrep.v1.ClientPutRequest
+	33, // 38: chainrep.v1.StorageService.Delete:input_type -> chainrep.v1.ClientDeleteRequest
+	23, // 39: chainrep.v1.StorageService.AddReplicaAsTail:input_type -> chainrep.v1.AddReplicaAsTailCommand
+	24, // 40: chainrep.v1.StorageService.ActivateReplica:input_type -> chainrep.v1.ActivateReplicaCommand
+	25, // 41: chainrep.v1.StorageService.MarkReplicaLeaving:input_type -> chainrep.v1.MarkReplicaLeavingCommand
+	26, // 42: chainrep.v1.StorageService.RemoveReplica:input_type -> chainrep.v1.RemoveReplicaCommand
+	27, // 43: chainrep.v1.StorageService.UpdateChainPeers:input_type -> chainrep.v1.UpdateChainPeersCommand
+	28, // 44: chainrep.v1.StorageService.ResumeRecoveredReplica:input_type -> chainrep.v1.ResumeRecoveredReplicaCommand
+	29, // 45: chainrep.v1.StorageService.RecoverReplica:input_type -> chainrep.v1.RecoverReplicaCommand
+	30, // 46: chainrep.v1.StorageService.DropRecoveredReplica:input_type -> chainrep.v1.DropRecoveredReplicaCommand
+	37, // 47: chainrep.v1.StorageService.ForwardWrite:input_type -> chainrep.v1.ForwardWriteRequest
+	38, // 48: chainrep.v1.StorageService.CommitWrite:input_type -> chainrep.v1.CommitWriteRequest
+	39, // 49: chainrep.v1.StorageService.FetchSnapshot:input_type -> chainrep.v1.FetchSnapshotRequest
+	41, // 50: chainrep.v1.StorageService.FetchCommittedSequence:input_type -> chainrep.v1.FetchCommittedSequenceRequest
+	12, // 51: chainrep.v1.CoordinatorService.Bootstrap:output_type -> chainrep.v1.ServerState
+	12, // 52: chainrep.v1.CoordinatorService.RegisterNode:output_type -> chainrep.v1.ServerState
+	12, // 53: chainrep.v1.CoordinatorService.AddNode:output_type -> chainrep.v1.ServerState
+	12, // 54: chainrep.v1.CoordinatorService.BeginDrainNode:output_type -> chainrep.v1.ServerState
+	12, // 55: chainrep.v1.CoordinatorService.MarkNodeDead:output_type -> chainrep.v1.ServerState
+	15, // 56: chainrep.v1.CoordinatorService.RoutingSnapshot:output_type -> chainrep.v1.RoutingSnapshotResponse
+	12, // 57: chainrep.v1.CoordinatorService.ReportReplicaReady:output_type -> chainrep.v1.ServerState
+	12, // 58: chainrep.v1.CoordinatorService.ReportReplicaRemoved:output_type -> chainrep.v1.ServerState
+	1,  // 59: chainrep.v1.CoordinatorService.ReportNodeHeartbeat:output_type -> chainrep.v1.Empty
+	1,  // 60: chainrep.v1.CoordinatorService.ReportNodeRecovered:output_type -> chainrep.v1.Empty
+	12, // 61: chainrep.v1.CoordinatorService.EvaluateLiveness:output_type -> chainrep.v1.ServerState
+	35, // 62: chainrep.v1.StorageService.Get:output_type -> chainrep.v1.ReadResult
+	34, // 63: chainrep.v1.StorageService.Put:output_type -> chainrep.v1.CommitResult
+	34, // 64: chainrep.v1.StorageService.Delete:output_type -> chainrep.v1.CommitResult
+	1,  // 65: chainrep.v1.StorageService.AddReplicaAsTail:output_type -> chainrep.v1.Empty
+	1,  // 66: chainrep.v1.StorageService.ActivateReplica:output_type -> chainrep.v1.Empty
+	1,  // 67: chainrep.v1.StorageService.MarkReplicaLeaving:output_type -> chainrep.v1.Empty
+	1,  // 68: chainrep.v1.StorageService.RemoveReplica:output_type -> chainrep.v1.Empty
+	1,  // 69: chainrep.v1.StorageService.UpdateChainPeers:output_type -> chainrep.v1.Empty
+	1,  // 70: chainrep.v1.StorageService.ResumeRecoveredReplica:output_type -> chainrep.v1.Empty
+	1,  // 71: chainrep.v1.StorageService.RecoverReplica:output_type -> chainrep.v1.Empty
+	1,  // 72: chainrep.v1.StorageService.DropRecoveredReplica:output_type -> chainrep.v1.Empty
+	1,  // 73: chainrep.v1.StorageService.ForwardWrite:output_type -> chainrep.v1.Empty
+	1,  // 74: chainrep.v1.StorageService.CommitWrite:output_type -> chainrep.v1.Empty
+	40, // 75: chainrep.v1.StorageService.FetchSnapshot:output_type -> chainrep.v1.SnapshotEntry
+	42, // 76: chainrep.v1.StorageService.FetchCommittedSequence:output_type -> chainrep.v1.FetchCommittedSequenceResponse
+	51, // [51:77] is the sub-list for method output_type
+	25, // [25:51] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_chainrep_v1_transport_proto_init() }
@@ -3349,7 +3400,7 @@ func file_chainrep_v1_transport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainrep_v1_transport_proto_rawDesc), len(file_chainrep_v1_transport_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   47,
+			NumMessages:   48,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

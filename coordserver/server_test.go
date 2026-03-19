@@ -408,8 +408,13 @@ func TestUnknownTargetNodeAndCommandFailuresAreSurfaced(t *testing.T) {
 	if !errors.Is(err, ErrDispatchFailed) {
 		t.Fatalf("error = %v, want dispatch failed", err)
 	}
-	if _, exists := server.Pending()[1]; exists {
-		t.Fatal("pending work should not exist after failed AddReplicaAsTail dispatch")
+	if got, want := server.Pending()[1], (PendingWork{
+		Slot:        1,
+		NodeID:      "d",
+		Kind:        pendingKindReady,
+		SlotVersion: server.Current().SlotVersions[1],
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending work after failed AddReplicaAsTail dispatch = %#v, want %#v", got, want)
 	}
 }
 
@@ -419,6 +424,12 @@ func TestHeartbeatIsRecordedButDoesNotTriggerReconfiguration(t *testing.T) {
 		"a": newRecordingNodeClient("a"),
 	}
 	server := mustOpenServer(t, mapToClient(nodes))
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{NodeID: "a"}); err != nil {
+		t.Fatalf("RegisterNode returned error: %v", err)
+	}
 
 	if err := server.ReportNodeHeartbeat(ctx, storage.NodeStatus{
 		NodeID:          "a",
@@ -520,7 +531,7 @@ func TestRoutingSnapshotExcludesJoiningAndLeavingReplicas(t *testing.T) {
 	if !route.Writable || !route.Readable {
 		t.Fatalf("route after ready = %#v, want readable and writable", route)
 	}
-	if got, want := route.ChainVersion, uint64(4); got != want {
+	if got, want := route.ChainVersion, server.Current().SlotVersions[1]; got != want {
 		t.Fatalf("chain version after ready = %d, want %d", got, want)
 	}
 }

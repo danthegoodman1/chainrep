@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	CoordinatorService_Bootstrap_FullMethodName            = "/chainrep.v1.CoordinatorService/Bootstrap"
+	CoordinatorService_RegisterNode_FullMethodName         = "/chainrep.v1.CoordinatorService/RegisterNode"
 	CoordinatorService_AddNode_FullMethodName              = "/chainrep.v1.CoordinatorService/AddNode"
 	CoordinatorService_BeginDrainNode_FullMethodName       = "/chainrep.v1.CoordinatorService/BeginDrainNode"
 	CoordinatorService_MarkNodeDead_FullMethodName         = "/chainrep.v1.CoordinatorService/MarkNodeDead"
@@ -36,6 +37,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type CoordinatorServiceClient interface {
 	Bootstrap(ctx context.Context, in *BootstrapRequest, opts ...grpc.CallOption) (*ServerState, error)
+	RegisterNode(ctx context.Context, in *RegisterNodeRequest, opts ...grpc.CallOption) (*ServerState, error)
 	AddNode(ctx context.Context, in *MembershipMutationRequest, opts ...grpc.CallOption) (*ServerState, error)
 	BeginDrainNode(ctx context.Context, in *MembershipMutationRequest, opts ...grpc.CallOption) (*ServerState, error)
 	MarkNodeDead(ctx context.Context, in *MembershipMutationRequest, opts ...grpc.CallOption) (*ServerState, error)
@@ -59,6 +61,16 @@ func (c *coordinatorServiceClient) Bootstrap(ctx context.Context, in *BootstrapR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ServerState)
 	err := c.cc.Invoke(ctx, CoordinatorService_Bootstrap_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coordinatorServiceClient) RegisterNode(ctx context.Context, in *RegisterNodeRequest, opts ...grpc.CallOption) (*ServerState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServerState)
+	err := c.cc.Invoke(ctx, CoordinatorService_RegisterNode_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +172,7 @@ func (c *coordinatorServiceClient) EvaluateLiveness(ctx context.Context, in *Emp
 // for forward compatibility.
 type CoordinatorServiceServer interface {
 	Bootstrap(context.Context, *BootstrapRequest) (*ServerState, error)
+	RegisterNode(context.Context, *RegisterNodeRequest) (*ServerState, error)
 	AddNode(context.Context, *MembershipMutationRequest) (*ServerState, error)
 	BeginDrainNode(context.Context, *MembershipMutationRequest) (*ServerState, error)
 	MarkNodeDead(context.Context, *MembershipMutationRequest) (*ServerState, error)
@@ -181,6 +194,9 @@ type UnimplementedCoordinatorServiceServer struct{}
 
 func (UnimplementedCoordinatorServiceServer) Bootstrap(context.Context, *BootstrapRequest) (*ServerState, error) {
 	return nil, status.Error(codes.Unimplemented, "method Bootstrap not implemented")
+}
+func (UnimplementedCoordinatorServiceServer) RegisterNode(context.Context, *RegisterNodeRequest) (*ServerState, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterNode not implemented")
 }
 func (UnimplementedCoordinatorServiceServer) AddNode(context.Context, *MembershipMutationRequest) (*ServerState, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddNode not implemented")
@@ -244,6 +260,24 @@ func _CoordinatorService_Bootstrap_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(CoordinatorServiceServer).Bootstrap(ctx, req.(*BootstrapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CoordinatorService_RegisterNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoordinatorServiceServer).RegisterNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CoordinatorService_RegisterNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoordinatorServiceServer).RegisterNode(ctx, req.(*RegisterNodeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -420,6 +454,10 @@ var CoordinatorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Bootstrap",
 			Handler:    _CoordinatorService_Bootstrap_Handler,
+		},
+		{
+			MethodName: "RegisterNode",
+			Handler:    _CoordinatorService_RegisterNode_Handler,
 		},
 		{
 			MethodName: "AddNode",

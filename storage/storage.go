@@ -37,6 +37,8 @@ var (
 
 type Config struct {
 	NodeID                            string
+	RPCAddress                        string
+	FailureDomains                    map[string]string
 	MaxInFlightClientWritesPerNode    int
 	MaxInFlightClientWritesPerSlot    int
 	MaxBufferedReplicaMessagesPerNode int
@@ -121,10 +123,17 @@ type localStateBinder interface {
 }
 
 type CoordinatorClient interface {
+	RegisterNode(ctx context.Context, reg NodeRegistration) error
 	ReportReplicaReady(ctx context.Context, slot int, epoch uint64) error
 	ReportReplicaRemoved(ctx context.Context, slot int, epoch uint64) error
 	ReportNodeRecovered(ctx context.Context, report NodeRecoveryReport) error
 	ReportNodeHeartbeat(ctx context.Context, status NodeStatus) error
+}
+
+type NodeRegistration struct {
+	NodeID         string
+	RPCAddress     string
+	FailureDomains map[string]string
 }
 
 type ReplicationTransport interface {
@@ -477,6 +486,7 @@ type Node struct {
 	local                             LocalStateStore
 	coord                             CoordinatorClient
 	repl                              ReplicationTransport
+	registration                      NodeRegistration
 	replicas                          map[int]replicaRecord
 	maxInFlightClientWritesPerNode    int
 	maxInFlightClientWritesPerSlot    int
@@ -564,6 +574,11 @@ func OpenNode(
 		local:                             local,
 		coord:                             coord,
 		repl:                              repl,
+		registration: NodeRegistration{
+			NodeID:         cfg.NodeID,
+			RPCAddress:     cfg.RPCAddress,
+			FailureDomains: cloneFailureDomains(cfg.FailureDomains),
+		},
 		replicas:                          make(map[int]replicaRecord),
 		maxInFlightClientWritesPerNode:    cfg.MaxInFlightClientWritesPerNode,
 		maxInFlightClientWritesPerSlot:    cfg.MaxInFlightClientWritesPerSlot,
@@ -618,6 +633,13 @@ func OpenNode(
 	}
 
 	return node, nil
+}
+
+func (n *Node) Register(ctx context.Context) error {
+	if err := n.coord.RegisterNode(ctx, n.registration); err != nil {
+		return fmt.Errorf("err in n.coord.RegisterNode: %w", err)
+	}
+	return nil
 }
 
 func (n *Node) AddReplicaAsTail(ctx context.Context, cmd AddReplicaAsTailCommand) error {
@@ -828,6 +850,9 @@ func (n *Node) UpdateChainPeers(ctx context.Context, cmd UpdateChainPeersCommand
 }
 
 func (n *Node) ReportHeartbeat(ctx context.Context) error {
+	if err := n.Register(ctx); err != nil {
+		return fmt.Errorf("err in n.Register: %w", err)
+	}
 	status := n.snapshotNodeStatus()
 	if err := n.coord.ReportNodeHeartbeat(ctx, status); err != nil {
 		return fmt.Errorf("err in n.coord.ReportNodeHeartbeat: %w", err)
@@ -989,6 +1014,14 @@ func (n *Node) Close() error {
 	}
 	n.closeErr = errors.Join(errs...)
 	return n.closeErr
+}
+
+func cloneFailureDomains(domains map[string]string) map[string]string {
+	cloned := make(map[string]string, len(domains))
+	for key, value := range domains {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (n *Node) SubmitPut(ctx context.Context, slot int, key string, value string) (CommitResult, error) {

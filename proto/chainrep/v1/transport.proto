@@ -68,6 +68,10 @@ message MembershipMutationRequest {
   string node_id = 5;
 }
 
+message RegisterNodeRequest {
+  Node node = 1;
+}
+
 message ServerState {
   uint64 version = 1;
 }
@@ -299,6 +303,7 @@ message NotLeaderDetail {
 
 service CoordinatorService {
   rpc Bootstrap(BootstrapRequest) returns (ServerState);
+  rpc RegisterNode(RegisterNodeRequest) returns (ServerState);
   rpc AddNode(MembershipMutationRequest) returns (ServerState);
   rpc BeginDrainNode(MembershipMutationRequest) returns (ServerState);
   rpc MarkNodeDead(MembershipMutationRequest) returns (ServerState);

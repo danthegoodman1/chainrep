@@ -18,7 +18,10 @@ It is responsible for:
 - initial chain placement
 - deterministic reconfiguration planning
 - tracking desired chain membership and replica ordering
+- registering storage nodes into cluster membership
+- tracking which registered nodes have actually heartbeated and are eligible for fresh placement
 - deciding when replicas should join, become active, leave, or be removed
+- durably retrying non-HA storage-node control work until it is acknowledged
 
 It is not responsible for:
 
@@ -32,6 +35,19 @@ The key packages are:
 - `coordinator/runtime`: optional durable wrapper with WAL, checkpoints, replay, and idempotent command handling
 - `coordserver`: synchronous coordinator service that dispatches storage-node commands, records heartbeats, and exposes routing snapshots to clients
 - `coordserver`: synchronous coordinator service that dispatches storage-node commands, durably tracks node liveness from heartbeats, automatically marks dead nodes, and exposes routing snapshots to clients
+
+In non-HA mode, coordinator control work is still durable:
+
+- reconfiguration state changes and storage-node control commands are persisted through the local coordinator runtime store
+- failed control RPC dispatch does not lose work
+- coordinator restart reopens the local outbox and resumes undispatched work
+
+Node membership is now dynamic by default:
+
+- coordinator bootstrap is config-only; it does not need an initial static node list
+- storage nodes register themselves with the coordinator
+- a registered node only becomes eligible for fresh placement after its first successful heartbeat
+- node IDs marked dead are tombstoned and rejected from future auto-join; replacements must use a new node ID
 
 ### Coordinator HA
 
@@ -86,12 +102,14 @@ The storage node executes those changes.
 The intended connection is coordinator-driven:
 
 1. coordinator/runtime accepts a durable command
-2. coordinator computes the next safe chain step
-3. some coordinator server layer turns that step into storage-node commands
-4. storage nodes execute the commands locally
-5. storage nodes report progress back to the coordinator
-6. coordinator applies that progress and plans the next safe step
-7. clients periodically fetch routing snapshots from the coordinator server and talk directly to storage nodes
+2. storage nodes register themselves with the coordinator and become eligible for fresh placement after first heartbeat
+3. coordinator computes the next safe chain step
+4. some coordinator server layer turns that step into durable storage-node control outbox work
+5. storage-node commands are retried until they are acknowledged
+6. storage nodes execute the commands locally
+7. storage nodes report progress back to the coordinator
+8. coordinator applies that progress and plans the next safe step
+9. clients periodically fetch routing snapshots from the coordinator server and talk directly to storage nodes
 
 ## Important Interfaces
 
@@ -124,6 +142,7 @@ Methods:
 
 Methods:
 
+- `RegisterNode`
 - `ReportReplicaReady`
 - `ReportReplicaRemoved`
 - `ReportNodeRecovered`
