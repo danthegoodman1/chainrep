@@ -422,6 +422,11 @@ func (s *Server) ReportReplicaReady(ctx context.Context, nodeID string, slot int
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
 	}
+	if s.shouldDispatchActivePeerRefresh(slot) {
+		if err := s.dispatchActivePeerUpdates(ctx, slot); err != nil {
+			return coordruntime.State{}, err
+		}
+	}
 	s.events.record(s.logger, zerolog.InfoLevel, "replica_ready", "coordinator accepted replica ready progress", nodeID, ops.IntPtr(slot), ops.Uint64Ptr(slotVersion), "", commandID, nil)
 	return s.rt.Current(), nil
 }
@@ -505,6 +510,11 @@ func (s *Server) ReportReplicaRemoved(ctx context.Context, nodeID string, slot i
 
 	if err := s.reconcileAndDispatch(ctx); err != nil {
 		return coordruntime.State{}, err
+	}
+	if s.shouldDispatchActivePeerRefresh(slot) {
+		if err := s.dispatchActivePeerUpdates(ctx, slot); err != nil {
+			return coordruntime.State{}, err
+		}
 	}
 	s.events.record(s.logger, zerolog.InfoLevel, "replica_removed", "coordinator accepted replica removed progress", nodeID, ops.IntPtr(slot), ops.Uint64Ptr(slotVersion), "", commandID, nil)
 	return updated, nil
@@ -764,7 +774,7 @@ func (s *Server) applyMembershipMutation(
 		return coordruntime.State{}, err
 	}
 
-	_, state, err := s.rt.Reconfigure(ctx, cmd)
+	plan, state, err := s.rt.Reconfigure(ctx, cmd)
 	if err != nil {
 		err = fmt.Errorf("err in s.rt.Reconfigure: %w", err)
 		s.observeCommandResult(string(expectedEvent), err)
@@ -776,6 +786,15 @@ func (s *Server) applyMembershipMutation(
 	if err := s.dispatchRuntimeOutbox(ctx); err != nil {
 		s.observeCommandResult(string(expectedEvent), err)
 		return coordruntime.State{}, err
+	}
+	for _, slotPlan := range plan.ChangedSlots {
+		if !s.shouldDispatchActivePeerRefresh(slotPlan.Slot) {
+			continue
+		}
+		if err := s.dispatchActivePeerUpdates(ctx, slotPlan.Slot); err != nil {
+			s.observeCommandResult(string(expectedEvent), err)
+			return coordruntime.State{}, err
+		}
 	}
 	s.observeCommandResult(string(expectedEvent), nil)
 	s.events.record(s.logger, zerolog.InfoLevel, "membership_mutation", "coordinator applied membership mutation", "", nil, ops.Uint64Ptr(state.Version), "", cmd.ID, nil)
@@ -900,6 +919,22 @@ func cloneRuntimeOutbox(current []coordruntime.OutboxEntry) []coordruntime.Outbo
 	cloned := make([]coordruntime.OutboxEntry, len(current))
 	copy(cloned, current)
 	return cloned
+}
+
+func runtimeOutboxHasSlot(entries []coordruntime.OutboxEntry, slot int) bool {
+	for _, entry := range entries {
+		if entry.Slot == slot {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) shouldDispatchActivePeerRefresh(slot int) bool {
+	if _, ok := s.pending[slot]; ok {
+		return false
+	}
+	return !runtimeOutboxHasSlot(s.rt.Current().Outbox, slot)
 }
 
 func (s *Server) dispatchPlan(ctx context.Context, chainVersion uint64, plan coordinator.ReconfigurationPlan) error {
@@ -1145,6 +1180,44 @@ func (s *Server) dropRecoveredReplica(ctx context.Context, nodeID string, slot i
 	s.clearUnavailable(nodeID, slot)
 	s.observeDispatchResult("drop_recovered_replica", start, nil)
 	s.observeRepair("drop_recovered_replica", "success", nodeID, ops.IntPtr(slot), nil)
+	return nil
+}
+
+func (s *Server) dispatchActivePeerUpdates(ctx context.Context, slot int) error {
+	state := s.rt.Current()
+	var chain *coordinator.Chain
+	for i := range state.Cluster.Chains {
+		if state.Cluster.Chains[i].Slot == slot {
+			current := activeServingChain(state.Cluster.Chains[i])
+			chain = &current
+			break
+		}
+	}
+	if chain == nil {
+		return nil
+	}
+	for _, replica := range chain.Replicas {
+		if replica.State != coordinator.ReplicaStateActive {
+			continue
+		}
+		client, err := s.clientForNodeID(replica.NodeID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrDispatchFailed, err)
+		}
+		assignment, err := assignmentForNode(*chain, state.Cluster.NodesByID, replica.NodeID, state.SlotVersions[slot])
+		if err != nil {
+			return fmt.Errorf("err in assignmentForNode(update active peers): %w", err)
+		}
+		dispatchCtx, cancel := deriveDeadlineContext(ctx, s.dispatchTimeout)
+		err = client.UpdateChainPeers(dispatchCtx, storage.UpdateChainPeersCommand{Assignment: assignment})
+		cancel()
+		if err != nil {
+			if isContextTimeoutOrCancel(err) {
+				return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %w", ErrDispatchTimeout, replica.NodeID, err)
+			}
+			return fmt.Errorf("%w: err in node[%q].UpdateChainPeers: %v", ErrDispatchFailed, replica.NodeID, err)
+		}
+	}
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
@@ -19,6 +20,7 @@ type CoordinatorGRPCServer struct {
 	server     *coordserver.Server
 	grpc       *grpc.Server
 	lis        net.Listener
+	mu         sync.Mutex
 	authorizer *rpcAuthorizer
 	logger     zerolog.Logger
 	observer   *grpcObserver
@@ -82,6 +84,8 @@ func (s *CoordinatorGRPCServer) Close() error {
 }
 
 func (s *CoordinatorGRPCServer) Bootstrap(ctx context.Context, req *grpcproto.BootstrapRequest) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	nodes := make([]coordinator.Node, 0, len(req.Nodes))
 	for _, node := range req.Nodes {
 		nodes = append(nodes, fromProtoNode(node))
@@ -105,6 +109,8 @@ func (s *CoordinatorGRPCServer) Bootstrap(ctx context.Context, req *grpcproto.Bo
 }
 
 func (s *CoordinatorGRPCServer) RegisterNode(ctx context.Context, req *grpcproto.RegisterNodeRequest) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	state, err := s.server.RegisterNode(ctx, storage.NodeRegistration{
 		NodeID:         req.Node.Id,
 		RPCAddress:     req.Node.RpcAddress,
@@ -117,14 +123,20 @@ func (s *CoordinatorGRPCServer) RegisterNode(ctx context.Context, req *grpcproto
 }
 
 func (s *CoordinatorGRPCServer) AddNode(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.applyMembership(ctx, coordinator.EventKindAddNode, req)
 }
 
 func (s *CoordinatorGRPCServer) BeginDrainNode(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.applyMembership(ctx, coordinator.EventKindBeginDrainNode, req)
 }
 
 func (s *CoordinatorGRPCServer) MarkNodeDead(ctx context.Context, req *grpcproto.MembershipMutationRequest) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.applyMembership(ctx, coordinator.EventKindMarkNodeDead, req)
 }
 
@@ -173,6 +185,8 @@ func mapMembershipMethod(
 }
 
 func (s *CoordinatorGRPCServer) RoutingSnapshot(ctx context.Context, _ *grpcproto.RoutingSnapshotRequest) (*grpcproto.RoutingSnapshotResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snapshot, err := s.server.RoutingSnapshot(ctx)
 	if err != nil {
 		return nil, encodeError(err)
@@ -181,6 +195,8 @@ func (s *CoordinatorGRPCServer) RoutingSnapshot(ctx context.Context, _ *grpcprot
 }
 
 func (s *CoordinatorGRPCServer) ReportReplicaReady(ctx context.Context, req *grpcproto.ReplicaReadyReport) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.authorizer != nil {
 		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
 			return nil, encodeError(err)
@@ -194,6 +210,8 @@ func (s *CoordinatorGRPCServer) ReportReplicaReady(ctx context.Context, req *grp
 }
 
 func (s *CoordinatorGRPCServer) ReportReplicaRemoved(ctx context.Context, req *grpcproto.ReplicaRemovedReport) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.authorizer != nil {
 		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
 			return nil, encodeError(err)
@@ -207,6 +225,8 @@ func (s *CoordinatorGRPCServer) ReportReplicaRemoved(ctx context.Context, req *g
 }
 
 func (s *CoordinatorGRPCServer) ReportNodeHeartbeat(ctx context.Context, req *grpcproto.NodeStatus) (*grpcproto.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.authorizer != nil {
 		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
 			return nil, encodeError(err)
@@ -219,6 +239,8 @@ func (s *CoordinatorGRPCServer) ReportNodeHeartbeat(ctx context.Context, req *gr
 }
 
 func (s *CoordinatorGRPCServer) ReportNodeRecovered(ctx context.Context, req *grpcproto.NodeRecoveryReport) (*grpcproto.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.authorizer != nil {
 		if err := s.authorizer.requireStorageIdentityMatch(ctx, req.NodeId); err != nil {
 			return nil, encodeError(err)
@@ -231,6 +253,8 @@ func (s *CoordinatorGRPCServer) ReportNodeRecovered(ctx context.Context, req *gr
 }
 
 func (s *CoordinatorGRPCServer) EvaluateLiveness(ctx context.Context, _ *grpcproto.Empty) (*grpcproto.ServerState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.server.EvaluateLiveness(ctx); err != nil {
 		return nil, encodeError(err)
 	}

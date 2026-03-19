@@ -1,0 +1,50 @@
+{
+  "coordinator": {
+    "rpc_address": "127.0.0.1:7400",
+    "admin_address": "127.0.0.1:7401",
+    "slot_count": 1,
+    "replication_factor": 3
+  },
+  "nodes": [
+    {
+      "id": "a",
+      "rpc_address": "127.0.0.1:7411",
+      "admin_address": "127.0.0.1:7511",
+      "failure_domains": {
+        "host": "host-a",
+        "rack": "rack-a",
+        "az": "az-a"
+      }
+    },
+    {
+      "id": "b",
+      "rpc_address": "127.0.0.1:7412",
+      "admin_address": "127.0.0.1:7512",
+      "failure_domains": {
+        "host": "host-b",
+        "rack": "rack-b",
+        "az": "az-b"
+      }
+    },
+    {
+      "id": "c",
+      "rpc_address": "127.0.0.1:7413",
+      "admin_address": "127.0.0.1:7513",
+      "failure_domains": {
+        "host": "host-c",
+        "rack": "rack-c",
+        "az": "az-c"
+      }
+    },
+    {
+      "id": "d",
+      "rpc_address": "127.0.0.1:7414",
+      "admin_address": "127.0.0.1:7514",
+      "failure_domains": {
+        "host": "host-d",
+        "rack": "rack-d",
+        "az": "az-d"
+      }
+    }
+  ]
+}

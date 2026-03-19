@@ -14,6 +14,7 @@
 - [Coordinator HA Store](./HA_STORE.md)
 - [Coordinator](./coordinator/README.md)
 - [Observability](./OBSERVABILITY.md)
+- [Quickstart](./QUICKSTART.md)
 - [Security](./SECURITY.md)
 
 ## Ops Surfaces

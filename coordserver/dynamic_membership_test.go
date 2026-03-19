@@ -81,7 +81,10 @@ func TestDeadNodeTombstoneSurvivesRestartAndRejectsRejoin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBadgerStore returned error: %v", err)
 	}
-	server := mustOpenServerWithConfig(t, store, nil, ServerConfig{})
+	server := mustOpenServerWithConfig(t, store, mapToClient(map[string]*recordingNodeClient{
+		"a": newRecordingNodeClient("a"),
+		"b": newRecordingNodeClient("b"),
+	}), ServerConfig{})
 	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
 		t.Fatalf("Bootstrap returned error: %v", err)
 	}

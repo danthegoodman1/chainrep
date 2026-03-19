@@ -62,6 +62,10 @@ func (r *Router) Snapshot() (coordserver.RoutingSnapshot, bool) {
 	return cloneSnapshot(*r.snapshot), true
 }
 
+func RouteForKey(snapshot coordserver.RoutingSnapshot, key string) (coordserver.SlotRoute, error) {
+	return routeForKey(&snapshot, key)
+}
+
 func (r *Router) Get(ctx context.Context, key string) (storage.ReadResult, error) {
 	snapshot, err := r.loadedSnapshot()
 	if err != nil {
