@@ -49,6 +49,15 @@ Node membership is now dynamic by default:
 - a registered node only becomes eligible for fresh placement after its first successful heartbeat
 - node IDs marked dead are tombstoned and rejected from future auto-join; replacements must use a new node ID
 
+Coordinator liveness also supports flapping-node eviction:
+
+- liveness policy is configured through `coordserver.LivenessPolicy`
+- `SuspectAfter` and `DeadAfter` still control the normal `healthy -> suspect -> dead` path
+- `FlapWindow` and `FlapThreshold` optionally evict a node that repeatedly transitions into `suspect`
+- defaults are `30s` and `3` when liveness is enabled and flap values are left unset
+- flap detection can be disabled by setting `FlapThreshold <= 0` or `FlapWindow <= 0`
+- a flap-evicted node follows the same permanent tombstone path as an ordinary dead node
+
 ### Coordinator HA
 
 The repository now also supports an active/standby coordinator mode.
@@ -311,6 +320,8 @@ Storage nodes can summarize local lifecycle state through `ReportNodeHeartbeat`.
 The coordinator server persists these observations, tracks `healthy -> suspect -> dead` liveness state, and automatically emits `MarkNodeDead` when a node crosses the dead timeout.
 
 `suspect` is non-disruptive in the current implementation: routing does not change until the node is actually marked dead and the normal coordinator repair planner updates membership.
+
+To prevent a boot-looping or repeatedly unstable node from keeping a chain degraded forever, the coordinator can also evict flapping nodes. A flap is counted when a node transitions into `suspect` from a non-suspect state. If enough suspect transitions happen within `FlapWindow`, the coordinator immediately treats that node as dead and reuses the normal dead-node repair path. Flap history is persisted in coordinator state, so restart or HA failover does not forgive a nearly-evicted node.
 
 ### Restart / recovery
 

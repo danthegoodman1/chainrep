@@ -36,6 +36,7 @@ type serverMetrics struct {
 	dispatchDuration    prometheus.Histogram
 	livenessEvaluations prometheus.Counter
 	deadDetections      prometheus.Counter
+	flapDetections      prometheus.Counter
 	repairs             *prometheus.CounterVec
 	pendingGauge        prometheus.Gauge
 	unavailableGauge    prometheus.Gauge
@@ -141,6 +142,10 @@ func newServerMetrics(registry *prometheus.Registry) *serverMetrics {
 			Name: "chainrep_coordserver_dead_detections_total",
 			Help: "Nodes transitioned to dead by coordinator liveness policy.",
 		}),
+		flapDetections: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainrep_coordserver_flap_detections_total",
+			Help: "Nodes evicted by coordinator flapping detection.",
+		}),
 		repairs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "chainrep_coordserver_repairs_total",
 			Help: "Repair operations by kind and result.",
@@ -160,6 +165,7 @@ func newServerMetrics(registry *prometheus.Registry) *serverMetrics {
 		m.dispatchDuration,
 		m.livenessEvaluations,
 		m.deadDetections,
+		m.flapDetections,
 		m.repairs,
 		m.pendingGauge,
 		m.unavailableGauge,

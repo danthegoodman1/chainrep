@@ -137,6 +137,11 @@ At this point the CLI should show `contacted_node=b`.
 The replacement must be a new node ID. The current coordinator model tombstones
 dead node IDs, so the dead node `c` itself does not rejoin.
 
+The quickstart also uses aggressive coordinator liveness settings so localhost
+dead-node detection happens quickly. In the main product, the same liveness
+policy can also evict flapping nodes before repeated boot loops keep a chain
+degraded indefinitely.
+
 6. Watch the coordinator state:
 
 ```bash

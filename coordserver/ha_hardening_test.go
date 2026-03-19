@@ -145,6 +145,60 @@ func TestHADuplicateMarkLeavingDispatchAfterFailoverIsSafe(t *testing.T) {
 	}
 }
 
+func TestHAFlapHistorySurvivesFailoverAndEvictsNode(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    10 * time.Second,
+			FlapThreshold: 2,
+		},
+	})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 1, 3, []string{"a", "b", "c"})
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+	}
+
+	h.clock.Advance(6 * time.Second)
+	if err := h.leader.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("leader EvaluateLiveness returned error: %v", err)
+	}
+	if got, want := h.leader.Liveness()["c"].State, coordruntime.NodeLivenessStateSuspect; got != want {
+		t.Fatalf("leader state after first suspect = %q, want %q", got, want)
+	}
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) recovery returned error: %v", err)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+
+	h.clock.Advance(6 * time.Second)
+	if err := h.standby.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("standby EvaluateLiveness returned error: %v", err)
+	}
+	if got, want := h.standby.Liveness()["c"].State, coordruntime.NodeLivenessStateDead; got != want {
+		t.Fatalf("standby state after flap eviction = %q, want %q", got, want)
+	}
+	if !nodeMarkedDead(h.standby.Current().Cluster, "c") {
+		t.Fatal("node c was not tombstoned after HA flap eviction")
+	}
+	if got, want := h.standby.Pending()[0].NodeID, "d"; got != want {
+		t.Fatalf("pending replacement node after HA flap eviction = %q, want %q", got, want)
+	}
+}
+
 func TestHARestartResumesUndispatchedOutboxWork(t *testing.T) {
 	ctx := context.Background()
 	h := newHAInMemoryHarness(t, []string{"a", "b", "c", "d"})
@@ -330,6 +384,10 @@ type haInMemoryHarness struct {
 }
 
 func newHAInMemoryHarness(t *testing.T, nodeIDs []string) *haInMemoryHarness {
+	return newHAInMemoryHarnessWithConfig(t, nodeIDs, ServerConfig{})
+}
+
+func newHAInMemoryHarnessWithConfig(t *testing.T, nodeIDs []string, cfg ServerConfig) *haInMemoryHarness {
 	t.Helper()
 
 	clock := &fakeClock{now: time.Unix(0, 0).UTC()}
@@ -348,20 +406,21 @@ func newHAInMemoryHarness(t *testing.T, nodeIDs []string) *haInMemoryHarness {
 		}
 		adapters[nodeID] = adapter
 		nodeClients[nodeID] = adapter
+		repl.RegisterNode(nodeID, adapter.Node())
 	}
 
 	newServer := func(coordinatorID, advertise string) *Server {
-		return mustOpenServerWithConfig(t, coordruntime.NewInMemoryStore(), nodeClients, ServerConfig{
-			Clock: clock,
-			HA: &HAConfig{
-				CoordinatorID:          coordinatorID,
-				AdvertiseAddress:       advertise,
-				Store:                  store,
-				LeaseTTL:               2 * time.Second,
-				RenewInterval:          time.Second,
-				DisableBackgroundLoops: true,
-			},
-		})
+		serverCfg := cfg
+		serverCfg.Clock = clock
+		serverCfg.HA = &HAConfig{
+			CoordinatorID:          coordinatorID,
+			AdvertiseAddress:       advertise,
+			Store:                  store,
+			LeaseTTL:               2 * time.Second,
+			RenewInterval:          time.Second,
+			DisableBackgroundLoops: true,
+		}
+		return mustOpenServerWithConfig(t, coordruntime.NewInMemoryStore(), nodeClients, serverCfg)
 	}
 	h := &haInMemoryHarness{
 		clock:    clock,

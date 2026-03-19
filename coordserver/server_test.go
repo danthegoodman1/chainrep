@@ -776,6 +776,7 @@ func newInMemoryHarness(t *testing.T, nodeIDs []string) *inMemoryHarness {
 		}
 		adapters[nodeID] = adapter
 		nodeClients[nodeID] = adapter
+		repl.RegisterNode(nodeID, adapter.Node())
 	}
 	server := mustOpenServer(t, nodeClients)
 	for _, adapter := range adapters {

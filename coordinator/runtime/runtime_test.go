@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 	"github.com/danthegoodman1/chainrep/storage"
@@ -149,6 +150,101 @@ func TestLivenessTransitionPersistsAndCheckpointRecovers(t *testing.T) {
 	}
 	if got, want := reopened.Current().NodeLivenessByID["a"].State, NodeLivenessStateDead; got != want {
 		t.Fatalf("liveness state after reopen = %q, want %q", got, want)
+	}
+}
+
+func TestFlapHistoryPersistsAndPrunesAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+	windowNanos := int64((30 * time.Second).Nanoseconds())
+
+	state, err := rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-1",
+		ExpectedVersion: 0,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: int64((100 * time.Second).Nanoseconds()),
+			FlapWindowNanos:    windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat returned error: %v", err)
+	}
+	state, err = rt.ApplyLiveness(ctx, Command{
+		ID:              "liveness-a-suspect-1",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindLiveness,
+		Liveness: &LivenessCommand{
+			NodeID:              "a",
+			State:               NodeLivenessStateSuspect,
+			EvaluatedAtUnixNano: int64((110 * time.Second).Nanoseconds()),
+			FlapWindowNanos:     windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyLiveness(suspect-1) returned error: %v", err)
+	}
+	state, err = rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-2",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: int64((115 * time.Second).Nanoseconds()),
+			FlapWindowNanos:    windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat(second) returned error: %v", err)
+	}
+	state, err = rt.ApplyLiveness(ctx, Command{
+		ID:              "liveness-a-suspect-2",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindLiveness,
+		Liveness: &LivenessCommand{
+			NodeID:              "a",
+			State:               NodeLivenessStateSuspect,
+			EvaluatedAtUnixNano: int64((125 * time.Second).Nanoseconds()),
+			FlapWindowNanos:     windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyLiveness(suspect-2) returned error: %v", err)
+	}
+	if got, want := state.NodeLivenessByID["a"].SuspectTransitionsUnixNano, []int64{
+		int64((110 * time.Second).Nanoseconds()),
+		int64((125 * time.Second).Nanoseconds()),
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("suspect transitions before reopen = %v, want %v", got, want)
+	}
+
+	reopened := mustOpenRuntime(t, store)
+	if got, want := reopened.Current().NodeLivenessByID["a"].SuspectTransitionsUnixNano, []int64{
+		int64((110 * time.Second).Nanoseconds()),
+		int64((125 * time.Second).Nanoseconds()),
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("suspect transitions after reopen = %v, want %v", got, want)
+	}
+
+	state, err = reopened.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-3",
+		ExpectedVersion: reopened.Current().Version,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: int64((150 * time.Second).Nanoseconds()),
+			FlapWindowNanos:    windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat(third) returned error: %v", err)
+	}
+	if got, want := state.NodeLivenessByID["a"].SuspectTransitionsUnixNano, []int64{
+		int64((125 * time.Second).Nanoseconds()),
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("suspect transitions after prune = %v, want %v", got, want)
 	}
 }
 

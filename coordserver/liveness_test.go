@@ -7,7 +7,9 @@ import (
 	"time"
 
 	coordruntime "github.com/danthegoodman1/chainrep/coordinator/runtime"
+	"github.com/danthegoodman1/chainrep/ops"
 	"github.com/danthegoodman1/chainrep/storage"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestHeartbeatPersistsHealthyLiveness(t *testing.T) {
@@ -178,6 +180,496 @@ func TestDeadTransitionRepairCompletesWithDelayedQueuedProgress(t *testing.T) {
 	}
 }
 
+func TestFlapDetectionEvictsAfterConfiguredSuspectEpisodes(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    30 * time.Second,
+			FlapThreshold: 3,
+		},
+		Clock: clock,
+	})
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 3, []string{"a", "b", "c"})
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		clock.Advance(6 * time.Second)
+		if err := server.EvaluateLiveness(ctx); err != nil {
+			t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+		}
+		if got, want := server.Liveness()["c"].State, coordruntime.NodeLivenessStateSuspect; got != want {
+			t.Fatalf("state after suspect cycle %d = %q, want %q", i+1, got, want)
+		}
+		if nodeMarkedDead(server.Current().Cluster, "c") {
+			t.Fatal("node c was marked dead before reaching flap threshold")
+		}
+		if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(c) recovery cycle %d returned error: %v", i+1, err)
+		}
+	}
+
+	clock.Advance(6 * time.Second)
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness(third suspect) returned error: %v", err)
+	}
+	if got, want := server.Liveness()["c"].State, coordruntime.NodeLivenessStateDead; got != want {
+		t.Fatalf("state after flap eviction = %q, want %q", got, want)
+	}
+	if !nodeMarkedDead(server.Current().Cluster, "c") {
+		t.Fatal("node c was not tombstoned after flap eviction")
+	}
+	if got, want := server.Pending()[0].NodeID, "d"; got != want {
+		t.Fatalf("pending replacement node = %q, want %q", got, want)
+	}
+}
+
+func TestFlapDetectionCountsRepeatedSuspectOnlyOnceUntilRecovery(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    30 * time.Second,
+			FlapThreshold: 2,
+		},
+		Clock: clock,
+	})
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 2, []string{"a", "b"})
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+	}
+	if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(a) returned error: %v", err)
+	}
+
+	clock.Advance(6 * time.Second)
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness(first suspect) returned error: %v", err)
+	}
+	record := server.Liveness()["a"]
+	if got, want := len(record.SuspectTransitionsUnixNano), 1; got != want {
+		t.Fatalf("suspect transition count after first suspect = %d, want %d", got, want)
+	}
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness(repeated suspect) returned error: %v", err)
+	}
+	record = server.Liveness()["a"]
+	if got, want := len(record.SuspectTransitionsUnixNano), 1; got != want {
+		t.Fatalf("suspect transition count after repeated suspect = %d, want %d", got, want)
+	}
+	if nodeMarkedDead(server.Current().Cluster, "a") {
+		t.Fatal("node a was marked dead without a second suspect episode")
+	}
+
+	if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(a) recovery returned error: %v", err)
+	}
+	clock.Advance(6 * time.Second)
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness(second suspect) returned error: %v", err)
+	}
+	if got, want := server.Liveness()["a"].State, coordruntime.NodeLivenessStateDead; got != want {
+		t.Fatalf("state after second suspect = %q, want %q", got, want)
+	}
+}
+
+func TestFlapDetectionCanBeDisabledAndUsesCustomThreshold(t *testing.T) {
+	t.Run("default threshold and window", func(t *testing.T) {
+		ctx := context.Background()
+		clock := &fakeClock{now: time.Unix(0, 0)}
+		h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+			LivenessPolicy: LivenessPolicy{
+				SuspectAfter: 5 * time.Second,
+				DeadAfter:    20 * time.Second,
+			},
+			Clock: clock,
+		})
+		server := h.server
+		if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		h.seedBootstrap(t, 1, 3, []string{"a", "b", "c"})
+		if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+		}
+		if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			clock.Advance(6 * time.Second)
+			if err := server.EvaluateLiveness(ctx); err != nil {
+				t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+			}
+			if i < 2 {
+				if nodeMarkedDead(server.Current().Cluster, "c") {
+					t.Fatal("node c was evicted before the default flap threshold")
+				}
+				if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+					t.Fatalf("ReportHeartbeat(c) recovery cycle %d returned error: %v", i+1, err)
+				}
+			}
+		}
+		if !nodeMarkedDead(server.Current().Cluster, "c") {
+			t.Fatal("node c was not evicted at the default flap threshold")
+		}
+	})
+
+	t.Run("custom threshold", func(t *testing.T) {
+		ctx := context.Background()
+		clock := &fakeClock{now: time.Unix(0, 0)}
+		h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c"}, ServerConfig{
+			LivenessPolicy: LivenessPolicy{
+				SuspectAfter:  5 * time.Second,
+				DeadAfter:     20 * time.Second,
+				FlapWindow:    10 * time.Second,
+				FlapThreshold: 2,
+			},
+			Clock: clock,
+		})
+		server := h.server
+		if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		h.seedBootstrap(t, 1, 2, []string{"a", "b"})
+		if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+		}
+		if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(a) returned error: %v", err)
+		}
+		for i := 0; i < 2; i++ {
+			clock.Advance(6 * time.Second)
+			if err := server.EvaluateLiveness(ctx); err != nil {
+				t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+			}
+			if i == 0 {
+				if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+					t.Fatalf("ReportHeartbeat(a) recovery returned error: %v", err)
+				}
+			}
+		}
+		if !nodeMarkedDead(server.Current().Cluster, "a") {
+			t.Fatal("node a was not evicted at custom flap threshold")
+		}
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		ctx := context.Background()
+		clock := &fakeClock{now: time.Unix(0, 0)}
+		h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c"}, ServerConfig{
+			LivenessPolicy: LivenessPolicy{
+				SuspectAfter:  5 * time.Second,
+				DeadAfter:     20 * time.Second,
+				FlapWindow:    10 * time.Second,
+				FlapThreshold: -1,
+			},
+			Clock: clock,
+		})
+		server := h.server
+		if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		h.seedBootstrap(t, 1, 2, []string{"a", "b"})
+		if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+		}
+		if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(a) returned error: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			clock.Advance(6 * time.Second)
+			if err := server.EvaluateLiveness(ctx); err != nil {
+				t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+			}
+			if nodeMarkedDead(server.Current().Cluster, "a") {
+				t.Fatal("node a was marked dead with flap detection disabled")
+			}
+			if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+				t.Fatalf("ReportHeartbeat(a) recovery cycle %d returned error: %v", i+1, err)
+			}
+		}
+	})
+}
+
+func TestFlapDetectionRejectsInvalidThresholdWhenEnabled(t *testing.T) {
+	_, err := OpenWithConfig(context.Background(), coordruntime.NewInMemoryStore(), nil, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    10 * time.Second,
+			FlapThreshold: 1,
+		},
+	})
+	if err == nil {
+		t.Fatal("OpenWithConfig unexpectedly succeeded with invalid flap threshold")
+	}
+}
+
+func TestFlapHistoryAgesOutOutsideConfiguredWindow(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    10 * time.Second,
+			FlapThreshold: 2,
+		},
+		Clock: clock,
+	})
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 2, []string{"a", "b"})
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+	}
+	if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(a) returned error: %v", err)
+	}
+
+	clock.Advance(6 * time.Second)
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness(first suspect) returned error: %v", err)
+	}
+	if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(a) recovery returned error: %v", err)
+	}
+
+	clock.Advance(11 * time.Second)
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("EvaluateLiveness(after window) returned error: %v", err)
+	}
+	if nodeMarkedDead(server.Current().Cluster, "a") {
+		t.Fatal("node a was evicted even though prior flap aged out of the window")
+	}
+}
+
+func TestFlapEvictionRepairsFlappingTailAndRestoresDataPlane(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    10 * time.Second,
+			FlapThreshold: 2,
+		},
+		Clock: clock,
+	})
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 3, []string{"a", "b", "c"})
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+	}
+
+	if _, err := h.adapters["a"].Node().HandleClientPut(ctx, storage.ClientPutRequest{
+		Slot:                 0,
+		Key:                  "flap-tail",
+		Value:                "v1",
+		ExpectedChainVersion: server.Current().SlotVersions[0],
+	}); err != nil {
+		t.Fatalf("initial HandleClientPut returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		clock.Advance(6 * time.Second)
+		if err := server.EvaluateLiveness(ctx); err != nil {
+			t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+		}
+		if i == 0 {
+			if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+				t.Fatalf("ReportHeartbeat(c) recovery returned error: %v", err)
+			}
+		}
+	}
+	if !nodeMarkedDead(server.Current().Cluster, "c") {
+		t.Fatal("node c was not evicted after flapping")
+	}
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if got, want := replicaNodeStates(server.Current().Cluster.Chains[0]), []string{"a:active", "b:active", "d:active"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("final chain after tail flap repair = %v, want %v", got, want)
+	}
+	currentVersion := server.Current().SlotVersions[0]
+	if _, err := h.adapters["a"].Node().HandleClientPut(ctx, storage.ClientPutRequest{
+		Slot:                 0,
+		Key:                  "flap-tail",
+		Value:                "v2",
+		ExpectedChainVersion: currentVersion,
+	}); err != nil {
+		t.Fatalf("post-repair HandleClientPut returned error: %v", err)
+	}
+	read, err := h.adapters["d"].Node().HandleClientGet(ctx, storage.ClientGetRequest{
+		Slot:                 0,
+		Key:                  "flap-tail",
+		ExpectedChainVersion: currentVersion,
+	})
+	if err != nil {
+		t.Fatalf("post-repair HandleClientGet returned error: %v", err)
+	}
+	if got, want := read.Value, "v2"; got != want {
+		t.Fatalf("post-repair read value = %q, want %q", got, want)
+	}
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err == nil {
+		t.Fatal("flap-evicted tail unexpectedly rejoined")
+	}
+}
+
+func TestFlapEvictionRepairsFlappingHeadAndRestoresDataPlane(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    10 * time.Second,
+			FlapThreshold: 2,
+		},
+		Clock: clock,
+	})
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 3, []string{"a", "b", "c"})
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(a) returned error: %v", err)
+	}
+
+	if _, err := h.adapters["a"].Node().HandleClientPut(ctx, storage.ClientPutRequest{
+		Slot:                 0,
+		Key:                  "flap-head",
+		Value:                "v1",
+		ExpectedChainVersion: server.Current().SlotVersions[0],
+	}); err != nil {
+		t.Fatalf("initial HandleClientPut returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		clock.Advance(6 * time.Second)
+		if err := server.EvaluateLiveness(ctx); err != nil {
+			t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+		}
+		if i == 0 {
+			if err := h.adapters["a"].Node().ReportHeartbeat(ctx); err != nil {
+				t.Fatalf("ReportHeartbeat(a) recovery returned error: %v", err)
+			}
+		}
+	}
+	if !nodeMarkedDead(server.Current().Cluster, "a") {
+		t.Fatal("node a was not evicted after flapping")
+	}
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if got, want := replicaNodeStates(server.Current().Cluster.Chains[0]), []string{"b:active", "c:active", "d:active"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("final chain after head flap repair = %v, want %v", got, want)
+	}
+	currentVersion := server.Current().SlotVersions[0]
+	if _, err := h.adapters["b"].Node().HandleClientPut(ctx, storage.ClientPutRequest{
+		Slot:                 0,
+		Key:                  "flap-head",
+		Value:                "v2",
+		ExpectedChainVersion: currentVersion,
+	}); err != nil {
+		t.Fatalf("post-repair HandleClientPut returned error: %v", err)
+	}
+	read, err := h.adapters["d"].Node().HandleClientGet(ctx, storage.ClientGetRequest{
+		Slot:                 0,
+		Key:                  "flap-head",
+		ExpectedChainVersion: currentVersion,
+	})
+	if err != nil {
+		t.Fatalf("post-repair HandleClientGet returned error: %v", err)
+	}
+	if got, want := read.Value, "v2"; got != want {
+		t.Fatalf("post-repair read value = %q, want %q", got, want)
+	}
+}
+
+func TestFlapEvictionUpdatesMetricsAndAdminState(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	registry := prometheus.NewRegistry()
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		LivenessPolicy: LivenessPolicy{
+			SuspectAfter:  5 * time.Second,
+			DeadAfter:     20 * time.Second,
+			FlapWindow:    10 * time.Second,
+			FlapThreshold: 2,
+		},
+		MetricsRegistry: registry,
+		Clock:           clock,
+	})
+	server := h.server
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 1, 3, []string{"a", "b", "c"})
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(c) returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		clock.Advance(6 * time.Second)
+		if err := server.EvaluateLiveness(ctx); err != nil {
+			t.Fatalf("EvaluateLiveness cycle %d returned error: %v", i+1, err)
+		}
+		if i == 0 {
+			if err := h.adapters["c"].Node().ReportHeartbeat(ctx); err != nil {
+				t.Fatalf("ReportHeartbeat(c) recovery returned error: %v", err)
+			}
+		}
+	}
+
+	if got, want := metricCounterValue(t, registry, "chainrep_coordserver_flap_detections_total"), 1.0; got != want {
+		t.Fatalf("flap detections metric = %v, want %v", got, want)
+	}
+	state := server.AdminState(ctx)
+	record := state.Liveness["c"]
+	if got, want := len(record.SuspectTransitionsUnixNano), 2; got != want {
+		t.Fatalf("admin liveness suspect transition count = %d, want %d", got, want)
+	}
+	if got, want := state.Pending[0].NodeID, "d"; got != want {
+		t.Fatalf("admin pending replacement = %q, want %q", got, want)
+	}
+	if !containsEventKind(state.Recent, "flap_eviction") {
+		t.Fatalf("recent events = %#v, want flap_eviction event", state.Recent)
+	}
+}
+
 func TestLivenessRecoveryAfterCoordinatorReopenDoesNotDuplicateDeadAction(t *testing.T) {
 	ctx := context.Background()
 	store := coordruntime.NewInMemoryStore()
@@ -232,6 +724,38 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+func metricCounterValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("registry.Gather returned error: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metric.Counter != nil {
+				return metric.Counter.GetValue()
+			}
+			if metric.Gauge != nil {
+				return metric.Gauge.GetValue()
+			}
+		}
+	}
+	t.Fatalf("metric %q not found", name)
+	return 0
+}
+
+func containsEventKind(events []ops.Event, kind string) bool {
+	for _, event := range events {
+		if event.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func mustOpenServerWithConfig(
 	t *testing.T,
 	store coordruntime.Store,
@@ -279,6 +803,7 @@ func newInMemoryHarnessWithConfig(t *testing.T, nodeIDs []string, cfg ServerConf
 		}
 		adapters[nodeID] = adapter
 		nodeClients[nodeID] = adapter
+		repl.RegisterNode(nodeID, adapter.Node())
 	}
 	server := mustOpenServerWithConfig(t, coordruntime.NewInMemoryStore(), nodeClients, cfg)
 	for _, adapter := range adapters {

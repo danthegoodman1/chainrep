@@ -9,6 +9,7 @@
 - Read-only HTTP admin/health endpoints plus Prometheus metrics
 - Non-HA coordinator mode now has a durable local control outbox with retry/restart recovery
 - Storage nodes can auto-register and join dynamically from coordinator heartbeats instead of requiring a static node list
+- Coordinator liveness can evict flapping nodes before they keep a chain degraded indefinitely
 
 - [Architecture](./ARCHITECTURE.md)
 - [Coordinator HA Store](./HA_STORE.md)

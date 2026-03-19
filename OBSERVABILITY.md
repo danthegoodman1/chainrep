@@ -29,7 +29,7 @@ The default policy is to log state transitions and failures rather than every
 successful read/write/RPC. High-signal events include:
 
 - coordinator bootstrap, membership mutation, liveness evaluation, repair start,
-  repair completion, dispatch timeout, and dispatch failure
+  repair completion, flap detection, dispatch timeout, and dispatch failure
 - storage replica add/activate/leave/remove, catch-up and recovery activity,
   ambiguous writes, conditional write failures, replication conflicts, and
   backpressure rejection
@@ -86,12 +86,14 @@ Coordinator metrics are registered from
 - `chainrep_coordserver_dispatch_duration_seconds`
 - `chainrep_coordserver_liveness_evaluations_total`
 - `chainrep_coordserver_dead_detections_total`
+- `chainrep_coordserver_flap_detections_total`
 - `chainrep_coordserver_repairs_total`
 - `chainrep_coordserver_pending_work`
 - `chainrep_coordserver_unavailable_replicas`
 
 These cover command execution, coordinator-to-storage dispatch behavior, liveness
-evaluation, repair activity, and current pending or unavailable work.
+evaluation, flap-triggered eviction, repair activity, and current pending or
+unavailable work.
 
 ### gRPC Transport Metrics
 
@@ -149,6 +151,7 @@ Coordinator state currently includes:
 - pending work
 - node heartbeats
 - liveness state
+  - including persisted suspect-transition history used for flap detection
 - unavailable replicas
 - last recovery reports
 - recent coordinator events
@@ -176,8 +179,41 @@ Those events are surfaced in three ways:
 Coordinator recent events include:
 
 - liveness transitions
+- flap suspect counting and flap-triggered eviction
 - repair planning and completion
 - dispatch failures and timeouts
+
+## Liveness and Flapping
+
+Coordinator liveness is configured through `coordserver.LivenessPolicy`.
+
+Fields:
+
+- `SuspectAfter`
+- `DeadAfter`
+- `FlapWindow`
+- `FlapThreshold`
+
+Behavior:
+
+- ordinary liveness still follows `healthy -> suspect -> dead`
+- `suspect` alone does not change routing
+- a flap is counted only when a node transitions into `suspect`
+- repeated evaluation ticks while already suspect do not increase the flap count
+- if flap detection is enabled and the node reaches `FlapThreshold` suspect
+  transitions inside `FlapWindow`, it is evicted through the normal dead-node
+  repair path
+- flap-evicted node IDs are tombstoned exactly like other dead nodes and are
+  rejected from future auto-join
+
+Defaults:
+
+- `FlapWindow = 30s`
+- `FlapThreshold = 3`
+
+These defaults apply when liveness is enabled and both flap fields are left
+unset. Flap detection can be disabled by setting `FlapThreshold <= 0` or
+`FlapWindow <= 0`.
 
 Storage recent events include:
 

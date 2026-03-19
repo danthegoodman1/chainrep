@@ -90,8 +90,10 @@ type RoutingSnapshot struct {
 }
 
 type LivenessPolicy struct {
-	SuspectAfter time.Duration
-	DeadAfter    time.Duration
+	SuspectAfter  time.Duration
+	DeadAfter     time.Duration
+	FlapWindow    time.Duration
+	FlapThreshold int
 }
 
 type Clock interface {
@@ -143,6 +145,8 @@ const (
 	defaultDispatchTimeout        = 5 * time.Second
 	defaultDispatchRetryInterval  = 200 * time.Millisecond
 	defaultRecoveryCommandTimeout = 5 * time.Second
+	defaultFlapWindow             = 30 * time.Second
+	defaultFlapThreshold          = 3
 )
 
 func Open(ctx context.Context, store coordruntime.Store, nodes map[string]StorageNodeClient) (*Server, error) {
@@ -177,7 +181,7 @@ func OpenWithConfig(
 		completed:              map[int][]coordruntime.CompletedProgressRecord{},
 		unavailableReplicas:    map[string]map[int]bool{},
 		lastRecoveryReports:    map[string]storage.NodeRecoveryReport{},
-		livenessPolicy:         cfg.LivenessPolicy,
+		livenessPolicy:         normalizeLivenessPolicy(cfg.LivenessPolicy),
 		clock:                  cfg.Clock,
 		dispatchTimeout:        cfg.DispatchTimeout,
 		dispatchRetryInterval:  cfg.DispatchRetryInterval,
@@ -551,6 +555,7 @@ func (s *Server) ReportNodeHeartbeat(ctx context.Context, status storage.NodeSta
 		Heartbeat: &coordruntime.HeartbeatCommand{
 			Status:             status,
 			ObservedAtUnixNano: observedAt,
+			FlapWindowNanos:    s.livenessPolicy.FlapWindow.Nanoseconds(),
 		},
 	})
 	if err != nil {
@@ -628,6 +633,22 @@ func (s *Server) EvaluateLiveness(ctx context.Context) error {
 				s.metrics.deadDetections.Inc()
 			}
 			s.events.record(s.logger, zerolog.InfoLevel, "liveness_transition", "coordinator node liveness transitioned", nodeID, nil, nil, "", "", nil)
+			if target == coordruntime.NodeLivenessStateSuspect && flapDetectionEnabled(s.livenessPolicy) {
+				flapCount := len(record.SuspectTransitionsUnixNano)
+				s.events.record(s.logger, zerolog.WarnLevel, "flap_suspect_transition", "coordinator recorded suspect transition for flap detection", nodeID, nil, nil, "", "", nil)
+				if flapCount >= s.livenessPolicy.FlapThreshold {
+					updated, err := s.applyLivenessTransition(ctx, nodeID, coordruntime.NodeLivenessStateDead, nowUnix, record.DeadActionFired)
+					if err != nil {
+						return err
+					}
+					record = updated
+					if s.metrics != nil {
+						s.metrics.deadDetections.Inc()
+						s.metrics.flapDetections.Inc()
+					}
+					s.events.record(s.logger, zerolog.WarnLevel, "flap_eviction", "coordinator evicted flapping node", nodeID, nil, nil, "", "", nil)
+				}
+			}
 		}
 
 		if record.State == coordruntime.NodeLivenessStateDead && !record.DeadActionFired {
@@ -1627,6 +1648,7 @@ func (s *Server) applyLivenessTransition(
 			State:               state,
 			EvaluatedAtUnixNano: evaluatedAtUnixNano,
 			DeadActionFired:     deadActionFired,
+			FlapWindowNanos:     s.livenessPolicy.FlapWindow.Nanoseconds(),
 		},
 	}); err != nil {
 		return coordruntime.NodeLivenessRecord{}, fmt.Errorf("err in s.rt.ApplyLiveness: %w", err)
@@ -1662,13 +1684,17 @@ func (s *Server) syncViewsFromRuntime() {
 }
 
 func validateServerConfig(cfg ServerConfig) error {
-	if cfg.LivenessPolicy.SuspectAfter < 0 || cfg.LivenessPolicy.DeadAfter < 0 {
+	if cfg.LivenessPolicy.SuspectAfter < 0 || cfg.LivenessPolicy.DeadAfter < 0 || cfg.LivenessPolicy.FlapWindow < 0 {
 		return fmt.Errorf("%w: liveness durations must be >= 0", ErrInvalidServerConfig)
 	}
 	if cfg.LivenessPolicy.DeadAfter > 0 &&
 		cfg.LivenessPolicy.SuspectAfter > 0 &&
 		cfg.LivenessPolicy.DeadAfter < cfg.LivenessPolicy.SuspectAfter {
 		return fmt.Errorf("%w: dead timeout must be >= suspect timeout", ErrInvalidServerConfig)
+	}
+	normalizedLiveness := normalizeLivenessPolicy(cfg.LivenessPolicy)
+	if flapDetectionEnabled(normalizedLiveness) && normalizedLiveness.FlapThreshold < 2 {
+		return fmt.Errorf("%w: flap threshold must be >= 2 when enabled", ErrInvalidServerConfig)
 	}
 	if cfg.DispatchTimeout < 0 {
 		return fmt.Errorf("%w: dispatch timeout must be >= 0", ErrInvalidServerConfig)
@@ -1720,11 +1746,27 @@ func (realClock) Now() time.Time {
 
 func cloneLivenessRecord(record coordruntime.NodeLivenessRecord) coordruntime.NodeLivenessRecord {
 	return coordruntime.NodeLivenessRecord{
-		LastHeartbeatUnixNano: record.LastHeartbeatUnixNano,
-		State:                 record.State,
-		LastStatus:            cloneNodeStatus(record.LastStatus),
-		DeadActionFired:       record.DeadActionFired,
+		LastHeartbeatUnixNano:      record.LastHeartbeatUnixNano,
+		State:                      record.State,
+		LastStatus:                 cloneNodeStatus(record.LastStatus),
+		DeadActionFired:            record.DeadActionFired,
+		SuspectTransitionsUnixNano: append([]int64(nil), record.SuspectTransitionsUnixNano...),
 	}
+}
+
+func normalizeLivenessPolicy(policy LivenessPolicy) LivenessPolicy {
+	if policy.SuspectAfter > 0 &&
+		policy.DeadAfter > 0 &&
+		policy.FlapThreshold == 0 &&
+		policy.FlapWindow == 0 {
+		policy.FlapThreshold = defaultFlapThreshold
+		policy.FlapWindow = defaultFlapWindow
+	}
+	return policy
+}
+
+func flapDetectionEnabled(policy LivenessPolicy) bool {
+	return policy.FlapThreshold > 0 && policy.FlapWindow > 0
 }
 
 func cloneNodeStatus(status storage.NodeStatus) storage.NodeStatus {

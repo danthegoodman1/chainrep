@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/danthegoodman1/chainrep/coordinator"
 )
@@ -62,5 +63,90 @@ func TestBadgerStoreRecoversPendingAndOutboxState(t *testing.T) {
 	}
 	if len(reopened.Current().Outbox) == 0 {
 		t.Fatal("reopened runtime lost outbox entries")
+	}
+}
+
+func TestBadgerStoreRecoversFlapHistory(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	store, err := OpenBadgerStore(path)
+	if err != nil {
+		t.Fatalf("OpenBadgerStore returned error: %v", err)
+	}
+
+	rt := mustOpenRuntime(t, store)
+	windowNanos := int64((30 * time.Second).Nanoseconds())
+	state, err := rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-1",
+		ExpectedVersion: 0,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: int64((100 * time.Second).Nanoseconds()),
+			FlapWindowNanos:    windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat returned error: %v", err)
+	}
+	state, err = rt.ApplyLiveness(ctx, Command{
+		ID:              "liveness-a-suspect-1",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindLiveness,
+		Liveness: &LivenessCommand{
+			NodeID:              "a",
+			State:               NodeLivenessStateSuspect,
+			EvaluatedAtUnixNano: int64((110 * time.Second).Nanoseconds()),
+			FlapWindowNanos:     windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyLiveness(suspect-1) returned error: %v", err)
+	}
+	state, err = rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-a-2",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status:             uniqueNodeStatus("a"),
+			ObservedAtUnixNano: int64((115 * time.Second).Nanoseconds()),
+			FlapWindowNanos:    windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat(second) returned error: %v", err)
+	}
+	state, err = rt.ApplyLiveness(ctx, Command{
+		ID:              "liveness-a-suspect-2",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindLiveness,
+		Liveness: &LivenessCommand{
+			NodeID:              "a",
+			State:               NodeLivenessStateSuspect,
+			EvaluatedAtUnixNano: int64((125 * time.Second).Nanoseconds()),
+			FlapWindowNanos:     windowNanos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyLiveness(suspect-2) returned error: %v", err)
+	}
+	if err := rt.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	reopenedStore, err := OpenBadgerStore(path)
+	if err != nil {
+		t.Fatalf("OpenBadgerStore(reopen) returned error: %v", err)
+	}
+	defer func() { _ = reopenedStore.Close() }()
+	reopened := mustOpenRuntime(t, reopenedStore)
+	if got, want := reopened.Current().NodeLivenessByID["a"].SuspectTransitionsUnixNano, []int64{
+		int64((110 * time.Second).Nanoseconds()),
+		int64((125 * time.Second).Nanoseconds()),
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("suspect transitions after reopen = %v, want %v", got, want)
 	}
 }

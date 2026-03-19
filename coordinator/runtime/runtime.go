@@ -86,10 +86,11 @@ const (
 )
 
 type NodeLivenessRecord struct {
-	LastHeartbeatUnixNano int64
-	State                 NodeLivenessState
-	LastStatus            storage.NodeStatus
-	DeadActionFired       bool
+	LastHeartbeatUnixNano      int64
+	State                      NodeLivenessState
+	LastStatus                 storage.NodeStatus
+	DeadActionFired            bool
+	SuspectTransitionsUnixNano []int64
 }
 
 type AppliedCommand struct {
@@ -146,6 +147,7 @@ type ProgressCommand struct {
 type HeartbeatCommand struct {
 	Status             storage.NodeStatus
 	ObservedAtUnixNano int64
+	FlapWindowNanos    int64
 }
 
 type LivenessCommand struct {
@@ -153,6 +155,7 @@ type LivenessCommand struct {
 	State               NodeLivenessState
 	EvaluatedAtUnixNano int64
 	DeadActionFired     bool
+	FlapWindowNanos     int64
 }
 
 type AcknowledgeOutboxCommand struct {
@@ -799,6 +802,7 @@ func cloneCommand(cmd Command) Command {
 		cloned.Heartbeat = &HeartbeatCommand{
 			Status:             cloneNodeStatus(cmd.Heartbeat.Status),
 			ObservedAtUnixNano: cmd.Heartbeat.ObservedAtUnixNano,
+			FlapWindowNanos:    cmd.Heartbeat.FlapWindowNanos,
 		}
 	}
 	if cmd.Liveness != nil {
@@ -807,6 +811,7 @@ func cloneCommand(cmd Command) Command {
 			State:               cmd.Liveness.State,
 			EvaluatedAtUnixNano: cmd.Liveness.EvaluatedAtUnixNano,
 			DeadActionFired:     cmd.Liveness.DeadActionFired,
+			FlapWindowNanos:     cmd.Liveness.FlapWindowNanos,
 		}
 	}
 	if cmd.AcknowledgeOutbox != nil {
@@ -825,6 +830,11 @@ func nextNodeLiveness(
 		record := next[cmd.Heartbeat.Status.NodeID]
 		record.LastHeartbeatUnixNano = cmd.Heartbeat.ObservedAtUnixNano
 		record.LastStatus = cloneNodeStatus(cmd.Heartbeat.Status)
+		record.SuspectTransitionsUnixNano = pruneSuspectTransitions(
+			record.SuspectTransitionsUnixNano,
+			cmd.Heartbeat.ObservedAtUnixNano,
+			cmd.Heartbeat.FlapWindowNanos,
+		)
 		if record.State != NodeLivenessStateDead {
 			record.State = NodeLivenessStateHealthy
 			record.DeadActionFired = false
@@ -832,6 +842,19 @@ func nextNodeLiveness(
 		next[cmd.Heartbeat.Status.NodeID] = record
 	case CommandKindLiveness:
 		record := next[cmd.Liveness.NodeID]
+		record.SuspectTransitionsUnixNano = pruneSuspectTransitions(
+			record.SuspectTransitionsUnixNano,
+			cmd.Liveness.EvaluatedAtUnixNano,
+			cmd.Liveness.FlapWindowNanos,
+		)
+		if cmd.Liveness.State == NodeLivenessStateSuspect &&
+			record.State != NodeLivenessStateSuspect &&
+			cmd.Liveness.EvaluatedAtUnixNano != 0 {
+			record.SuspectTransitionsUnixNano = append(
+				record.SuspectTransitionsUnixNano,
+				cmd.Liveness.EvaluatedAtUnixNano,
+			)
+		}
 		record.State = cmd.Liveness.State
 		record.DeadActionFired = cmd.Liveness.DeadActionFired
 		if cmd.Liveness.EvaluatedAtUnixNano != 0 && record.LastHeartbeatUnixNano == 0 {
@@ -846,13 +869,31 @@ func cloneNodeLivenessMap(current map[string]NodeLivenessRecord) map[string]Node
 	cloned := make(map[string]NodeLivenessRecord, len(current))
 	for nodeID, record := range current {
 		cloned[nodeID] = NodeLivenessRecord{
-			LastHeartbeatUnixNano: record.LastHeartbeatUnixNano,
-			State:                 record.State,
-			LastStatus:            cloneNodeStatus(record.LastStatus),
-			DeadActionFired:       record.DeadActionFired,
+			LastHeartbeatUnixNano:      record.LastHeartbeatUnixNano,
+			State:                      record.State,
+			LastStatus:                 cloneNodeStatus(record.LastStatus),
+			DeadActionFired:            record.DeadActionFired,
+			SuspectTransitionsUnixNano: append([]int64(nil), record.SuspectTransitionsUnixNano...),
 		}
 	}
 	return cloned
+}
+
+func pruneSuspectTransitions(current []int64, observedAtUnixNano int64, flapWindowNanos int64) []int64 {
+	if len(current) == 0 {
+		return nil
+	}
+	if observedAtUnixNano == 0 || flapWindowNanos <= 0 {
+		return append([]int64(nil), current...)
+	}
+	cutoff := observedAtUnixNano - flapWindowNanos
+	pruned := make([]int64, 0, len(current))
+	for _, ts := range current {
+		if ts >= cutoff {
+			pruned = append(pruned, ts)
+		}
+	}
+	return pruned
 }
 
 func clonePendingMap(current map[int]PendingWork) map[int]PendingWork {
