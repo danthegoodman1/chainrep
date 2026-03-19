@@ -356,6 +356,116 @@ func TestEndToEndRouterPutGetDeleteAndRefreshAfterReconfiguration(t *testing.T) 
 	assertChainValue(t, h, 1, key, "")
 }
 
+func TestRouterServesWritesAfterDynamicAutoJoinTailActivation(t *testing.T) {
+	ctx := context.Background()
+	h := newRouterHarness(t, []string{"a", "b", "c"})
+	bootstrapDynamicCluster(t, ctx, h, 1, 3, []string{"a", "b", "c"})
+
+	router := mustNewRouter(t, h.server, h.transport)
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+
+	snapshot, ok := router.Snapshot()
+	if !ok {
+		t.Fatal("router snapshot not loaded")
+	}
+	if got, want := snapshot.Slots[0].HeadNodeID, "a"; got != want {
+		t.Fatalf("head node = %q, want %q", got, want)
+	}
+	if got, want := snapshot.Slots[0].TailNodeID, "c"; got != want {
+		t.Fatalf("tail node = %q, want %q", got, want)
+	}
+	if !snapshot.Slots[0].Writable || !snapshot.Slots[0].Readable {
+		t.Fatalf("slot route = %#v, want readable and writable", snapshot.Slots[0])
+	}
+
+	key := keyForSlot(t, 0, 1, "dynamic-tail")
+	if _, err := router.Put(ctx, key, "v1"); err != nil {
+		t.Fatalf("Put returned error: %v", err)
+	}
+	readResult, err := router.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got, want := readResult.Value, "v1"; got != want {
+		t.Fatalf("read value = %q, want %q", got, want)
+	}
+	assertReplicaValueOnNodes(t, h, 0, key, "v1", "a", "b", "c")
+}
+
+func TestRouterReadAndReplacementTailStayCorrectAcrossDeadTailReconfiguration(t *testing.T) {
+	ctx := context.Background()
+	h := newRouterHarness(t, []string{"a", "b", "c", "d"})
+	bootstrapDynamicCluster(t, ctx, h, 1, 3, []string{"a", "b", "c"})
+
+	router := mustNewRouter(t, h.server, h.transport)
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+
+	key := keyForSlot(t, 0, 1, "dead-tail")
+	if _, err := router.Put(ctx, key, "v1"); err != nil {
+		t.Fatalf("initial Put returned error: %v", err)
+	}
+	assertReplicaValueOnNodes(t, h, 0, key, "v1", "a", "b", "c")
+
+	current := h.server.Current()
+	if _, err := h.server.MarkNodeDead(ctx, reconfigureCommand("dead-c", current.Version, coordinator.Event{
+		Kind:   coordinator.EventKindMarkNodeDead,
+		NodeID: "c",
+	}, coordinator.ReconfigurationPolicy{})); err != nil {
+		t.Fatalf("MarkNodeDead returned error: %v", err)
+	}
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh after dead tail returned error: %v", err)
+	}
+	snapshot, ok := router.Snapshot()
+	if !ok {
+		t.Fatal("router snapshot not loaded after dead tail")
+	}
+	if got, want := snapshot.Slots[0].TailNodeID, "b"; got != want {
+		t.Fatalf("tail after dead-node shorten = %q, want %q", got, want)
+	}
+	readResult, err := router.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after dead tail returned error: %v", err)
+	}
+	if got, want := readResult.Value, "v1"; got != want {
+		t.Fatalf("read value after dead tail = %q, want %q", got, want)
+	}
+	assertReplicaValueOnNodes(t, h, 0, key, "v1", "a", "b")
+
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if err := router.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh after replacement tail returned error: %v", err)
+	}
+	snapshot, ok = router.Snapshot()
+	if !ok {
+		t.Fatal("router snapshot not loaded after replacement tail")
+	}
+	if got, want := snapshot.Slots[0].TailNodeID, "d"; got != want {
+		t.Fatalf("tail after replacement join = %q, want %q", got, want)
+	}
+
+	if _, err := router.Put(ctx, key, "v2"); err != nil {
+		t.Fatalf("Put after replacement returned error: %v", err)
+	}
+	readResult, err = router.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after replacement returned error: %v", err)
+	}
+	if got, want := readResult.Value, "v2"; got != want {
+		t.Fatalf("read value after replacement = %q, want %q", got, want)
+	}
+	assertReplicaValueOnNodes(t, h, 0, key, "v2", "a", "b", "d")
+}
+
 func TestRouterPutIfReturnsTypedConditionFailure(t *testing.T) {
 	ctx := context.Background()
 	h := newRouterHarness(t, []string{"a", "b", "c"})
@@ -745,6 +855,30 @@ func keyForSlot(t *testing.T, slot int, slotCount int, prefix string) string {
 	return ""
 }
 
+func bootstrapDynamicCluster(
+	t *testing.T,
+	ctx context.Context,
+	h *routerHarness,
+	slotCount int,
+	replicationFactor int,
+	nodeIDs []string,
+) {
+	t.Helper()
+	if _, err := h.server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, slotCount, replicationFactor)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	for _, nodeID := range nodeIDs {
+		if err := h.adapters[nodeID].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(%q) returned error: %v", nodeID, err)
+		}
+	}
+	for _, nodeID := range nodeIDs {
+		if err := h.adapters[nodeID].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+			t.Fatalf("ActivateReplica(%q) returned error: %v", nodeID, err)
+		}
+	}
+}
+
 func assertChainValue(t *testing.T, h *routerHarness, slot int, key string, want string) {
 	t.Helper()
 	for nodeID, adapter := range h.adapters {
@@ -766,6 +900,27 @@ func assertChainValue(t *testing.T, h *routerHarness, slot int, key string, want
 				t.Fatalf("node %q slot %d has value %q, want missing", nodeID, slot, got.Value)
 			}
 			continue
+		}
+		if got.Value != want {
+			t.Fatalf("node %q slot %d value = %q, want %q", nodeID, slot, got.Value, want)
+		}
+	}
+}
+
+func assertReplicaValueOnNodes(t *testing.T, h *routerHarness, slot int, key string, want string, nodeIDs ...string) {
+	t.Helper()
+	for _, nodeID := range nodeIDs {
+		adapter, ok := h.adapters[nodeID]
+		if !ok {
+			t.Fatalf("unknown adapter %q", nodeID)
+		}
+		snapshot, err := adapter.Node().CommittedSnapshot(slot)
+		if err != nil {
+			t.Fatalf("CommittedSnapshot(%q, %d) returned error: %v", nodeID, slot, err)
+		}
+		got, ok := snapshot[key]
+		if !ok {
+			t.Fatalf("node %q slot %d missing key %q", nodeID, slot, key)
 		}
 		if got.Value != want {
 			t.Fatalf("node %q slot %d value = %q, want %q", nodeID, slot, got.Value, want)

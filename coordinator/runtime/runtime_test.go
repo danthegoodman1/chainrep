@@ -447,6 +447,118 @@ func TestCompletedProgressHistoryPrunesToBoundedWindow(t *testing.T) {
 	}
 }
 
+func TestSlotVersionsAdvanceOnlyOnSlotChanges(t *testing.T) {
+	ctx := context.Background()
+	rt := mustOpenRuntime(t, NewInMemoryStore())
+
+	state, err := rt.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 3, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if got, want := state.SlotVersions[0], uint64(1); got != want {
+		t.Fatalf("slot version after bootstrap = %d, want %d", got, want)
+	}
+
+	for i, nodeID := range []string{"a", "b", "c"} {
+		state, err = rt.Heartbeat(ctx, Command{
+			ID:              fmt.Sprintf("heartbeat-%d", i+1),
+			ExpectedVersion: state.Version,
+			Kind:            CommandKindHeartbeat,
+			Heartbeat: &HeartbeatCommand{
+				Status: storage.NodeStatus{NodeID: nodeID},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Heartbeat(%q) returned error: %v", nodeID, err)
+		}
+	}
+	if got, want := state.SlotVersions[0], uint64(1); got != want {
+		t.Fatalf("slot version after heartbeats = %d, want %d", got, want)
+	}
+
+	_, state, err = rt.Reconfigure(ctx, Command{
+		ID:              "reconfigure-add-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: []coordinator.Event{{Kind: coordinator.EventKindAddNode, Node: uniqueNode("d")}},
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(AddNode) returned error: %v", err)
+	}
+	if got, want := state.SlotVersions[0], uint64(1); got != want {
+		t.Fatalf("slot version after add-node without placement change = %d, want %d", got, want)
+	}
+
+	state, err = rt.Heartbeat(ctx, Command{
+		ID:              "heartbeat-d-ready",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindHeartbeat,
+		Heartbeat: &HeartbeatCommand{
+			Status: storage.NodeStatus{NodeID: "d"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat(d) returned error: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		state, err = rt.Heartbeat(ctx, Command{
+			ID:              fmt.Sprintf("heartbeat-extra-%d", i+1),
+			ExpectedVersion: state.Version,
+			Kind:            CommandKindHeartbeat,
+			Heartbeat: &HeartbeatCommand{
+				Status: storage.NodeStatus{NodeID: "a"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Heartbeat(extra %d) returned error: %v", i+1, err)
+		}
+	}
+	if got, want := state.SlotVersions[0], uint64(1); got != want {
+		t.Fatalf("slot version after extra heartbeats = %d, want %d", got, want)
+	}
+
+	plan, state, err := rt.Reconfigure(ctx, Command{
+		ID:              "reconfigure-begin-drain-c",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: []coordinator.Event{{Kind: coordinator.EventKindBeginDrainNode, NodeID: "c"}},
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(BeginDrainNode) returned error: %v", err)
+	}
+	if got, want := state.SlotVersions[0], uint64(2); got != want {
+		t.Fatalf("slot version after begin-drain reconfigure = %d, want %d", got, want)
+	}
+
+	slot := plan.ChangedSlots[0].Slot
+	joiningNode := plan.ChangedSlots[0].Steps[0].NodeID
+	state, err = rt.ApplyProgress(ctx, Command{
+		ID:              "progress-ready-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindProgress,
+		Progress: &ProgressCommand{
+			Event: coordinator.Event{
+				Kind:   coordinator.EventKindReplicaBecameActive,
+				Slot:   slot,
+				NodeID: joiningNode,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProgress(ready) returned error: %v", err)
+	}
+	if got, want := state.SlotVersions[slot], uint64(2); got != want {
+		t.Fatalf("slot version after ready progress = %d, want %d", got, want)
+	}
+}
+
 func TestCheckpointPrunesAppliedCommandsAndPreservesRecovery(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemoryStore()

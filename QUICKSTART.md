@@ -60,7 +60,7 @@ through the same `a -> b -> c` chain once the cluster is ready.
 You can inspect the coordinator state while it converges:
 
 ```bash
-curl -s http://127.0.0.1:7401/admin/v1/state | jq .
+curl -s http://127.0.0.1:7401/admin/v1/state | jq '.current.Cluster.ReadyNodeIDs, .routing_snapshot.slots'
 ```
 
 Once slot `0` is readable and writable, the cluster is ready.
@@ -111,7 +111,7 @@ the contacted node should be the active head.
 3. Within a couple seconds, the coordinator should mark `c` dead. Check:
 
 ```bash
-curl -s http://127.0.0.1:7401/admin/v1/state | jq '.current.cluster.nodeHealthByID, .routing_snapshot.slots'
+curl -s http://127.0.0.1:7401/admin/v1/state | jq '.current.Cluster.NodeHealthByID, .routing_snapshot.slots'
 ```
 
 You should see:
@@ -140,7 +140,7 @@ dead node IDs, so the dead node `c` itself does not rejoin.
 6. Watch the coordinator state:
 
 ```bash
-curl -s http://127.0.0.1:7401/admin/v1/state | jq '.current.cluster.readyNodeIDs, .routing_snapshot.slots'
+curl -s http://127.0.0.1:7401/admin/v1/state | jq '.current.Cluster.ReadyNodeIDs, .routing_snapshot.slots'
 ```
 
 You should see:

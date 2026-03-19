@@ -20,16 +20,16 @@ var (
 )
 
 type State struct {
-	Version          uint64
-	LastLogIndex     uint64
-	Cluster          coordinator.ClusterState
-	SlotVersions     map[int]uint64
+	Version                 uint64
+	LastLogIndex            uint64
+	Cluster                 coordinator.ClusterState
+	SlotVersions            map[int]uint64
 	CompletedProgressBySlot map[int][]CompletedProgressRecord
-	NodeLivenessByID map[string]NodeLivenessRecord
-	PendingBySlot    map[int]PendingWork
-	Outbox           []OutboxEntry
-	LastPolicy       coordinator.ReconfigurationPolicy
-	AppliedCommands  map[string]AppliedCommand
+	NodeLivenessByID        map[string]NodeLivenessRecord
+	PendingBySlot           map[int]PendingWork
+	Outbox                  []OutboxEntry
+	LastPolicy              coordinator.ReconfigurationPolicy
+	AppliedCommands         map[string]AppliedCommand
 }
 
 type PendingKind string
@@ -50,9 +50,9 @@ type PendingWork struct {
 type OutboxCommandKind string
 
 const (
-	OutboxCommandKindAddReplicaAsTail OutboxCommandKind = "add_replica_as_tail"
+	OutboxCommandKindAddReplicaAsTail   OutboxCommandKind = "add_replica_as_tail"
 	OutboxCommandKindMarkReplicaLeaving OutboxCommandKind = "mark_replica_leaving"
-	OutboxCommandKindUpdateChainPeers OutboxCommandKind = "update_chain_peers"
+	OutboxCommandKindUpdateChainPeers   OutboxCommandKind = "update_chain_peers"
 )
 
 type OutboxEntry struct {
@@ -93,39 +93,39 @@ type NodeLivenessRecord struct {
 }
 
 type AppliedCommand struct {
-	Command                Command
-	Version                uint64
-	LastLogIndex           uint64
-	Cluster                coordinator.ClusterState
-	SlotVersions           map[int]uint64
+	Command                 Command
+	Version                 uint64
+	LastLogIndex            uint64
+	Cluster                 coordinator.ClusterState
+	SlotVersions            map[int]uint64
 	CompletedProgressBySlot map[int][]CompletedProgressRecord
-	NodeLivenessByID       map[string]NodeLivenessRecord
-	PendingBySlot          map[int]PendingWork
-	Outbox                 []OutboxEntry
-	LastPolicy             coordinator.ReconfigurationPolicy
-	Plan                   *coordinator.ReconfigurationPlan
+	NodeLivenessByID        map[string]NodeLivenessRecord
+	PendingBySlot           map[int]PendingWork
+	Outbox                  []OutboxEntry
+	LastPolicy              coordinator.ReconfigurationPolicy
+	Plan                    *coordinator.ReconfigurationPlan
 }
 
 type CommandKind string
 
 const (
-	CommandKindBootstrap   CommandKind = "bootstrap"
-	CommandKindReconfigure CommandKind = "reconfigure"
-	CommandKindProgress    CommandKind = "progress"
-	CommandKindHeartbeat   CommandKind = "heartbeat"
-	CommandKindLiveness    CommandKind = "liveness"
+	CommandKindBootstrap         CommandKind = "bootstrap"
+	CommandKindReconfigure       CommandKind = "reconfigure"
+	CommandKindProgress          CommandKind = "progress"
+	CommandKindHeartbeat         CommandKind = "heartbeat"
+	CommandKindLiveness          CommandKind = "liveness"
 	CommandKindAcknowledgeOutbox CommandKind = "acknowledge_outbox"
 )
 
 type Command struct {
-	ID              string
-	ExpectedVersion uint64
-	Kind            CommandKind
-	Bootstrap       *BootstrapCommand
-	Reconfigure     *ReconfigureCommand
-	Progress        *ProgressCommand
-	Heartbeat       *HeartbeatCommand
-	Liveness        *LivenessCommand
+	ID                string
+	ExpectedVersion   uint64
+	Kind              CommandKind
+	Bootstrap         *BootstrapCommand
+	Reconfigure       *ReconfigureCommand
+	Progress          *ProgressCommand
+	Heartbeat         *HeartbeatCommand
+	Liveness          *LivenessCommand
 	AcknowledgeOutbox *AcknowledgeOutboxCommand
 }
 
@@ -144,8 +144,8 @@ type ProgressCommand struct {
 }
 
 type HeartbeatCommand struct {
-	Status              storage.NodeStatus
-	ObservedAtUnixNano  int64
+	Status             storage.NodeStatus
+	ObservedAtUnixNano int64
 }
 
 type LivenessCommand struct {
@@ -627,16 +627,16 @@ func nextClusterState(current coordinator.ClusterState, cmd Command) coordinator
 
 func (r *Runtime) snapshotForApplied(applied AppliedCommand) State {
 	snapshot := State{
-		Version:                applied.Version,
-		LastLogIndex:           applied.LastLogIndex,
-		Cluster:                cloneClusterState(applied.Cluster),
-		SlotVersions:           cloneSlotVersions(applied.SlotVersions),
+		Version:                 applied.Version,
+		LastLogIndex:            applied.LastLogIndex,
+		Cluster:                 cloneClusterState(applied.Cluster),
+		SlotVersions:            cloneSlotVersions(applied.SlotVersions),
 		CompletedProgressBySlot: cloneCompletedProgressMap(applied.CompletedProgressBySlot),
-		NodeLivenessByID: cloneNodeLivenessMap(applied.NodeLivenessByID),
-		PendingBySlot:          clonePendingMap(applied.PendingBySlot),
-		Outbox:                 cloneOutbox(applied.Outbox),
-		LastPolicy:             applied.LastPolicy,
-		AppliedCommands:        make(map[string]AppliedCommand),
+		NodeLivenessByID:        cloneNodeLivenessMap(applied.NodeLivenessByID),
+		PendingBySlot:           clonePendingMap(applied.PendingBySlot),
+		Outbox:                  cloneOutbox(applied.Outbox),
+		LastPolicy:              applied.LastPolicy,
+		AppliedCommands:         make(map[string]AppliedCommand),
 	}
 	for id, existing := range r.state.AppliedCommands {
 		if existing.Version <= applied.Version {
@@ -663,16 +663,16 @@ func isInitialized(state State) bool {
 
 func cloneState(state State) State {
 	cloned := State{
-		Version:                state.Version,
-		LastLogIndex:           state.LastLogIndex,
-		Cluster:                cloneClusterState(state.Cluster),
-		SlotVersions:           cloneSlotVersions(state.SlotVersions),
+		Version:                 state.Version,
+		LastLogIndex:            state.LastLogIndex,
+		Cluster:                 cloneClusterState(state.Cluster),
+		SlotVersions:            cloneSlotVersions(state.SlotVersions),
 		CompletedProgressBySlot: cloneCompletedProgressMap(state.CompletedProgressBySlot),
-		NodeLivenessByID: cloneNodeLivenessMap(state.NodeLivenessByID),
-		PendingBySlot:          clonePendingMap(state.PendingBySlot),
-		Outbox:                 cloneOutbox(state.Outbox),
-		LastPolicy:             state.LastPolicy,
-		AppliedCommands:        make(map[string]AppliedCommand, len(state.AppliedCommands)),
+		NodeLivenessByID:        cloneNodeLivenessMap(state.NodeLivenessByID),
+		PendingBySlot:           clonePendingMap(state.PendingBySlot),
+		Outbox:                  cloneOutbox(state.Outbox),
+		LastPolicy:              state.LastPolicy,
+		AppliedCommands:         make(map[string]AppliedCommand, len(state.AppliedCommands)),
 	}
 	for id, applied := range state.AppliedCommands {
 		cloned.AppliedCommands[id] = cloneAppliedCommand(applied)
@@ -698,7 +698,7 @@ func cloneAppliedCommand(applied AppliedCommand) AppliedCommand {
 
 func nextSlotVersions(
 	current map[int]uint64,
-	version uint64,
+	_ uint64,
 	kind CommandKind,
 	cluster coordinator.ClusterState,
 	plan *coordinator.ReconfigurationPlan,
@@ -708,14 +708,14 @@ func nextSlotVersions(
 	case CommandKindBootstrap:
 		next = make(map[int]uint64, len(cluster.Chains))
 		for _, chain := range cluster.Chains {
-			next[chain.Slot] = version
+			next[chain.Slot] = current[chain.Slot] + 1
 		}
 	case CommandKindReconfigure:
 		if plan == nil {
 			return next
 		}
 		for _, slotPlan := range plan.ChangedSlots {
-			next[slotPlan.Slot] = version
+			next[slotPlan.Slot] = current[slotPlan.Slot] + 1
 		}
 	}
 	return next
@@ -1178,7 +1178,7 @@ func cloneEvents(events []coordinator.Event) []coordinator.Event {
 
 func cloneEvent(event coordinator.Event) coordinator.Event {
 	return coordinator.Event{
-		Kind:   event.Kind,
+		Kind: event.Kind,
 		Node: coordinator.Node{
 			ID:             event.Node.ID,
 			RPCAddress:     event.Node.RPCAddress,
