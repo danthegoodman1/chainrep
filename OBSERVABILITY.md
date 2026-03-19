@@ -245,11 +245,11 @@ go admin.ListenAndServe()
 
 ## Testing
 
-Observability coverage uses real components rather than mocks:
+Observability coverage includes:
 
 - [storage/observability_test.go](./storage/observability_test.go)
 - [transport/grpcx/observability_test.go](./transport/grpcx/observability_test.go)
 - [adminhttp/server_test.go](./adminhttp/server_test.go)
 
-Those tests exercise real coordinator, storage, gRPC, TLS, metrics registries,
-and HTTP admin listeners.
+Those tests exercise coordinator, storage, gRPC, TLS, metrics registries, and
+HTTP admin listeners.

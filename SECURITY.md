@@ -245,7 +245,7 @@ pool, err := grpcx.NewConnPoolWithTLS(grpcx.ClientTLSConfig{
 
 ## Testing
 
-The transport package includes real TLS integration coverage:
+The transport package includes TLS integration coverage for:
 
 - TLS-only client access
 - optional client mTLS

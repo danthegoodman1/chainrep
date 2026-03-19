@@ -28,3 +28,10 @@
 - [x] Add fault-injected async transport tests for delay, drop, duplicate, and reorder behavior.
 - [x] Define and test crash-consistency guarantees for the durable storage backend and local metadata store.
 - [x] Stored objects have associated metadata, enabling conditional writes (e.g. monotonic fencing token per-object, auto-incremented on mutation)
+
+# Badger specific (because who knows if it's really durable)
+
+- [ ] Add Badger large-value reopen and recovery coverage so values above the `1 MB` threshold exercise the value-log path, not just the small-value WAL path.
+- [ ] Add Badger large-value crash-boundary tests for `ApplyCommitted` and `InstallSnapshot` to verify atomic reopen behavior when the value-log path is involved.
+- [ ] Add Badger file-creation and rotation reopen tests so durability assumptions around new backing files and directory sync are covered.
+- [ ] Add randomized parity tests that drive the Badger backend and in-memory backend through the same operation stream, including periodic reopen, and compare committed state and staged state.

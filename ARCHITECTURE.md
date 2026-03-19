@@ -225,7 +225,7 @@ Current replica lifecycle states:
 
 ## Current Network Transport
 
-The repository now has a real gRPC transport layer in addition to the in-memory reference transports.
+The transport layer has both gRPC and in-memory implementations.
 
 - one coordinator gRPC server hosts routing snapshot, admin membership RPCs, liveness evaluation, and storage-node progress/report callbacks
 - one storage-node gRPC server hosts client data RPCs, coordinator-issued lifecycle commands, and replica replication RPCs
@@ -242,8 +242,7 @@ The repository now has a real gRPC transport layer in addition to the in-memory 
 
 ## Observability and Ops
 
-The repository now has a first real operability surface in addition to the storage and
-transport runtime itself.
+The system exposes an operability surface alongside the storage and transport runtime.
 
 - logging uses `zerolog` through the local `gologger` package
 - logging is event-focused rather than per-request by default
@@ -319,11 +318,11 @@ If a client write times out or is canceled after entering the storage write path
 
 ## What Is Still Missing
 
-The code now has the core interfaces plus:
+The codebase includes:
 
 - in-memory reference implementations
 - a local durable Badger-backed storage backend and local metadata store
-- a real gRPC transport layer for coordinator, storage-node, replication, and client traffic
+- a gRPC transport layer for coordinator, storage-node, replication, and client traffic
 
 It still does not yet have:
 
@@ -334,4 +333,4 @@ So the current shape is:
 - coordinator decides
 - storage executes
 - clients route using coordinator snapshots
-- the same interfaces can run either entirely in memory or over real gRPC depending on the harness or deployment
+- the same interfaces can run either entirely in memory or over gRPC depending on the harness or deployment

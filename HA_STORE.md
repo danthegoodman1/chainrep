@@ -219,7 +219,7 @@ Minimum bar:
 
 1. pass the HA-store conformance suite
 2. run `go test ./coordserver ./transport/grpcx`
-3. verify coordinator failover still works with real gRPC clients
+3. verify coordinator failover still works with gRPC clients
 
 Recommended additional checks:
 

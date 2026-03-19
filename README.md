@@ -1,8 +1,9 @@
 # chainrep - Chain Replication in Go
 
-- Real gRPC transport between client, coordinator, and storage nodes
+- Default gRPC transport between client, coordinator, and storage nodes
 - Coordinator HA via epoch-gated active/standby failover
-- Durable local Badger-backed storage backend
+- Default durable local Badger-backed storage backend
+- Interface-driven transport and storage layers so you can plug in custom implementations
 - Conditional writes with per-object metadata
 - Optional TLS/mTLS security for gRPC transports
 - Read-only HTTP admin/health endpoints plus Prometheus metrics
@@ -30,19 +31,19 @@ trusted network only.
 
 ## Performance Notes
 
-The repo includes a real end-to-end localhost gRPC benchmark in
+The repo includes an end-to-end localhost gRPC benchmark in
 [`transport/grpcx/grpc_benchmark_test.go`](./transport/grpcx/grpc_benchmark_test.go).
 It uses:
 
-- a real coordinator gRPC server
-- a real client router
-- real storage-node gRPC servers
-- real gRPC replication between nodes
-- real Badger-backed storage on local temp directories
+- a coordinator gRPC server
+- a client router
+- storage-node gRPC servers
+- gRPC replication between nodes
+- Badger-backed storage on local temp directories
 
-These numbers are end-to-end client latencies on localhost through a production-style
-setup: router -> coordinator snapshot -> storage-node gRPC server(s) -> Badger-backed
-storage, with replication over gRPC where applicable.
+These numbers are end-to-end client latencies on localhost through a
+setup: router -> coordinator snapshot -> storage-node gRPC server(s) -> storage,
+with replication over gRPC where applicable.
 
 Benchmark command:
 
@@ -57,8 +58,7 @@ Average results from 5 localhost benchmark runs on an Apple M3 Max, using the co
 - `three_replica_get`: `0.045 ms/op`, `10,657 B/op`, `186 allocs/op`
 - `three_replica_put`: `0.325 ms/op`, `58,215 B/op`, `1,118 allocs/op`
 
-These are reference localhost numbers for the current implementation, not SLOs or
-cross-machine production guarantees. They include real gRPC and durable local storage
-costs, but not network latency, TLS, or multi-host deployment effects. The benchmark
-uses real Badger-backed storage, but the measured read path is likely hot-cache behavior
-through Badger and the OS page cache rather than cold disk-read latency.
+These are localhost benchmark numbers, not SLOs or cross-machine production guarantees.
+They include gRPC and durable local storage costs, but not network latency, TLS, or
+multi-host deployment effects. The read path likely reflects cache-warm access through
+Badger and the OS page cache rather than cold disk-read latency.
