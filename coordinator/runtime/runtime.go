@@ -947,7 +947,7 @@ func nextPending(
 		if plan == nil {
 			return next
 		}
-		return pendingFromPlan(version, slotVersions, cluster, cmd, plan)
+		return pendingFromPlan(next, version, slotVersions, cluster, cmd, plan)
 	case CommandKindProgress:
 		if cmd.Progress != nil {
 			delete(next, cmd.Progress.Event.Slot)
@@ -959,14 +959,16 @@ func nextPending(
 }
 
 func pendingFromPlan(
-	version uint64,
+	current map[int]PendingWork,
+	_ uint64,
 	slotVersions map[int]uint64,
 	cluster coordinator.ClusterState,
 	cmd Command,
 	plan *coordinator.ReconfigurationPlan,
 ) map[int]PendingWork {
-	next := map[int]PendingWork{}
+	next := clonePendingMap(current)
 	for _, slotPlan := range plan.ChangedSlots {
+		delete(next, slotPlan.Slot)
 		stepKinds := distinctStepKinds(slotPlan.Steps)
 		switch {
 		case len(stepKinds) == 1 && stepKinds[0] == coordinator.StepKindAppendTail:
@@ -1011,7 +1013,7 @@ func nextOutbox(
 		if plan == nil {
 			return cloneOutbox(current)
 		}
-		return outboxFromPlan(version, slotVersions, cluster, plan)
+		return outboxFromPlan(current, version, slotVersions, cluster, plan)
 	case CommandKindProgress:
 		if cmd.Progress == nil {
 			return cloneOutbox(current)
@@ -1040,12 +1042,36 @@ func nextOutbox(
 }
 
 func outboxFromPlan(
+	current []OutboxEntry,
 	version uint64,
 	slotVersions map[int]uint64,
 	cluster coordinator.ClusterState,
 	plan *coordinator.ReconfigurationPlan,
 ) []OutboxEntry {
-	var outbox []OutboxEntry
+	changedSlots := make(map[int]struct{}, len(plan.ChangedSlots))
+	for _, slotPlan := range plan.ChangedSlots {
+		changedSlots[slotPlan.Slot] = struct{}{}
+	}
+
+	outbox := make([]OutboxEntry, 0, len(current))
+	for _, entry := range current {
+		if _, changed := changedSlots[entry.Slot]; changed {
+			continue
+		}
+		outbox = append(outbox, OutboxEntry{
+			ID:        entry.ID,
+			Slot:      entry.Slot,
+			NodeID:    entry.NodeID,
+			Kind:      entry.Kind,
+			CommandID: entry.CommandID,
+			Assignment: storage.ReplicaAssignment{
+				Slot:         entry.Assignment.Slot,
+				ChainVersion: entry.Assignment.ChainVersion,
+				Role:         entry.Assignment.Role,
+				Peers:        entry.Assignment.Peers,
+			},
+		})
+	}
 	for _, slotPlan := range plan.ChangedSlots {
 		stepKinds := distinctStepKinds(slotPlan.Steps)
 		switch {

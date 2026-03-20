@@ -629,6 +629,92 @@ func TestReconcileAfterRemovedProgressMovesPendingOffCompletedSlot(t *testing.T)
 	}
 }
 
+func TestCheckpointPreservesCompletedProgressWhileAnotherSlotRemainsPending(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+
+	state, err := rt.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	plan, state, err := rt.Reconfigure(ctx, Command{
+		ID:              "add-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: []coordinator.Event{{Kind: coordinator.EventKindAddNode, Node: uniqueNode("d")}},
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(add-d) returned error: %v", err)
+	}
+	if got, want := len(plan.ChangedSlots), 2; got != want {
+		t.Fatalf("changed slot count = %d, want %d", got, want)
+	}
+	for i, entry := range state.Outbox {
+		state, err = rt.AcknowledgeOutbox(ctx, Command{
+			ID:              fmt.Sprintf("ack-%d", i),
+			ExpectedVersion: state.Version,
+			Kind:            CommandKindAcknowledgeOutbox,
+			AcknowledgeOutbox: &AcknowledgeOutboxCommand{
+				EntryID: entry.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("AcknowledgeOutbox(%s) returned error: %v", entry.ID, err)
+		}
+	}
+
+	firstSlot := plan.ChangedSlots[0].Slot
+	secondSlot := plan.ChangedSlots[1].Slot
+	state, err = rt.ApplyProgress(ctx, Command{
+		ID:              "progress-ready-d-first",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindProgress,
+		Progress: &ProgressCommand{
+			Event: coordinator.Event{
+				Kind:   coordinator.EventKindReplicaBecameActive,
+				Slot:   firstSlot,
+				NodeID: "d",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProgress(first ready) returned error: %v", err)
+	}
+	if got, want := state.PendingBySlot[secondSlot].Kind, PendingKindReady; got != want {
+		t.Fatalf("second slot pending kind before checkpoint = %q, want %q", got, want)
+	}
+	if _, exists := state.PendingBySlot[firstSlot]; exists {
+		t.Fatalf("first slot pending before checkpoint = %#v, want none", state.PendingBySlot[firstSlot])
+	}
+	if got, want := len(state.CompletedProgressBySlot[firstSlot]), 1; got != want {
+		t.Fatalf("completed progress record count for first slot before checkpoint = %d, want %d", got, want)
+	}
+	if err := rt.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint returned error: %v", err)
+	}
+
+	reopened := mustOpenRuntime(t, store)
+	want := state
+	want.AppliedCommands = map[string]AppliedCommand{}
+	if got := reopened.Current(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("recovered state mismatch\nrecovered=%#v\nwant=%#v", got, want)
+	}
+	if got, want := reopened.Current().PendingBySlot[secondSlot].Kind, PendingKindReady; got != want {
+		t.Fatalf("second slot pending kind after checkpoint reopen = %q, want %q", got, want)
+	}
+	if _, exists := reopened.Current().PendingBySlot[firstSlot]; exists {
+		t.Fatalf("first slot pending after checkpoint reopen = %#v, want none", reopened.Current().PendingBySlot[firstSlot])
+	}
+	if got, want := len(reopened.Current().CompletedProgressBySlot[firstSlot]), 1; got != want {
+		t.Fatalf("completed progress record count after checkpoint reopen = %d, want %d", got, want)
+	}
+}
+
 func TestCompletedProgressHistoryPrunesToBoundedWindow(t *testing.T) {
 	current := map[int][]CompletedProgressRecord{}
 	slotVersions := map[int]uint64{7: 0}

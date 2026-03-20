@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,86 @@ type durableCoordHarness struct {
 	repl     *storage.InMemoryReplicationTransport
 	adapters map[string]*InMemoryNodeAdapter
 	backends map[string]*storage.InMemoryBackend
+}
+
+type faultInjectingNodeClient struct {
+	delegate StorageNodeClient
+
+	mu                  sync.Mutex
+	addTailTimeouts     int
+	markLeavingTimeouts int
+	addTailCalls        int
+	markLeavingCalls    int
+}
+
+func newFaultInjectingNodeClient(delegate StorageNodeClient) *faultInjectingNodeClient {
+	return &faultInjectingNodeClient{delegate: delegate}
+}
+
+func (c *faultInjectingNodeClient) AddReplicaAsTail(ctx context.Context, cmd storage.AddReplicaAsTailCommand) error {
+	c.mu.Lock()
+	c.addTailCalls++
+	shouldTimeout := c.addTailTimeouts > 0
+	if shouldTimeout {
+		c.addTailTimeouts--
+	}
+	c.mu.Unlock()
+	if shouldTimeout {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return c.delegate.AddReplicaAsTail(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) ActivateReplica(ctx context.Context, cmd storage.ActivateReplicaCommand) error {
+	return c.delegate.ActivateReplica(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) MarkReplicaLeaving(ctx context.Context, cmd storage.MarkReplicaLeavingCommand) error {
+	c.mu.Lock()
+	c.markLeavingCalls++
+	shouldTimeout := c.markLeavingTimeouts > 0
+	if shouldTimeout {
+		c.markLeavingTimeouts--
+	}
+	c.mu.Unlock()
+	if shouldTimeout {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return c.delegate.MarkReplicaLeaving(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) RemoveReplica(ctx context.Context, cmd storage.RemoveReplicaCommand) error {
+	return c.delegate.RemoveReplica(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) UpdateChainPeers(ctx context.Context, cmd storage.UpdateChainPeersCommand) error {
+	return c.delegate.UpdateChainPeers(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) ResumeRecoveredReplica(ctx context.Context, cmd storage.ResumeRecoveredReplicaCommand) error {
+	return c.delegate.ResumeRecoveredReplica(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) RecoverReplica(ctx context.Context, cmd storage.RecoverReplicaCommand) error {
+	return c.delegate.RecoverReplica(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) DropRecoveredReplica(ctx context.Context, cmd storage.DropRecoveredReplicaCommand) error {
+	return c.delegate.DropRecoveredReplica(ctx, cmd)
+}
+
+func (c *faultInjectingNodeClient) addTailCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addTailCalls
+}
+
+func (c *faultInjectingNodeClient) markLeavingCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.markLeavingCalls
 }
 
 func newDurableCoordHarness(t *testing.T, path string, nodeIDs []string) *durableCoordHarness {
@@ -306,6 +387,166 @@ func TestNonHACrashAfterRemovedProgressPreservesSettledStateAndDataPlane(t *test
 	assertSlotRoundTrip(t, ctx, reopened, h.adapters, slot, "crash-after-removed-progress", "v4")
 }
 
+func TestNonHACrashAfterAddTailAckBeforeReadyProgressDoesNotRedispatchAndRestoresDataPlane(t *testing.T) {
+	ctx := context.Background()
+	h := newDurableCoordHarness(t, filepath.Join(t.TempDir(), "coord.db"), []string{"a", "b", "c", "d"})
+
+	store, server := h.openServer(t, "a", "b", "c", "d")
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, server, 8, 3, []string{"a", "b", "c"})
+	wrapper := newFaultInjectingNodeClient(h.adapters["d"])
+	server.nodes["d"] = wrapper
+
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slot := mustPendingSlotForNode(t, server.Pending(), "d", pendingKindReady)
+	if got, want := wrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls before crash = %d, want %d", got, want)
+	}
+
+	h.closeServer(t, server, store)
+
+	reopenedStore, reopened := h.openServer(t, "a", "b", "c", "d")
+	defer h.closeServer(t, reopened, reopenedStore)
+	reopened.nodes["d"] = wrapper
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if got, want := wrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after reopen = %d, want no redispatch", got)
+	}
+	leavingNodeID := replicaNodeWithState(reopened.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after post-ack reopen")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica(%q) returned error: %v", leavingNodeID, err)
+	}
+	assertActiveReplicaSet(t, reopened.Current().Cluster.Chains[slot], "a", "b", "d")
+	assertSlotRoundTrip(t, ctx, reopened, h.adapters, slot, "crash-after-add-ack", "v5")
+}
+
+func TestNonHACrashAfterMarkLeavingAckBeforeRemovedProgressDoesNotRedispatchAndRestoresDataPlane(t *testing.T) {
+	ctx := context.Background()
+	h := newDurableCoordHarness(t, filepath.Join(t.TempDir(), "coord.db"), []string{"a", "b", "c", "d"})
+
+	store, server := h.openServer(t, "a", "b", "c", "d")
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, server, 8, 3, []string{"a", "b", "c"})
+
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slot := mustPendingSlotForNode(t, server.Pending(), "d", pendingKindReady)
+	leavingNodeID := lastActiveReplicaNode(server.Current().Cluster.Chains[slot])
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node before mark-leaving ack crash")
+	}
+	wrapper := newFaultInjectingNodeClient(h.adapters[leavingNodeID])
+	server.nodes[leavingNodeID] = wrapper
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if got, want := wrapper.markLeavingCallCount(), 1; got != want {
+		t.Fatalf("mark-leaving calls before crash = %d, want %d", got, want)
+	}
+
+	h.closeServer(t, server, store)
+
+	reopenedStore, reopened := h.openServer(t, "a", "b", "c", "d")
+	defer h.closeServer(t, reopened, reopenedStore)
+	reopened.nodes[leavingNodeID] = wrapper
+	if got, want := wrapper.markLeavingCallCount(), 1; got != want {
+		t.Fatalf("mark-leaving calls after reopen = %d, want no redispatch yet", got)
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica(%q) returned error: %v", leavingNodeID, err)
+	}
+	if got, want := wrapper.markLeavingCallCount(), 1; got != want {
+		t.Fatalf("mark-leaving calls after removed progress = %d, want no redispatch", got)
+	}
+	assertActiveReplicaSet(t, reopened.Current().Cluster.Chains[slot], "a", "b", "d")
+	assertSlotRoundTrip(t, ctx, reopened, h.adapters, slot, "crash-after-mark-leaving-ack", "v6")
+}
+
+func TestNonHACrashWithTwoPendingSlotsPreservesPerSlotRepairIsolation(t *testing.T) {
+	ctx := context.Background()
+	h := newDurableCoordHarness(t, filepath.Join(t.TempDir(), "coord.db"), []string{"a", "b", "c", "d"})
+
+	store, server := h.openServer(t, "a", "b", "c", "d")
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, server, 8, 3, []string{"a", "b", "c"})
+
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 2})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slots := pendingSlotsForNode(t, server.Pending(), "d", pendingKindReady)
+	if got, want := len(slots), 2; got != want {
+		t.Fatalf("pending slot count = %d, want %d", got, want)
+	}
+
+	h.closeServer(t, server, store)
+
+	reopenedStore, reopened := h.openServer(t, "a", "b", "c", "d")
+	defer h.closeServer(t, reopened, reopenedStore)
+
+	firstSlot, secondSlot := slots[0], slots[1]
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: firstSlot}); err != nil {
+		t.Fatalf("ActivateReplica(d, firstSlot) returned error: %v", err)
+	}
+	firstLeavingNodeID := replicaNodeWithState(reopened.Current().Cluster.Chains[firstSlot], coordinator.ReplicaStateLeaving)
+	if firstLeavingNodeID == "" {
+		t.Fatal("failed to find leaving node for first slot")
+	}
+	if err := h.adapters[firstLeavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: firstSlot}); err != nil {
+		t.Fatalf("RemoveReplica(firstSlot) returned error: %v", err)
+	}
+	if runtimeOutboxHasSlot(reopened.Current().Outbox, firstSlot) {
+		t.Fatalf("runtime outbox still contains first repaired slot %d: %#v", firstSlot, reopened.Current().Outbox)
+	}
+	if _, exists := reopened.Pending()[firstSlot]; exists {
+		t.Fatalf("pending for first repaired slot after first completion = %#v, want none", reopened.Pending()[firstSlot])
+	}
+	if err := reopened.reconcileAndDispatch(ctx); err != nil {
+		t.Fatalf("reconcileAndDispatch after first completion returned error: %v", err)
+	}
+	if got, want := reopened.Pending()[secondSlot].Kind, pendingKindReady; got != want {
+		t.Fatalf("second slot pending kind after first completion reconcile = %q, want %q", got, want)
+	}
+
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: secondSlot}); err != nil {
+		t.Fatalf("ActivateReplica(d, secondSlot) returned error: %v", err)
+	}
+	secondLeavingNodeID := replicaNodeWithState(reopened.Current().Cluster.Chains[secondSlot], coordinator.ReplicaStateLeaving)
+	if secondLeavingNodeID == "" {
+		t.Fatal("failed to find leaving node for second slot")
+	}
+	if err := h.adapters[secondLeavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: secondSlot}); err != nil {
+		t.Fatalf("RemoveReplica(secondSlot) returned error: %v", err)
+	}
+	if runtimeOutboxHasSlot(reopened.Current().Outbox, secondSlot) {
+		t.Fatalf("runtime outbox still contains second repaired slot %d: %#v", secondSlot, reopened.Current().Outbox)
+	}
+	assertSlotRoundTrip(t, ctx, reopened, h.adapters, firstSlot, "multi-slot-first", "v1")
+	assertSlotRoundTrip(t, ctx, reopened, h.adapters, secondSlot, "multi-slot-second", "v2")
+}
+
 func mustFindRuntimeOutboxEntry(
 	t *testing.T,
 	server *Server,
@@ -350,6 +591,21 @@ func mustPendingSlotForNode(t *testing.T, pending map[int]PendingWork, nodeID st
 	}
 	t.Fatalf("pending work for node=%q kind=%q not found in %#v", nodeID, kind, pending)
 	return 0
+}
+
+func pendingSlotsForNode(t *testing.T, pending map[int]PendingWork, nodeID string, kind pendingKind) []int {
+	t.Helper()
+	var slots []int
+	for slot, work := range pending {
+		if work.NodeID == nodeID && work.Kind == kind {
+			slots = append(slots, slot)
+		}
+	}
+	sort.Ints(slots)
+	if len(slots) == 0 {
+		t.Fatalf("pending slots for node=%q kind=%q not found in %#v", nodeID, kind, pending)
+	}
+	return slots
 }
 
 func assertActiveReplicaSet(t *testing.T, chain coordinator.Chain, wantNodeIDs ...string) {

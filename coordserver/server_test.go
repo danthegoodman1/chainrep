@@ -270,6 +270,137 @@ func TestDuplicateProgressRemainsIdempotentAfterServerReopen(t *testing.T) {
 	}
 }
 
+func TestDuplicateProgressRemainsIdempotentAfterCheckpointAndReopen(t *testing.T) {
+	ctx := context.Background()
+	store := coordruntime.NewInMemoryStore()
+	nodes := map[string]*recordingNodeClient{
+		"a": newRecordingNodeClient("a"),
+		"b": newRecordingNodeClient("b"),
+		"c": newRecordingNodeClient("c"),
+		"d": newRecordingNodeClient("d"),
+	}
+	server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slot := mustPendingSlotForNode(t, server.Pending(), "d", pendingKindReady)
+	if _, err := server.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
+		t.Fatalf("ReportReplicaReady returned error: %v", err)
+	}
+	leavingNodeID := replicaNodeWithState(server.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node before checkpoint")
+	}
+	if _, err := server.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
+		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
+	}
+	if err := server.rt.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint returned error: %v", err)
+	}
+
+	reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+	if _, err := reopened.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
+		t.Fatalf("duplicate ReportReplicaReady after checkpoint returned error: %v", err)
+	}
+	if _, err := reopened.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
+		t.Fatalf("duplicate ReportReplicaRemoved after checkpoint returned error: %v", err)
+	}
+	if _, exists := reopened.Pending()[slot]; exists {
+		t.Fatalf("pending for completed slot after checkpoint reopen duplicate progress = %#v, want none", reopened.Pending()[slot])
+	}
+}
+
+func TestDuplicateAutoJoinRegistrationUsesSingleMembershipRecord(t *testing.T) {
+	ctx := context.Background()
+	h := newInMemoryHarnessWithConfig(t, []string{"d"}, ServerConfig{})
+	server := h.server
+	h.adapters["d"].BindServer(server)
+
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	reg := storage.NodeRegistration{
+		NodeID:         "d",
+		FailureDomains: uniqueNode("d").FailureDomains,
+	}
+	if _, err := server.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("first RegisterNode returned error: %v", err)
+	}
+	if _, err := server.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("duplicate RegisterNode returned error: %v", err)
+	}
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat returned error: %v", err)
+	}
+
+	if got, want := len(server.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("membership size = %d, want %d", got, want)
+	}
+	if !server.Current().Cluster.ReadyNodeIDs["d"] {
+		t.Fatal("node d is not ready after concurrent auto-join heartbeats")
+	}
+	if got, want := server.Pending()[0], (PendingWork{
+		Slot:        0,
+		NodeID:      "d",
+		Kind:        pendingKindReady,
+		SlotVersion: server.Current().SlotVersions[0],
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending after concurrent auto-join heartbeats = %#v, want %#v", got, want)
+	}
+}
+
+func TestAutoJoinHeartbeatRemainsStableAcrossServerReopen(t *testing.T) {
+	ctx := context.Background()
+	store := coordruntime.NewInMemoryStore()
+	repl := storage.NewInMemoryReplicationTransport()
+	backend := storage.NewInMemoryBackend()
+	repl.Register("d", backend)
+	adapter, err := NewInMemoryNodeAdapter(ctx, "d", backend, repl)
+	if err != nil {
+		t.Fatalf("NewInMemoryNodeAdapter returned error: %v", err)
+	}
+	repl.RegisterNode("d", adapter.Node())
+
+	server := mustOpenServerWithConfig(t, store, map[string]StorageNodeClient{"d": adapter}, ServerConfig{})
+	adapter.BindServer(server)
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if err := adapter.Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("initial ReportHeartbeat returned error: %v", err)
+	}
+	if got, want := len(server.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("membership size before reopen = %d, want %d", got, want)
+	}
+
+	reopened := mustOpenServerWithConfig(t, store, map[string]StorageNodeClient{"d": adapter}, ServerConfig{})
+	adapter.BindServer(reopened)
+	if err := adapter.Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("post-reopen ReportHeartbeat returned error: %v", err)
+	}
+	if got, want := len(reopened.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("membership size after reopen = %d, want %d", got, want)
+	}
+	if !reopened.Current().Cluster.ReadyNodeIDs["d"] {
+		t.Fatal("node d is not ready after reopen heartbeat")
+	}
+	if got, want := reopened.Pending()[0], (PendingWork{
+		Slot:        0,
+		NodeID:      "d",
+		Kind:        pendingKindReady,
+		SlotVersion: reopened.Current().SlotVersions[0],
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pending after reopen heartbeat = %#v, want %#v", got, want)
+	}
+}
+
 func TestDelayedProgressFromQueuedAdaptersCompletesPendingWork(t *testing.T) {
 	ctx := context.Background()
 	h := newInMemoryHarness(t, []string{"a", "b", "c", "d"})

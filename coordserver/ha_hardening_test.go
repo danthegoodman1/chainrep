@@ -328,6 +328,82 @@ func TestHAFailoverAcceptsInFlightRemovedProgressAndRestoresDataPlane(t *testing
 	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-removed-failover", "v4")
 }
 
+func TestHAFailoverAfterAddTailAckBeforeReadyProgressDoesNotRedispatchAndRestoresDataPlane(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b", "c", "d"})
+	wrapper := newFaultInjectingNodeClient(h.adapters["d"])
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	h.leader.nodes["d"] = wrapper
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 8, 3, []string{"a", "b", "c"})
+	if _, err := h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	h.mustStepLeader(t)
+	slot := mustPendingSlotForNode(t, h.leader.Pending(), "d", pendingKindReady)
+	if got, want := wrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls before failover = %d, want %d", got, want)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+	h.standby.nodes["d"] = wrapper
+	if got, want := wrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after failover = %d, want no redispatch", got)
+	}
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	h.mustStepStandby(t)
+	leavingNodeID := replicaNodeWithState(h.standby.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after HA post-ack failover")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	if got, want := wrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after completion = %d, want no redispatch", got)
+	}
+	assertActiveReplicaSet(t, h.standby.Current().Cluster.Chains[slot], "a", "b", "d")
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-after-add-ack", "v5")
+}
+
+func TestHARegisterAndHeartbeatRemainStableAcrossFailover(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"d"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) on leader returned error: %v", err)
+	}
+	if got, want := len(h.leader.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("leader membership size = %d, want %d", got, want)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) on standby returned error: %v", err)
+	}
+	if got, want := len(h.standby.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("standby membership size = %d, want %d", got, want)
+	}
+	if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
+		t.Fatal("node d not ready after failover heartbeat")
+	}
+}
+
 func TestHADynamicAutoJoinRepairsAfterFailover(t *testing.T) {
 	ctx := context.Background()
 	h := newHAInMemoryHarness(t, []string{"a", "b", "c", "d"})
