@@ -1,15 +1,22 @@
 # chainrep - Chain Replication in Go
 
-- Default gRPC transport between client, coordinator, and storage nodes
-- Coordinator HA via epoch-gated active/standby failover
-- Default durable local Badger-backed storage backend
-- Interface-driven transport and storage layers so you can plug in custom implementations
-- Conditional writes with per-object metadata
-- Optional TLS/mTLS security for gRPC transports
-- Read-only HTTP admin/health endpoints plus Prometheus metrics
-- Non-HA coordinator mode now has a durable local control outbox with retry/restart recovery
-- Storage nodes can auto-register and join dynamically from coordinator heartbeats instead of requiring a static node list
-- Coordinator liveness can evict flapping nodes before they keep a chain degraded indefinitely
+`chainrep` is a Go implementation of chain replication with a coordinator
+control plane, multi-replica storage nodes, gRPC transport, and both non-HA and
+HA coordinator modes.
+
+Highlights:
+
+- gRPC transport between clients, coordinator, and storage nodes
+- epoch-gated coordinator HA failover
+- durable local Badger-backed storage backend
+- dynamic storage-node auto-registration and ready gating
+- durable non-HA coordinator dispatch retry and restart recovery
+- flapping-node eviction through coordinator liveness policy
+- conditional writes with per-object metadata
+- optional TLS/mTLS for gRPC transports
+- read-only HTTP admin/health endpoints plus Prometheus metrics
+
+Documentation:
 
 - [Architecture](./ARCHITECTURE.md)
 - [Coordinator HA Store](./HA_STORE.md)

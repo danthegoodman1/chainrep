@@ -33,7 +33,6 @@ The key packages are:
 
 - `coordinator`: pure planning and state transitions
 - `coordinator/runtime`: optional durable wrapper with WAL, checkpoints, replay, and idempotent command handling
-- `coordserver`: synchronous coordinator service that dispatches storage-node commands, records heartbeats, and exposes routing snapshots to clients
 - `coordserver`: synchronous coordinator service that dispatches storage-node commands, durably tracks node liveness from heartbeats, automatically marks dead nodes, and exposes routing snapshots to clients
 
 In non-HA mode, coordinator control work is still durable:
@@ -251,49 +250,13 @@ Current replica lifecycle states:
 
 ## Current Integration Flow
 
-## Current Network Transport
+The main coordinator/storage/client interactions are:
 
-The transport layer has both gRPC and in-memory implementations.
-
-- one coordinator gRPC server hosts routing snapshot, admin membership RPCs, liveness evaluation, and storage-node progress/report callbacks
-- one storage-node gRPC server hosts client data RPCs, coordinator-issued lifecycle commands, and replica replication RPCs
-- storage-node RPC endpoints are part of coordinator node metadata and are treated as the transport target for that node
-- routing snapshots expose concrete head/tail endpoints directly
-- catch-up snapshot transfer uses streaming gRPC rather than one large unary response
-- typed storage-domain errors such as routing mismatch, ambiguous write, and backpressure are preserved across gRPC boundaries with structured status details
-- coordinator admin and reporter clients support endpoint-list failover and retry on typed `not leader` responses or transport unavailability
-- transport security is optional in v1:
-  - default zero-config transport remains insecure for local development
-  - internal coordinator/storage RPCs can use mTLS with a shared cluster CA
-  - client-facing RPCs can use TLS only or TLS with optional client cert verification
-  - internal authorization is identity-bound by RPC plane rather than trusting any CA-signed peer for every internal action
-
-## Observability and Ops
-
-The system exposes an operability surface alongside the storage and transport runtime.
-
-- logging uses `zerolog` through the local `gologger` package
-- logging is event-focused rather than per-request by default
-- coordinator, storage, and gRPC transport layers expose Prometheus metrics through
-  per-process registries
-- coordinator and storage processes can each expose a separate optional read-only HTTP
-  admin listener
-
-The admin HTTP plane exposes:
-
-- `/livez`
-- `/readyz`
-- `/metrics`
-- `/admin/v1/state`
-
-`/admin/v1/state` is intentionally read-only JSON. Coordinator state includes current
-runtime version, routing snapshot, pending work, heartbeats, liveness records,
-unavailable replicas, recovery reports, and recent repair events. Storage state
-includes `Node.State()`, current node resource usage, and recent replica/recovery or
-backpressure events.
-
-The admin plane is intentionally unauthenticated in v1 and should be bound to loopback
-or another trusted network boundary.
+- tail add / join
+- graceful drain / removal
+- heartbeats and liveness
+- restart / recovery
+- client routing
 
 ### Tail add / join
 
@@ -346,17 +309,51 @@ Writes are intentionally blocked while a slot contains a `joining` replica. Read
 
 If a client write times out or is canceled after entering the storage write path, the storage node returns a typed ambiguous-write error instead of claiming success or rollback. The client does not retry automatically in that case; it must reconcile by reading from the tail. Retrying the same logical write is treated as a new write, not a replay-safe retry.
 
-## What Is Still Missing
+## Current Network Transport
 
-The codebase includes:
+The transport layer has both gRPC and in-memory implementations.
 
-- in-memory reference implementations
-- a local durable Badger-backed storage backend and local metadata store
-- a gRPC transport layer for coordinator, storage-node, replication, and client traffic
+- one coordinator gRPC server hosts routing snapshot, admin membership RPCs, liveness evaluation, and storage-node progress/report callbacks
+- one storage-node gRPC server hosts client data RPCs, coordinator-issued lifecycle commands, and replica replication RPCs
+- storage-node RPC endpoints are part of coordinator node metadata and are treated as the transport target for that node
+- routing snapshots expose concrete head/tail endpoints directly
+- catch-up snapshot transfer uses streaming gRPC rather than one large unary response
+- typed storage-domain errors such as routing mismatch, ambiguous write, and backpressure are preserved across gRPC boundaries with structured status details
+- coordinator admin and reporter clients support endpoint-list failover and retry on typed `not leader` responses or transport unavailability
+- transport security is optional in v1:
+  - default zero-config transport remains insecure for local development
+  - internal coordinator/storage RPCs can use mTLS with a shared cluster CA
+  - client-facing RPCs can use TLS only or TLS with optional client cert verification
+  - internal authorization is identity-bound by RPC plane rather than trusting any CA-signed peer for every internal action
 
-It still does not yet have:
+## Observability and Ops
 
-- coordinator HA/failover
+The system exposes an operability surface alongside the storage and transport runtime.
+
+- logging uses `zerolog` through the local `gologger` package
+- logging is event-focused rather than per-request by default
+- coordinator, storage, and gRPC transport layers expose Prometheus metrics through
+  per-process registries
+- coordinator and storage processes can each expose a separate optional read-only HTTP
+  admin listener
+
+The admin HTTP plane exposes:
+
+- `/livez`
+- `/readyz`
+- `/metrics`
+- `/admin/v1/state`
+
+`/admin/v1/state` is intentionally read-only JSON. Coordinator state includes current
+runtime version, routing snapshot, pending work, heartbeats, liveness records,
+unavailable replicas, recovery reports, and recent repair events. Storage state
+includes `Node.State()`, current node resource usage, and recent replica/recovery or
+backpressure events.
+
+The admin plane is intentionally unauthenticated in v1 and should be bound to loopback
+or another trusted network boundary.
+
+## Current Shape
 
 So the current shape is:
 
