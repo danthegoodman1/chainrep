@@ -211,6 +211,89 @@ func TestClientTransportReturnsTypedErrorsOverGRPC(t *testing.T) {
 	})
 }
 
+func TestDynamicAutoJoinIdentityAndTombstoneSafetyOverFactoryBackedGRPC(t *testing.T) {
+	ctx := context.Background()
+	pool := grpcx.NewConnPool()
+	t.Cleanup(func() { _ = pool.Close() })
+
+	coordSvc, coordAddr, coordImpl := mustStartCoordinator(t, ctx, coordruntime.NewInMemoryStore(), pool)
+	defer func() { _ = coordSvc.Close() }()
+
+	admin := grpcx.NewCoordinatorAdminClient(coordAddr, pool)
+	reporterN1 := grpcx.NewCoordinatorReporterClient("n1", coordAddr, pool)
+	reporterN2 := grpcx.NewCoordinatorReporterClient("n2", coordAddr, pool)
+
+	if _, err := admin.Bootstrap(ctx, coordruntime.Command{
+		ID:              "bootstrap",
+		ExpectedVersion: 0,
+		Kind:            coordruntime.CommandKindBootstrap,
+		Bootstrap: &coordruntime.BootstrapCommand{
+			Config: coordinator.Config{SlotCount: 1, ReplicationFactor: 1},
+			Nodes: []coordinator.Node{{
+				ID:         "seed",
+				RPCAddress: "127.0.0.1:7400",
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	regN1 := storage.NodeRegistration{
+		NodeID:         "n1",
+		RPCAddress:     "127.0.0.1:7411",
+		FailureDomains: map[string]string{"host": "h1"},
+	}
+	if err := reporterN1.RegisterNode(ctx, regN1); err != nil {
+		t.Fatalf("RegisterNode(n1) returned error: %v", err)
+	}
+	if err := reporterN1.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "n1", ReplicaCount: 1}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(n1) returned error: %v", err)
+	}
+	if !coordImpl.Current().Cluster.ReadyNodeIDs["n1"] {
+		t.Fatalf("n1 not marked ready after heartbeat: %#v", coordImpl.Current().Cluster.ReadyNodeIDs)
+	}
+
+	if err := reporterN1.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "n1",
+		RPCAddress:     "127.0.0.1:7999",
+		FailureDomains: map[string]string{"host": "h1"},
+	}); err == nil {
+		t.Fatal("conflicting RegisterNode(n1) unexpectedly succeeded")
+	}
+
+	current := coordImpl.Current()
+	if _, err := admin.MarkNodeDead(ctx, coordruntime.Command{
+		ID:              "dead-n1",
+		ExpectedVersion: current.Version,
+		Kind:            coordruntime.CommandKindReconfigure,
+		Reconfigure: &coordruntime.ReconfigureCommand{
+			Events: []coordinator.Event{{
+				Kind:   coordinator.EventKindMarkNodeDead,
+				NodeID: "n1",
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("MarkNodeDead returned error: %v", err)
+	}
+	if err := reporterN1.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "n1", ReplicaCount: 1}); err == nil {
+		t.Fatal("ReportNodeHeartbeat(n1) unexpectedly succeeded after tombstone")
+	}
+
+	if err := reporterN2.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "n2",
+		RPCAddress:     "127.0.0.1:7412",
+		FailureDomains: map[string]string{"host": "h2"},
+	}); err != nil {
+		t.Fatalf("RegisterNode(n2) returned error: %v", err)
+	}
+	if err := reporterN2.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "n2", ReplicaCount: 1}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(n2) returned error: %v", err)
+	}
+	if !coordImpl.Current().Cluster.ReadyNodeIDs["n2"] {
+		t.Fatalf("n2 not marked ready after replacement join: %#v", coordImpl.Current().Cluster.ReadyNodeIDs)
+	}
+}
+
 func TestReplicationTransportOverGRPC(t *testing.T) {
 	ctx := context.Background()
 	pool := grpcx.NewConnPool()

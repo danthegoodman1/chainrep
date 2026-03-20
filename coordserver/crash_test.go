@@ -29,9 +29,15 @@ type faultInjectingNodeClient struct {
 	addTailTimeouts     int
 	markLeavingTimeouts int
 	updatePeersTimeouts int
+	resumeTimeouts      int
+	recoverTimeouts     int
+	dropTimeouts        int
 	addTailCalls        int
 	markLeavingCalls    int
 	updatePeersCalls    int
+	resumeCalls         int
+	recoverCalls        int
+	dropCalls           int
 }
 
 func newFaultInjectingNodeClient(delegate StorageNodeClient) *faultInjectingNodeClient {
@@ -101,14 +107,56 @@ func (c *faultInjectingNodeClient) UpdateChainPeers(ctx context.Context, cmd sto
 }
 
 func (c *faultInjectingNodeClient) ResumeRecoveredReplica(ctx context.Context, cmd storage.ResumeRecoveredReplicaCommand) error {
+	c.mu.Lock()
+	c.resumeCalls++
+	shouldTimeout := c.resumeTimeouts > 0
+	if shouldTimeout {
+		c.resumeTimeouts--
+	}
+	c.mu.Unlock()
+	if shouldTimeout {
+		if _, ok := ctx.Deadline(); ok {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
+	}
 	return c.delegate.ResumeRecoveredReplica(ctx, cmd)
 }
 
 func (c *faultInjectingNodeClient) RecoverReplica(ctx context.Context, cmd storage.RecoverReplicaCommand) error {
+	c.mu.Lock()
+	c.recoverCalls++
+	shouldTimeout := c.recoverTimeouts > 0
+	if shouldTimeout {
+		c.recoverTimeouts--
+	}
+	c.mu.Unlock()
+	if shouldTimeout {
+		if _, ok := ctx.Deadline(); ok {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
+	}
 	return c.delegate.RecoverReplica(ctx, cmd)
 }
 
 func (c *faultInjectingNodeClient) DropRecoveredReplica(ctx context.Context, cmd storage.DropRecoveredReplicaCommand) error {
+	c.mu.Lock()
+	c.dropCalls++
+	shouldTimeout := c.dropTimeouts > 0
+	if shouldTimeout {
+		c.dropTimeouts--
+	}
+	c.mu.Unlock()
+	if shouldTimeout {
+		if _, ok := ctx.Deadline(); ok {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
+	}
 	return c.delegate.DropRecoveredReplica(ctx, cmd)
 }
 
@@ -128,6 +176,24 @@ func (c *faultInjectingNodeClient) updatePeersCallCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.updatePeersCalls
+}
+
+func (c *faultInjectingNodeClient) resumeCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resumeCalls
+}
+
+func (c *faultInjectingNodeClient) recoverCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.recoverCalls
+}
+
+func (c *faultInjectingNodeClient) dropCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dropCalls
 }
 
 func newDurableCoordHarness(t *testing.T, path string, nodeIDs []string) *durableCoordHarness {
