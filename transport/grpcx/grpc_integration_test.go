@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -291,6 +292,76 @@ func TestDynamicAutoJoinIdentityAndTombstoneSafetyOverFactoryBackedGRPC(t *testi
 	}
 	if !coordImpl.Current().Cluster.ReadyNodeIDs["n2"] {
 		t.Fatalf("n2 not marked ready after replacement join: %#v", coordImpl.Current().Cluster.ReadyNodeIDs)
+	}
+}
+
+func TestDuplicateSameIdentityRegistrationOverFactoryBackedGRPCIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	pool := grpcx.NewConnPool()
+	t.Cleanup(func() { _ = pool.Close() })
+
+	coordSvc, coordAddr, coordImpl := mustStartCoordinator(t, ctx, coordruntime.NewInMemoryStore(), pool)
+	defer func() { _ = coordSvc.Close() }()
+
+	admin := grpcx.NewCoordinatorAdminClient(coordAddr, pool)
+	reporter := grpcx.NewCoordinatorReporterClient("n1", coordAddr, pool)
+
+	if _, err := admin.Bootstrap(ctx, coordruntime.Command{
+		ID:              "bootstrap",
+		ExpectedVersion: 0,
+		Kind:            coordruntime.CommandKindBootstrap,
+		Bootstrap: &coordruntime.BootstrapCommand{
+			Config: coordinator.Config{SlotCount: 1, ReplicationFactor: 1},
+		},
+	}); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	reg := storage.NodeRegistration{
+		NodeID:         "n1",
+		RPCAddress:     "127.0.0.1:7411",
+		FailureDomains: map[string]string{"host": "h1"},
+	}
+	if err := reporter.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("RegisterNode(n1) returned error: %v", err)
+	}
+	if err := reporter.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "n1", ReplicaCount: 1}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(n1) returned error: %v", err)
+	}
+
+	before := coordImpl.Current()
+	beforePending := coordImpl.Pending()
+	beforeRouting, err := admin.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot before duplicate RegisterNode returned error: %v", err)
+	}
+	if err := reporter.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("duplicate RegisterNode(n1) returned error: %v", err)
+	}
+	afterRouting, err := admin.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after duplicate RegisterNode returned error: %v", err)
+	}
+	if got := coordImpl.Current(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("coordinator state changed on duplicate RegisterNode over gRPC\ngot=%#v\nwant=%#v", got, before)
+	}
+	if got := coordImpl.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on duplicate RegisterNode over gRPC\ngot=%#v\nwant=%#v", got, beforePending)
+	}
+	if !reflect.DeepEqual(afterRouting, beforeRouting) {
+		t.Fatalf("routing changed on duplicate RegisterNode over gRPC\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
+	}
+	if err := reporter.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "n1", ReplicaCount: 1}); err != nil {
+		t.Fatalf("second ReportNodeHeartbeat(n1) returned error: %v", err)
+	}
+	if got, want := len(coordImpl.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("membership size after duplicate RegisterNode = %d, want %d", got, want)
+	}
+	if !coordImpl.Current().Cluster.ReadyNodeIDs["n1"] {
+		t.Fatalf("n1 not marked ready after duplicate RegisterNode and heartbeat: %#v", coordImpl.Current().Cluster.ReadyNodeIDs)
+	}
+	if got := coordImpl.Current().Cluster.NodesByID["n1"]; !reflect.DeepEqual(got, before.Cluster.NodesByID["n1"]) {
+		t.Fatalf("node identity changed after duplicate RegisterNode over gRPC\ngot=%#v\nwant=%#v", got, before.Cluster.NodesByID["n1"])
 	}
 }
 

@@ -865,6 +865,67 @@ func TestHAMembershipContinuityAfterFailover(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate_same_identity_register_is_no_op_after_failover", func(t *testing.T) {
+		ctx := context.Background()
+		h := newHAInMemoryHarness(t, []string{"d"})
+
+		h.mustStepLeader(t)
+		h.mustBind(t, h.leader)
+		if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		reg := storage.NodeRegistration{
+			NodeID:         "d",
+			RPCAddress:     "127.0.0.1:7414",
+			FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+		}
+		if _, err := h.leader.RegisterNode(ctx, reg); err != nil {
+			t.Fatalf("RegisterNode returned error: %v", err)
+		}
+
+		h.clock.Advance(3 * time.Second)
+		h.mustStepStandby(t)
+		h.mustBind(t, h.standby)
+		before := h.standby.Current()
+		beforePending := h.standby.Pending()
+		beforeRouting, err := h.standby.RoutingSnapshot(ctx)
+		if err != nil {
+			t.Fatalf("RoutingSnapshot before duplicate HA register returned error: %v", err)
+		}
+		stateAfterDuplicate, err := h.standby.RegisterNode(ctx, reg)
+		if err != nil {
+			t.Fatalf("duplicate RegisterNode returned error: %v", err)
+		}
+		afterRouting, err := h.standby.RoutingSnapshot(ctx)
+		if err != nil {
+			t.Fatalf("RoutingSnapshot after duplicate HA register returned error: %v", err)
+		}
+		if !reflect.DeepEqual(stateAfterDuplicate, before) {
+			t.Fatalf("state returned from duplicate HA RegisterNode changed\ngot=%#v\nwant=%#v", stateAfterDuplicate, before)
+		}
+		if got := h.standby.Current(); !reflect.DeepEqual(got, before) {
+			t.Fatalf("current state changed on duplicate HA RegisterNode\ngot=%#v\nwant=%#v", got, before)
+		}
+		if got := h.standby.Pending(); !reflect.DeepEqual(got, beforePending) {
+			t.Fatalf("pending changed on duplicate HA RegisterNode\ngot=%#v\nwant=%#v", got, beforePending)
+		}
+		if !reflect.DeepEqual(afterRouting, beforeRouting) {
+			t.Fatalf("routing changed on duplicate HA RegisterNode\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
+		}
+		if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+			t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
+		}
+		if got, want := len(h.standby.Current().Cluster.NodesByID), 1; got != want {
+			t.Fatalf("standby membership size after duplicate register = %d, want %d", got, want)
+		}
+		if got := h.standby.Current().Cluster.NodesByID["d"]; !reflect.DeepEqual(got, before.Cluster.NodesByID["d"]) {
+			t.Fatalf("node identity changed after duplicate HA register\ngot=%#v\nwant=%#v", got, before.Cluster.NodesByID["d"])
+		}
+		if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
+			t.Fatal("node d not ready after duplicate HA register and heartbeat")
+		}
+	})
+
 	t.Run("tombstone_and_replacement_after_failover", func(t *testing.T) {
 		ctx := context.Background()
 		h := newHAInMemoryHarness(t, []string{"a", "b", "d"})

@@ -396,6 +396,121 @@ func TestEndToEndRestartResumeWithRuntimeReopen(t *testing.T) {
 	}
 }
 
+func TestDuplicateReportNodeRecoveredRemainsNoOpAfterServerReopen(t *testing.T) {
+	ctx := context.Background()
+	store := coordruntime.NewInMemoryStore()
+	repl := storage.NewInMemoryReplicationTransport()
+
+	localA := storage.NewInMemoryLocalStateStore()
+	localB := storage.NewInMemoryLocalStateStore()
+	backendA := storage.NewInMemoryBackend()
+	backendB := storage.NewInMemoryBackend()
+	repl.Register("a", backendA)
+	repl.Register("b", backendB)
+
+	adapterA, err := OpenInMemoryNodeAdapter(ctx, "a", backendA, localA, repl)
+	if err != nil {
+		t.Fatalf("OpenInMemoryNodeAdapter(a) returned error: %v", err)
+	}
+	adapterB, err := OpenInMemoryNodeAdapter(ctx, "b", backendB, localB, repl)
+	if err != nil {
+		t.Fatalf("OpenInMemoryNodeAdapter(b) returned error: %v", err)
+	}
+	repl.RegisterNode("a", adapterA.Node())
+	repl.RegisterNode("b", adapterB.Node())
+
+	server, err := Open(ctx, store, map[string]StorageNodeClient{
+		"a": adapterA,
+		"b": adapterB,
+	})
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	adapterA.BindServer(server)
+	adapterB.BindServer(server)
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap", 0, 1, 2, "a", "b")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	seedServerBootstrap(t, server, map[string]*InMemoryNodeAdapter{"a": adapterA, "b": adapterB}, 1, 2, []string{"a", "b"})
+	if _, err := adapterA.Node().SubmitPut(ctx, 0, "alpha", "v1"); err != nil {
+		t.Fatalf("SubmitPut returned error: %v", err)
+	}
+
+	report := storage.NodeRecoveryReport{
+		NodeID: "b",
+		Replicas: []storage.RecoveredReplica{{
+			Assignment: storage.ReplicaAssignment{
+				Slot:         0,
+				ChainVersion: 1,
+				Role:         storage.ReplicaRoleTail,
+				Peers:        storage.ChainPeers{PredecessorNodeID: "a"},
+			},
+			LastKnownState:           storage.ReplicaStateActive,
+			HighestCommittedSequence: 1,
+			HasCommittedData:         true,
+		}},
+	}
+	if err := server.ReportNodeRecovered(ctx, report); err != nil {
+		t.Fatalf("ReportNodeRecovered returned error: %v", err)
+	}
+
+	reopenedA, err := OpenInMemoryNodeAdapter(ctx, "a", backendA, localA, repl)
+	if err != nil {
+		t.Fatalf("reopen OpenInMemoryNodeAdapter(a) returned error: %v", err)
+	}
+	reopenedB, err := OpenInMemoryNodeAdapter(ctx, "b", backendB, localB, repl)
+	if err != nil {
+		t.Fatalf("reopen OpenInMemoryNodeAdapter(b) returned error: %v", err)
+	}
+	repl.RegisterNode("a", reopenedA.Node())
+	repl.RegisterNode("b", reopenedB.Node())
+
+	reopened, err := Open(ctx, store, map[string]StorageNodeClient{
+		"a": reopenedA,
+		"b": reopenedB,
+	})
+	if err != nil {
+		t.Fatalf("reopen server returned error: %v", err)
+	}
+	reopenedA.BindServer(reopened)
+	reopenedB.BindServer(reopened)
+
+	before := reopened.Current()
+	beforePending := reopened.Pending()
+	beforeRouting, err := reopened.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot before duplicate recovered report returned error: %v", err)
+	}
+	if err := reopened.ReportNodeRecovered(ctx, report); err != nil {
+		t.Fatalf("duplicate ReportNodeRecovered after reopen returned error: %v", err)
+	}
+	afterRouting, err := reopened.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after duplicate recovered report returned error: %v", err)
+	}
+	if got := reopened.Current(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("state changed on duplicate recovered report after reopen\ngot=%#v\nwant=%#v", got, before)
+	}
+	if got := reopened.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on duplicate recovered report after reopen\ngot=%#v\nwant=%#v", got, beforePending)
+	}
+	if !reflect.DeepEqual(afterRouting, beforeRouting) {
+		t.Fatalf("routing changed on duplicate recovered report after reopen\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
+	}
+	if reopened.nodeHasUnavailableSlots("b") {
+		t.Fatal("node b has unavailable slots after duplicate recovered report on reopen")
+	}
+	if read, err := reopenedB.Node().HandleClientGet(ctx, storage.ClientGetRequest{
+		Slot:                 0,
+		Key:                  "alpha",
+		ExpectedChainVersion: 1,
+	}); err != nil {
+		t.Fatalf("HandleClientGet after duplicate recovered report returned error: %v", err)
+	} else if !read.Found || read.Value != "v1" {
+		t.Fatalf("reopened tail read result = %#v, want found value v1", read)
+	}
+}
+
 func seedServerBootstrap(
 	t *testing.T,
 	server *Server,
