@@ -46,15 +46,16 @@ func TestHAFailoverAcceptsInFlightProgressFromPriorEpoch(t *testing.T) {
 	if _, err := h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
 		t.Fatalf("AddNode returned error: %v", err)
 	}
+	slot := mustPendingSlotForNode(t, h.leader.Pending(), "d", pendingKindReady)
 	h.mustStepLeader(t)
 
-	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 1}); err != nil {
+	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
 		t.Fatalf("ActivateReplica returned error: %v", err)
 	}
 	if got, want := h.adapters["d"].PendingProgress(), 1; got != want {
 		t.Fatalf("queued ready progress = %d, want %d", got, want)
 	}
-	pendingBefore := h.leader.Pending()[1]
+	pendingBefore := h.leader.Pending()[slot]
 	if pendingBefore.Epoch == 0 {
 		t.Fatal("pending epoch before failover = 0, want active epoch")
 	}
@@ -63,16 +64,32 @@ func TestHAFailoverAcceptsInFlightProgressFromPriorEpoch(t *testing.T) {
 	h.mustStepStandby(t)
 	h.mustBind(t, h.standby)
 
-	pendingAfter := h.standby.Pending()[1]
+	pendingAfter := h.standby.Pending()[slot]
 	if got, want := pendingAfter.Epoch, pendingBefore.Epoch; got != want {
 		t.Fatalf("pending epoch after failover = %d, want %d", got, want)
 	}
 	if err := h.adapters["d"].DeliverNextProgress(ctx); err != nil {
 		t.Fatalf("DeliverNextProgress returned error: %v", err)
 	}
-	if got, want := h.standby.Pending()[1].Kind, pendingKindRemoved; got != want {
+	if got, want := h.standby.Pending()[slot].Kind, pendingKindRemoved; got != want {
 		t.Fatalf("pending kind after delivered ready = %q, want %q", got, want)
 	}
+	h.mustStepStandby(t)
+	leavingNodeID := replicaNodeWithState(h.standby.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after ready-progress failover")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	assertActiveReplicaSet(t, h.standby.Current().Cluster.Chains[slot], "a", "b", "d")
+	if got, exists := h.standby.Pending()[slot]; exists && got.Kind == pendingKindRemoved {
+		t.Fatalf("pending after delivered ready completion = %#v, want removal cleared", got)
+	}
+	if runtimeOutboxHasSlot(h.standby.Current().Outbox, slot) {
+		t.Fatalf("runtime outbox still contains repaired slot %d: %#v", slot, h.standby.Current().Outbox)
+	}
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-ready-failover", "v1")
 }
 
 func TestHADuplicateAddTailDispatchAfterFailoverIsSafe(t *testing.T) {
@@ -88,8 +105,9 @@ func TestHADuplicateAddTailDispatchAfterFailoverIsSafe(t *testing.T) {
 	if _, err := h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
 		t.Fatalf("AddNode returned error: %v", err)
 	}
+	slot := mustPendingSlotForNode(t, h.leader.Pending(), "d", pendingKindReady)
 
-	entry := h.mustFindOutbox(t, OutboxCommandAddReplicaAsTail, "d", 1)
+	entry := h.mustFindOutbox(t, OutboxCommandAddReplicaAsTail, "d", slot)
 	if err := h.leader.dispatchOutboxEntry(ctx, entry); err != nil {
 		t.Fatalf("manual dispatchOutboxEntry(add tail) returned error: %v", err)
 	}
@@ -99,13 +117,26 @@ func TestHADuplicateAddTailDispatchAfterFailoverIsSafe(t *testing.T) {
 	h.mustBind(t, h.standby)
 	h.mustStepStandby(t)
 
-	replica := h.adapters["d"].Node().State().Replicas[1]
+	replica := h.adapters["d"].Node().State().Replicas[slot]
 	if got, want := replica.State, storage.ReplicaStateCatchingUp; got != want {
 		t.Fatalf("replica state after replayed add tail = %q, want %q", got, want)
 	}
-	if got, want := h.standby.Pending()[1].Kind, pendingKindReady; got != want {
+	if got, want := h.standby.Pending()[slot].Kind, pendingKindReady; got != want {
 		t.Fatalf("pending kind after replayed add tail = %q, want %q", got, want)
 	}
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica returned error: %v", err)
+	}
+	h.mustStepStandby(t)
+	leavingNodeID := replicaNodeWithState(h.standby.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after replayed add-tail activation")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	assertActiveReplicaSet(t, h.standby.Current().Cluster.Chains[slot], "a", "b", "d")
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-dispatch-before-ack", "v2")
 }
 
 func TestHADuplicateMarkLeavingDispatchAfterFailoverIsSafe(t *testing.T) {
@@ -121,12 +152,17 @@ func TestHADuplicateMarkLeavingDispatchAfterFailoverIsSafe(t *testing.T) {
 	if _, err := h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
 		t.Fatalf("AddNode returned error: %v", err)
 	}
+	slot := mustPendingSlotForNode(t, h.leader.Pending(), "d", pendingKindReady)
 	h.mustStepLeader(t)
-	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 1}); err != nil {
+	if err := h.adapters["d"].ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
 		t.Fatalf("ActivateReplica returned error: %v", err)
 	}
 
-	entry := h.mustFindOutbox(t, OutboxCommandMarkReplicaLeaving, "c", 1)
+	leavingNodeID := replicaNodeWithState(h.leader.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node before mark-leaving replay")
+	}
+	entry := h.mustFindOutbox(t, OutboxCommandMarkReplicaLeaving, leavingNodeID, slot)
 	if err := h.leader.dispatchOutboxEntry(ctx, entry); err != nil {
 		t.Fatalf("manual dispatchOutboxEntry(mark leaving) returned error: %v", err)
 	}
@@ -136,11 +172,11 @@ func TestHADuplicateMarkLeavingDispatchAfterFailoverIsSafe(t *testing.T) {
 	h.mustBind(t, h.standby)
 	h.mustStepStandby(t)
 
-	replica := h.adapters["c"].Node().State().Replicas[1]
+	replica := h.adapters[leavingNodeID].Node().State().Replicas[slot]
 	if got, want := replica.State, storage.ReplicaStateLeaving; got != want {
 		t.Fatalf("replica state after replayed mark leaving = %q, want %q", got, want)
 	}
-	if got, want := h.standby.Pending()[1].Kind, pendingKindRemoved; got != want {
+	if got, want := h.standby.Pending()[slot].Kind, pendingKindRemoved; got != want {
 		t.Fatalf("pending kind after replayed mark leaving = %q, want %q", got, want)
 	}
 }
@@ -212,6 +248,7 @@ func TestHARestartResumesUndispatchedOutboxWork(t *testing.T) {
 	if _, err := h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
 		t.Fatalf("AddNode returned error: %v", err)
 	}
+	slot := mustPendingSlotForNode(t, h.leader.Pending(), "d", pendingKindReady)
 
 	if err := h.leader.Close(); err != nil {
 		t.Fatalf("leader.Close returned error: %v", err)
@@ -221,13 +258,74 @@ func TestHARestartResumesUndispatchedOutboxWork(t *testing.T) {
 	h.mustBind(t, h.standby)
 	h.mustStepStandby(t)
 
-	if got, want := h.standby.Pending()[1].Kind, pendingKindReady; got != want {
+	if got, want := h.standby.Pending()[slot].Kind, pendingKindReady; got != want {
 		t.Fatalf("pending kind after standby resume = %q, want %q", got, want)
 	}
-	replica := h.adapters["d"].Node().State().Replicas[1]
+	replica := h.adapters["d"].Node().State().Replicas[slot]
 	if got, want := replica.State, storage.ReplicaStateCatchingUp; got != want {
 		t.Fatalf("replica state after standby resume = %q, want %q", got, want)
 	}
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica returned error: %v", err)
+	}
+	h.mustStepStandby(t)
+	leavingNodeID := replicaNodeWithState(h.standby.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after standby resumed outbox work")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	assertActiveReplicaSet(t, h.standby.Current().Cluster.Chains[slot], "a", "b", "d")
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-before-dispatch", "v3")
+}
+
+func TestHAFailoverAcceptsInFlightRemovedProgressAndRestoresDataPlane(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b", "c", "d"})
+	h.adapters["c"].EnableQueuedProgress()
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 8, 3, []string{"a", "b", "c"})
+	if _, err := h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slot := mustPendingSlotForNode(t, h.leader.Pending(), "d", pendingKindReady)
+	h.mustStepLeader(t)
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica returned error: %v", err)
+	}
+	h.mustStepLeader(t)
+	leavingNodeID := replicaNodeWithState(h.leader.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node before removed-progress failover")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	if got, want := h.adapters[leavingNodeID].PendingProgress(), 1; got != want {
+		t.Fatalf("queued removed progress = %d, want %d", got, want)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+
+	if err := h.adapters[leavingNodeID].DeliverNextProgress(ctx); err != nil {
+		t.Fatalf("DeliverNextProgress(removed) returned error: %v", err)
+	}
+	assertActiveReplicaSet(t, h.standby.Current().Cluster.Chains[slot], "a", "b", "d")
+	if got, exists := h.standby.Pending()[slot]; exists && got.Kind == pendingKindRemoved {
+		t.Fatalf("pending after removed failover = %#v, want removal cleared", got)
+	}
+	if runtimeOutboxHasSlot(h.standby.Current().Outbox, slot) {
+		t.Fatalf("runtime outbox still contains repaired slot %d: %#v", slot, h.standby.Current().Outbox)
+	}
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-removed-failover", "v4")
 }
 
 func TestHADynamicAutoJoinRepairsAfterFailover(t *testing.T) {
@@ -412,6 +510,9 @@ func newHAInMemoryHarnessWithConfig(t *testing.T, nodeIDs []string, cfg ServerCo
 	newServer := func(coordinatorID, advertise string) *Server {
 		serverCfg := cfg
 		serverCfg.Clock = clock
+		if serverCfg.DispatchRetryInterval == 0 {
+			serverCfg.DispatchRetryInterval = time.Hour
+		}
 		serverCfg.HA = &HAConfig{
 			CoordinatorID:          coordinatorID,
 			AdvertiseAddress:       advertise,

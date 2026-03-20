@@ -506,6 +506,129 @@ func TestReconfigureAndApplyProgressPersistAndRecover(t *testing.T) {
 	assertCoordinatorStateValid(t, reopened.Current().Cluster)
 }
 
+func TestReconcileAfterRemovedProgressMovesPendingOffCompletedSlot(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+
+	state, err := rt.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	plan, state, err := rt.Reconfigure(ctx, Command{
+		ID:              "add-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: []coordinator.Event{{Kind: coordinator.EventKindAddNode, Node: uniqueNode("d")}},
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(add-d) returned error: %v", err)
+	}
+	slot := plan.ChangedSlots[0].Slot
+	if len(state.Outbox) == 0 {
+		t.Fatal("reconfigure(add-d) produced no outbox entries")
+	}
+	for i, entry := range state.Outbox {
+		state, err = rt.AcknowledgeOutbox(ctx, Command{
+			ID:              fmt.Sprintf("ack-add-tail-%d", i),
+			ExpectedVersion: state.Version,
+			Kind:            CommandKindAcknowledgeOutbox,
+			AcknowledgeOutbox: &AcknowledgeOutboxCommand{
+				EntryID: entry.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("AcknowledgeOutbox(%s) returned error: %v", entry.ID, err)
+		}
+	}
+
+	state, err = rt.ApplyProgress(ctx, Command{
+		ID:              "progress-ready-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindProgress,
+		Progress: &ProgressCommand{
+			Event: coordinator.Event{
+				Kind:   coordinator.EventKindReplicaBecameActive,
+				Slot:   slot,
+				NodeID: "d",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProgress(ready) returned error: %v", err)
+	}
+	plan, state, err = rt.Reconfigure(ctx, Command{
+		ID:              "reconcile-after-ready",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: nil,
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(after ready) returned error: %v", err)
+	}
+	if got, want := state.PendingBySlot[slot].Kind, PendingKindRemoved; got != want {
+		t.Fatalf("pending kind after ready reconcile = %q, want %q", got, want)
+	}
+	leavingNodeID := ""
+	for _, replica := range state.Cluster.Chains[slot].Replicas {
+		if replica.State == coordinator.ReplicaStateLeaving {
+			leavingNodeID = replica.NodeID
+			break
+		}
+	}
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after ready reconcile")
+	}
+	if got, want := plan.ChangedSlots[0].Slot, slot; got != want {
+		t.Fatalf("ready reconcile changed slot = %d, want %d", got, want)
+	}
+
+	state, err = rt.ApplyProgress(ctx, Command{
+		ID:              "progress-removed-old",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindProgress,
+		Progress: &ProgressCommand{
+			Event: coordinator.Event{
+				Kind:   coordinator.EventKindReplicaRemoved,
+				Slot:   slot,
+				NodeID: leavingNodeID,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProgress(removed) returned error: %v", err)
+	}
+	if _, exists := state.PendingBySlot[slot]; exists {
+		t.Fatalf("pending for repaired slot after removed progress = %#v, want none", state.PendingBySlot[slot])
+	}
+
+	plan, state, err = rt.Reconfigure(ctx, Command{
+		ID:              "reconcile-after-removed",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: nil,
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(after removed) returned error: %v", err)
+	}
+	if _, exists := state.PendingBySlot[slot]; exists {
+		t.Fatalf("pending for completed slot after removed reconcile = %#v, want none", state.PendingBySlot[slot])
+	}
+	if len(plan.ChangedSlots) == 0 {
+		t.Fatal("reconcile after removed produced no follow-up plan")
+	}
+}
+
 func TestCompletedProgressHistoryPrunesToBoundedWindow(t *testing.T) {
 	current := map[int][]CompletedProgressRecord{}
 	slotVersions := map[int]uint64{7: 0}
