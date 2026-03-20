@@ -652,6 +652,155 @@ func TestHAFailoverAfterPartialRecoveryOutboxSuccessRetriesRemainingCommandOnlyA
 	}
 }
 
+func TestHAFailoverAfterRecoveryAckBeforeNextStepDoesNotRedispatchRecoveredCommand(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 1, 2, []string{"a", "b"})
+	if _, err := h.adapters["a"].Node().SubmitPut(ctx, 0, "alpha", "v1"); err != nil {
+		t.Fatalf("SubmitPut returned error: %v", err)
+	}
+	h.adapters["b"].BindServer(nil)
+	if err := h.adapters["b"].Node().AddReplicaAsTail(ctx, storage.AddReplicaAsTailCommand{
+		Assignment: storage.ReplicaAssignment{Slot: 9, ChainVersion: 1, Role: storage.ReplicaRoleSingle},
+	}); err != nil {
+		t.Fatalf("AddReplicaAsTail(extra slot) returned error: %v", err)
+	}
+	if err := h.adapters["b"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 9}); err != nil {
+		t.Fatalf("ActivateReplica(extra slot) returned error: %v", err)
+	}
+	if err := h.adapters["b"].Node().Close(); err != nil {
+		t.Fatalf("adapter b Close returned error: %v", err)
+	}
+
+	recoveredB, err := OpenInMemoryNodeAdapter(ctx, "b", h.backends["b"], h.adapters["b"].local, h.repl)
+	if err != nil {
+		t.Fatalf("OpenInMemoryNodeAdapter(recovered b) returned error: %v", err)
+	}
+	h.adapters["b"] = recoveredB
+	h.repl.RegisterNode("b", recoveredB.Node())
+	h.mustBind(t, h.leader)
+	wrapper := newFaultInjectingNodeClient(recoveredB)
+	h.leader.nodes["b"] = wrapper
+
+	report := storage.NodeRecoveryReport{
+		NodeID: "b",
+		Replicas: []storage.RecoveredReplica{
+			{
+				Assignment: storage.ReplicaAssignment{
+					Slot:         0,
+					ChainVersion: 0,
+					Role:         storage.ReplicaRoleTail,
+					Peers:        storage.ChainPeers{PredecessorNodeID: "a"},
+				},
+				LastKnownState:           storage.ReplicaStateActive,
+				HighestCommittedSequence: 0,
+				HasCommittedData:         false,
+			},
+			{
+				Assignment: storage.ReplicaAssignment{
+					Slot:         9,
+					ChainVersion: 1,
+					Role:         storage.ReplicaRoleSingle,
+				},
+				LastKnownState:           storage.ReplicaStateActive,
+				HighestCommittedSequence: 0,
+				HasCommittedData:         true,
+			},
+		},
+	}
+	if err := h.leader.ReportNodeRecovered(ctx, report); err != nil {
+		t.Fatalf("ReportNodeRecovered returned error: %v", err)
+	}
+
+	recoverEntry := h.mustFindOutbox(t, OutboxCommandRecoverReplica, "b", 0)
+	if err := h.leader.dispatchOutboxEntry(ctx, recoverEntry); err != nil {
+		t.Fatalf("dispatchOutboxEntry(recover) returned error: %v", err)
+	}
+	snapshot, err := h.store.LoadSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LoadSnapshot returned error: %v", err)
+	}
+	snapshot.Outbox = removeOutboxEntry(snapshot.Outbox, recoverEntry.ID)
+	if slots := snapshot.UnavailableReplicas["b"]; slots != nil {
+		delete(slots, 0)
+		if len(slots) == 0 {
+			delete(snapshot.UnavailableReplicas, "b")
+		}
+	}
+	if err := h.leader.saveHASnapshot(ctx, snapshot.SnapshotVersion, snapshot); err != nil {
+		t.Fatalf("saveHASnapshot(after recover ack) returned error: %v", err)
+	}
+	if got, want := wrapper.recoverCallCount(), 1; got != want {
+		t.Fatalf("recover calls after manual ack = %d, want %d", got, want)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.standby.nodes["b"] = wrapper
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+	if err := h.standby.dispatchOutbox(ctx); err != nil {
+		t.Fatalf("standby dispatchOutbox returned error: %v", err)
+	}
+	if got, want := wrapper.recoverCallCount(), 1; got != want {
+		t.Fatalf("recover calls after post-ack failover = %d, want no redispatch", got)
+	}
+	if got, want := wrapper.dropCallCount(), 1; got != want {
+		t.Fatalf("drop calls after post-ack failover = %d, want %d", got, want)
+	}
+	if h.standby.nodeHasUnavailableSlots("b") {
+		t.Fatal("node b still has unavailable slots after post-ack HA recovery replay")
+	}
+	snapshot, err = h.store.LoadSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LoadSnapshot after failover returned error: %v", err)
+	}
+	for _, entry := range snapshot.Outbox {
+		if entry.NodeID == "b" && isRecoveryOutboxKind(entry.Kind) {
+			t.Fatalf("recovery outbox entry still present after post-ack failover: %#v", entry)
+		}
+	}
+	if _, exists := recoveredB.Node().State().Replicas[9]; exists {
+		t.Fatal("stale recovered slot 9 still present after post-ack HA recovery replay")
+	}
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, 0, "ha-recovery-post-ack", "v1")
+
+	stateBeforeDuplicate := h.standby.Current()
+	pendingBeforeDuplicate := h.standby.Pending()
+	routingBeforeDuplicate, err := h.standby.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot before duplicate report returned error: %v", err)
+	}
+	dropCalls := wrapper.dropCallCount()
+	if err := h.standby.ReportNodeRecovered(ctx, report); err != nil {
+		t.Fatalf("duplicate ReportNodeRecovered after post-ack failover returned error: %v", err)
+	}
+	routingAfterDuplicate, err := h.standby.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after duplicate report returned error: %v", err)
+	}
+	if got := h.standby.Current(); !reflect.DeepEqual(got, stateBeforeDuplicate) {
+		t.Fatalf("state changed on duplicate HA recovery report after post-ack failover\ngot=%#v\nwant=%#v", got, stateBeforeDuplicate)
+	}
+	if got := h.standby.Pending(); !reflect.DeepEqual(got, pendingBeforeDuplicate) {
+		t.Fatalf("pending changed on duplicate HA recovery report after post-ack failover\ngot=%#v\nwant=%#v", got, pendingBeforeDuplicate)
+	}
+	if !reflect.DeepEqual(routingAfterDuplicate, routingBeforeDuplicate) {
+		t.Fatalf("routing changed on duplicate HA recovery report after post-ack failover\nafter=%#v\nbefore=%#v", routingAfterDuplicate, routingBeforeDuplicate)
+	}
+	if got, want := wrapper.recoverCallCount(), 1; got != want {
+		t.Fatalf("recover calls after duplicate post-ack HA report = %d, want %d", got, want)
+	}
+	if got, want := wrapper.dropCallCount(), dropCalls; got != want {
+		t.Fatalf("drop calls after duplicate post-ack HA report = %d, want %d", got, want)
+	}
+}
+
 func TestHAMembershipContinuityAfterFailover(t *testing.T) {
 	t.Run("register_and_heartbeat_after_failover", func(t *testing.T) {
 		ctx := context.Background()

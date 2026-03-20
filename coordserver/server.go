@@ -751,6 +751,13 @@ func (s *Server) ReportNodeRecovered(ctx context.Context, report storage.NodeRec
 }
 
 func (s *Server) RegisterNode(ctx context.Context, reg storage.NodeRegistration) (coordruntime.State, error) {
+	current := s.rt.Current()
+	if existing, ok := current.Cluster.NodesByID[reg.NodeID]; ok &&
+		current.Cluster.NodeHealthByID[reg.NodeID] != coordinator.NodeHealthDead &&
+		existing.RPCAddress == reg.RPCAddress &&
+		reflect.DeepEqual(existing.FailureDomains, reg.FailureDomains) {
+		return current, nil
+	}
 	if s.ha != nil {
 		return s.applyHAWithPlanner(ctx, []string{reg.NodeID}, func(planner *Server) (coordruntime.State, error) {
 			return planner.RegisterNode(ctx, reg)

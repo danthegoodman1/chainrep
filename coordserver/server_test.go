@@ -322,8 +322,31 @@ func TestDuplicateAutoJoinRegistrationUsesSingleMembershipRecord(t *testing.T) {
 	if _, err := server.RegisterNode(ctx, reg); err != nil {
 		t.Fatalf("first RegisterNode returned error: %v", err)
 	}
-	if _, err := server.RegisterNode(ctx, reg); err != nil {
+	beforeState := server.Current()
+	beforePending := server.Pending()
+	beforeRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot before duplicate register returned error: %v", err)
+	}
+	stateAfterDuplicate, err := server.RegisterNode(ctx, reg)
+	if err != nil {
 		t.Fatalf("duplicate RegisterNode returned error: %v", err)
+	}
+	afterRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after duplicate register returned error: %v", err)
+	}
+	if !reflect.DeepEqual(stateAfterDuplicate, beforeState) {
+		t.Fatalf("state returned from duplicate RegisterNode changed\ngot=%#v\nwant=%#v", stateAfterDuplicate, beforeState)
+	}
+	if got := server.Current(); !reflect.DeepEqual(got, beforeState) {
+		t.Fatalf("current state changed on duplicate RegisterNode\ngot=%#v\nwant=%#v", got, beforeState)
+	}
+	if got := server.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on duplicate RegisterNode\ngot=%#v\nwant=%#v", got, beforePending)
+	}
+	if !reflect.DeepEqual(afterRouting, beforeRouting) {
+		t.Fatalf("routing changed on duplicate RegisterNode\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
 	}
 	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
 		t.Fatalf("ReportHeartbeat returned error: %v", err)
@@ -388,6 +411,109 @@ func TestAutoJoinHeartbeatRemainsStableAcrossServerReopen(t *testing.T) {
 	}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("pending after reopen heartbeat = %#v, want %#v", got, want)
 	}
+}
+
+func TestFactoryCachedClientsDoNotBypassIdentityAndTombstoneSafety(t *testing.T) {
+	ctx := context.Background()
+	h := newFactoryOnlyHarness(t, []string{"a", "b", "d"})
+	server := h.server
+
+	if _, err := server.Bootstrap(ctx, coordruntime.Command{
+		ID:              "bootstrap-1",
+		ExpectedVersion: 0,
+		Kind:            coordruntime.CommandKindBootstrap,
+		Bootstrap: &coordruntime.BootstrapCommand{
+			Config: coordinator.Config{SlotCount: 1, ReplicationFactor: 2},
+			Nodes: []coordinator.Node{
+				{
+					ID:             "a",
+					RPCAddress:     "a",
+					FailureDomains: cloneFailureDomains(uniqueNode("a").FailureDomains),
+				},
+				{
+					ID:             "b",
+					RPCAddress:     "b",
+					FailureDomains: cloneFailureDomains(uniqueNode("b").FailureDomains),
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	seedServerBootstrap(t, server, map[string]*InMemoryNodeAdapter{"a": h.adapters["a"], "b": h.adapters["b"]}, 1, 2, []string{"a", "b"})
+
+	firstClient, err := server.clientForNodeID("b")
+	if err != nil {
+		t.Fatalf("clientForNodeID(b) returned error: %v", err)
+	}
+	secondClient, err := server.clientForNodeID("b")
+	if err != nil {
+		t.Fatalf("second clientForNodeID(b) returned error: %v", err)
+	}
+	if firstClient != secondClient {
+		t.Fatal("cached clientForNodeID(b) returned different client instance")
+	}
+	if got, want := h.factory.callCount("b"), 1; got != want {
+		t.Fatalf("factory call count for b = %d, want %d", got, want)
+	}
+	if got, want := len(server.nodes), 1; got != want {
+		t.Fatalf("cached server nodes = %d, want %d", got, want)
+	}
+
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "d",
+		FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+	}); err != nil {
+		t.Fatalf("RegisterNode(d) returned error: %v", err)
+	}
+	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+		t.Fatalf("ReportHeartbeat(d) returned error: %v", err)
+	}
+
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "b",
+		RPCAddress:     "b-conflict",
+		FailureDomains: cloneFailureDomains(uniqueNode("b").FailureDomains),
+	}); err == nil {
+		t.Fatal("conflicting RegisterNode(b) unexpectedly succeeded after caching factory client")
+	}
+	if got := server.Current().Cluster.NodesByID["b"].RPCAddress; got != "b" {
+		t.Fatalf("node b RPC address changed after conflicting register = %q, want %q", got, "b")
+	}
+
+	current := server.Current()
+	if _, err := server.MarkNodeDead(ctx, reconfigureCommand("dead-b", current.Version, coordinator.Event{
+		Kind:   coordinator.EventKindMarkNodeDead,
+		NodeID: "b",
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("MarkNodeDead returned error: %v", err)
+	}
+	if got, want := h.factory.callCount("d"), 1; got != want {
+		t.Fatalf("factory call count for d after repair dispatch = %d, want %d", got, want)
+	}
+	if got, ok := server.nodes["b"]; !ok || got != firstClient {
+		t.Fatalf("cached client for b changed after tombstone\ngot=%#v\nwant=%#v", got, firstClient)
+	}
+	if err := h.adapters["b"].Node().ReportHeartbeat(ctx); err == nil {
+		t.Fatal("ReportHeartbeat(b) unexpectedly succeeded after tombstone with cached client present")
+	}
+
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: 0}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	if _, err := server.ReportReplicaReady(ctx, "d", 0, 0, "ready-1"); err != nil {
+		t.Fatalf("ReportReplicaReady(d) returned error: %v", err)
+	}
+	leavingNodeID := replicaNodeWithState(server.Current().Cluster.Chains[0], coordinator.ReplicaStateLeaving)
+	if leavingNodeID != "" {
+		if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: 0}); err != nil {
+			t.Fatalf("RemoveReplica(%s) returned error: %v", leavingNodeID, err)
+		}
+		if _, err := server.ReportReplicaRemoved(ctx, leavingNodeID, 0, 0, "removed-1"); err != nil {
+			t.Fatalf("ReportReplicaRemoved(%s) returned error: %v", leavingNodeID, err)
+		}
+	}
+	assertSlotRoundTrip(t, ctx, server, h.adapters, 0, "factory-cache", "v1")
 }
 
 func TestNoOpReconcileDoesNotChurnSettledState(t *testing.T) {
@@ -978,6 +1104,31 @@ func newRecordingNodeClient(nodeID string) *recordingNodeClient {
 	return &recordingNodeClient{nodeID: nodeID}
 }
 
+type trackingNodeClientFactory struct {
+	clients map[string]StorageNodeClient
+	calls   map[string]int
+}
+
+func newTrackingNodeClientFactory(clients map[string]StorageNodeClient) *trackingNodeClientFactory {
+	return &trackingNodeClientFactory{
+		clients: clients,
+		calls:   make(map[string]int, len(clients)),
+	}
+}
+
+func (f *trackingNodeClientFactory) ClientForNode(node coordinator.Node) (StorageNodeClient, error) {
+	f.calls[node.ID]++
+	client, ok := f.clients[node.ID]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownNode, node.ID)
+	}
+	return client, nil
+}
+
+func (f *trackingNodeClientFactory) callCount(nodeID string) int {
+	return f.calls[nodeID]
+}
+
 func (r *recordingNodeClient) AddReplicaAsTail(_ context.Context, cmd storage.AddReplicaAsTailCommand) error {
 	if r.addTailErr != nil {
 		return r.addTailErr
@@ -1045,6 +1196,13 @@ type inMemoryHarness struct {
 	backends map[string]*storage.InMemoryBackend
 }
 
+type factoryOnlyHarness struct {
+	server   *Server
+	adapters map[string]*InMemoryNodeAdapter
+	backends map[string]*storage.InMemoryBackend
+	factory  *trackingNodeClientFactory
+}
+
 func newInMemoryHarness(t *testing.T, nodeIDs []string) *inMemoryHarness {
 	t.Helper()
 	repl := storage.NewInMemoryReplicationTransport()
@@ -1074,6 +1232,39 @@ func newInMemoryHarness(t *testing.T, nodeIDs []string) *inMemoryHarness {
 		server:   server,
 		adapters: adapters,
 		backends: backends,
+	}
+}
+
+func newFactoryOnlyHarness(t *testing.T, nodeIDs []string) *factoryOnlyHarness {
+	t.Helper()
+	repl := storage.NewInMemoryReplicationTransport()
+	adapters := make(map[string]*InMemoryNodeAdapter, len(nodeIDs))
+	backends := make(map[string]*storage.InMemoryBackend, len(nodeIDs))
+	nodeClients := make(map[string]StorageNodeClient, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		backend := storage.NewInMemoryBackend()
+		backends[nodeID] = backend
+		repl.Register(nodeID, backend)
+		adapter, err := NewInMemoryNodeAdapter(context.Background(), nodeID, backend, repl)
+		if err != nil {
+			t.Fatalf("NewInMemoryNodeAdapter(%q) returned error: %v", nodeID, err)
+		}
+		adapters[nodeID] = adapter
+		nodeClients[nodeID] = adapter
+		repl.RegisterNode(nodeID, adapter.Node())
+	}
+	factory := newTrackingNodeClientFactory(nodeClients)
+	server := mustOpenServerWithConfig(t, coordruntime.NewInMemoryStore(), nil, ServerConfig{
+		NodeClientFactory: factory,
+	})
+	for _, adapter := range adapters {
+		adapter.BindServer(server)
+	}
+	return &factoryOnlyHarness{
+		server:   server,
+		adapters: adapters,
+		backends: backends,
+		factory:  factory,
 	}
 }
 

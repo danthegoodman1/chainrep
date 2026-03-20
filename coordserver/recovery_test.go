@@ -138,6 +138,7 @@ func TestReportNodeRecoveredRetryAfterPartialFailureCompletesAndThenBecomesStabl
 		t.Fatal("node b still has unavailable slots after successful retry")
 	}
 	before := server.Current()
+	beforePending := server.Pending()
 	beforeRouting, err := server.RoutingSnapshot(ctx)
 	if err != nil {
 		t.Fatalf("RoutingSnapshot before duplicate report returned error: %v", err)
@@ -153,6 +154,9 @@ func TestReportNodeRecoveredRetryAfterPartialFailureCompletesAndThenBecomesStabl
 	}
 	if got := server.Current(); !reflect.DeepEqual(got, before) {
 		t.Fatalf("state changed on duplicate recovery report\ngot=%#v\nwant=%#v", got, before)
+	}
+	if got := server.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on duplicate recovery report\ngot=%#v\nwant=%#v", got, beforePending)
 	}
 	if !reflect.DeepEqual(afterRouting, beforeRouting) {
 		t.Fatalf("routing changed on duplicate recovery report\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
