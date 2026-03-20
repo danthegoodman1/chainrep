@@ -194,188 +194,115 @@ func TestValidReadyAndRemovedProgressAdvanceStateAndDispatchNextStep(t *testing.
 	}
 }
 
-func TestUnexpectedAndDuplicateProgressAreRejected(t *testing.T) {
-	ctx := context.Background()
-	nodes := map[string]*recordingNodeClient{
-		"a": newRecordingNodeClient("a"),
-		"b": newRecordingNodeClient("b"),
-		"c": newRecordingNodeClient("c"),
-		"d": newRecordingNodeClient("d"),
-	}
-	server := mustBootstrappedServer(t, ctx, mapToClient(nodes), 8, 3, "a", "b", "c")
+func TestSettledSlotProgressIdempotence(t *testing.T) {
+	t.Run("unexpected_and_duplicate_live", func(t *testing.T) {
+		ctx := context.Background()
+		nodes := map[string]*recordingNodeClient{
+			"a": newRecordingNodeClient("a"),
+			"b": newRecordingNodeClient("b"),
+			"c": newRecordingNodeClient("c"),
+			"d": newRecordingNodeClient("d"),
+		}
+		server := mustBootstrappedServer(t, ctx, mapToClient(nodes), 8, 3, "a", "b", "c")
 
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err == nil {
-		t.Fatal("ReportReplicaReady unexpectedly succeeded")
-	} else if !errors.Is(err, ErrUnexpectedProgress) {
-		t.Fatalf("error = %v, want unexpected progress", err)
-	}
+		if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err == nil {
+			t.Fatal("ReportReplicaReady unexpectedly succeeded")
+		} else if !errors.Is(err, ErrUnexpectedProgress) {
+			t.Fatalf("error = %v, want unexpected progress", err)
+		}
 
-	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
-		Kind: coordinator.EventKindAddNode,
-		Node: uniqueNode("d"),
-	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
-		t.Fatalf("AddNode returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err != nil {
-		t.Fatalf("ReportReplicaReady returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, "ready-1"); err != nil {
-		t.Fatalf("duplicate ReportReplicaReady returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, "removed-1"); err != nil {
-		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, "removed-1"); err != nil {
-		t.Fatalf("duplicate ReportReplicaRemoved returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaReady(ctx, "c", 1, 0, "removed-1"); err == nil {
-		t.Fatal("mismatched progress unexpectedly succeeded")
-	} else if !errors.Is(err, ErrUnexpectedProgress) {
-		t.Fatalf("error = %v, want unexpected progress", err)
-	}
-}
+		slot, leavingNodeID := mustStartAndSettleAddNodeRepair(t, ctx, server, "ready-1", "removed-1")
+		beforeState, beforePending, beforeRouting := captureSettledSlotState(t, ctx, server)
 
-func TestDuplicateProgressRemainsIdempotentAfterServerReopen(t *testing.T) {
-	ctx := context.Background()
-	store := coordruntime.NewInMemoryStore()
-	nodes := map[string]*recordingNodeClient{
-		"a": newRecordingNodeClient("a"),
-		"b": newRecordingNodeClient("b"),
-		"c": newRecordingNodeClient("c"),
-		"d": newRecordingNodeClient("d"),
-	}
-	server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
-		Kind: coordinator.EventKindAddNode,
-		Node: uniqueNode("d"),
-	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
-		t.Fatalf("AddNode returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaReady(ctx, "d", 1, 0, ""); err != nil {
-		t.Fatalf("ReportReplicaReady returned error: %v", err)
-	}
-	if _, err := server.ReportReplicaRemoved(ctx, "c", 1, 0, ""); err != nil {
-		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
-	}
+		if _, err := server.ReportReplicaReady(ctx, "d", slot, 0, "ready-1"); err != nil {
+			t.Fatalf("duplicate ReportReplicaReady returned error: %v", err)
+		}
+		if _, err := server.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, "removed-1"); err != nil {
+			t.Fatalf("duplicate ReportReplicaRemoved returned error: %v", err)
+		}
+		if _, err := server.ReportReplicaReady(ctx, leavingNodeID, slot, 0, "removed-1"); err == nil {
+			t.Fatal("mismatched progress unexpectedly succeeded")
+		} else if !errors.Is(err, ErrUnexpectedProgress) {
+			t.Fatalf("error = %v, want unexpected progress", err)
+		}
 
-	reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	if _, err := reopened.ReportReplicaReady(ctx, "d", 1, 0, ""); err != nil {
-		t.Fatalf("duplicate ReportReplicaReady after reopen returned error: %v", err)
-	}
-	if _, err := reopened.ReportReplicaRemoved(ctx, "c", 1, 0, ""); err != nil {
-		t.Fatalf("duplicate ReportReplicaRemoved after reopen returned error: %v", err)
-	}
-}
+		assertSettledSlotStateUnchanged(t, ctx, server, slot, beforeState, beforePending, beforeRouting)
+	})
 
-func TestOutOfOrderDuplicateProgressAfterServerReopenDoesNotChurnSettledSlot(t *testing.T) {
-	ctx := context.Background()
-	store := coordruntime.NewInMemoryStore()
-	nodes := map[string]*recordingNodeClient{
-		"a": newRecordingNodeClient("a"),
-		"b": newRecordingNodeClient("b"),
-		"c": newRecordingNodeClient("c"),
-		"d": newRecordingNodeClient("d"),
-	}
-	server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
-		Kind: coordinator.EventKindAddNode,
-		Node: uniqueNode("d"),
-	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
-		t.Fatalf("AddNode returned error: %v", err)
-	}
-	slot := mustPendingSlotForNode(t, server.Pending(), "d", pendingKindReady)
-	if _, err := server.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
-		t.Fatalf("ReportReplicaReady returned error: %v", err)
-	}
-	leavingNodeID := replicaNodeWithState(server.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
-	if leavingNodeID == "" {
-		t.Fatal("failed to find leaving node before settle")
-	}
-	if _, err := server.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
-		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
-	}
+	t.Run("duplicate_after_reopen", func(t *testing.T) {
+		ctx := context.Background()
+		store := coordruntime.NewInMemoryStore()
+		nodes := map[string]*recordingNodeClient{
+			"a": newRecordingNodeClient("a"),
+			"b": newRecordingNodeClient("b"),
+			"c": newRecordingNodeClient("c"),
+			"d": newRecordingNodeClient("d"),
+		}
+		server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+		slot, leavingNodeID := mustBootstrapAndSettleAddNodeRepair(t, ctx, server, "", "")
 
-	reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	before := reopened.Current()
-	beforePending := reopened.Pending()
-	beforeRouting, err := reopened.RoutingSnapshot(ctx)
-	if err != nil {
-		t.Fatalf("RoutingSnapshot returned error: %v", err)
-	}
-	if _, err := reopened.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
-		t.Fatalf("out-of-order duplicate ReportReplicaRemoved returned error: %v", err)
-	}
-	if _, err := reopened.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
-		t.Fatalf("out-of-order duplicate ReportReplicaReady returned error: %v", err)
-	}
-	afterRouting, err := reopened.RoutingSnapshot(ctx)
-	if err != nil {
-		t.Fatalf("RoutingSnapshot after duplicates returned error: %v", err)
-	}
-	if got := reopened.Current(); !reflect.DeepEqual(got, before) {
-		t.Fatalf("state changed on out-of-order duplicates\ngot=%#v\nwant=%#v", got, before)
-	}
-	if got := reopened.Pending(); !reflect.DeepEqual(got, beforePending) {
-		t.Fatalf("pending changed on out-of-order duplicates\ngot=%#v\nwant=%#v", got, beforePending)
-	}
-	if !reflect.DeepEqual(afterRouting, beforeRouting) {
-		t.Fatalf("routing changed on out-of-order duplicates\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
-	}
-	if runtimeOutboxHasSlot(reopened.Current().Outbox, slot) {
-		t.Fatalf("runtime outbox unexpectedly recreated for settled slot %d: %#v", slot, reopened.Current().Outbox)
-	}
-}
+		reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+		beforeState, beforePending, beforeRouting := captureSettledSlotState(t, ctx, reopened)
+		if _, err := reopened.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
+			t.Fatalf("duplicate ReportReplicaReady after reopen returned error: %v", err)
+		}
+		if _, err := reopened.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
+			t.Fatalf("duplicate ReportReplicaRemoved after reopen returned error: %v", err)
+		}
+		assertSettledSlotStateUnchanged(t, ctx, reopened, slot, beforeState, beforePending, beforeRouting)
+	})
 
-func TestDuplicateProgressRemainsIdempotentAfterCheckpointAndReopen(t *testing.T) {
-	ctx := context.Background()
-	store := coordruntime.NewInMemoryStore()
-	nodes := map[string]*recordingNodeClient{
-		"a": newRecordingNodeClient("a"),
-		"b": newRecordingNodeClient("b"),
-		"c": newRecordingNodeClient("c"),
-		"d": newRecordingNodeClient("d"),
-	}
-	server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
-		Kind: coordinator.EventKindAddNode,
-		Node: uniqueNode("d"),
-	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
-		t.Fatalf("AddNode returned error: %v", err)
-	}
-	slot := mustPendingSlotForNode(t, server.Pending(), "d", pendingKindReady)
-	if _, err := server.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
-		t.Fatalf("ReportReplicaReady returned error: %v", err)
-	}
-	leavingNodeID := replicaNodeWithState(server.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
-	if leavingNodeID == "" {
-		t.Fatal("failed to find leaving node before checkpoint")
-	}
-	if _, err := server.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
-		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
-	}
-	if err := server.rt.Checkpoint(ctx); err != nil {
-		t.Fatalf("Checkpoint returned error: %v", err)
-	}
+	t.Run("out_of_order_after_reopen", func(t *testing.T) {
+		ctx := context.Background()
+		store := coordruntime.NewInMemoryStore()
+		nodes := map[string]*recordingNodeClient{
+			"a": newRecordingNodeClient("a"),
+			"b": newRecordingNodeClient("b"),
+			"c": newRecordingNodeClient("c"),
+			"d": newRecordingNodeClient("d"),
+		}
+		server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+		slot, leavingNodeID := mustBootstrapAndSettleAddNodeRepair(t, ctx, server, "", "")
 
-	reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
-	if _, err := reopened.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
-		t.Fatalf("duplicate ReportReplicaReady after checkpoint returned error: %v", err)
-	}
-	if _, err := reopened.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
-		t.Fatalf("duplicate ReportReplicaRemoved after checkpoint returned error: %v", err)
-	}
-	if _, exists := reopened.Pending()[slot]; exists {
-		t.Fatalf("pending for completed slot after checkpoint reopen duplicate progress = %#v, want none", reopened.Pending()[slot])
-	}
+		reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+		beforeState, beforePending, beforeRouting := captureSettledSlotState(t, ctx, reopened)
+		if _, err := reopened.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
+			t.Fatalf("out-of-order duplicate ReportReplicaRemoved returned error: %v", err)
+		}
+		if _, err := reopened.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
+			t.Fatalf("out-of-order duplicate ReportReplicaReady returned error: %v", err)
+		}
+		assertSettledSlotStateUnchanged(t, ctx, reopened, slot, beforeState, beforePending, beforeRouting)
+	})
+
+	t.Run("duplicate_after_checkpoint_reopen", func(t *testing.T) {
+		ctx := context.Background()
+		store := coordruntime.NewInMemoryStore()
+		nodes := map[string]*recordingNodeClient{
+			"a": newRecordingNodeClient("a"),
+			"b": newRecordingNodeClient("b"),
+			"c": newRecordingNodeClient("c"),
+			"d": newRecordingNodeClient("d"),
+		}
+		server := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+		slot, leavingNodeID := mustBootstrapAndSettleAddNodeRepair(t, ctx, server, "", "")
+		if err := server.rt.Checkpoint(ctx); err != nil {
+			t.Fatalf("Checkpoint returned error: %v", err)
+		}
+
+		reopened := mustOpenServerWithConfig(t, store, mapToClient(nodes), ServerConfig{})
+		beforeState, beforePending, beforeRouting := captureSettledSlotState(t, ctx, reopened)
+		if _, err := reopened.ReportReplicaReady(ctx, "d", slot, 0, ""); err != nil {
+			t.Fatalf("duplicate ReportReplicaReady after checkpoint returned error: %v", err)
+		}
+		if _, err := reopened.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, ""); err != nil {
+			t.Fatalf("duplicate ReportReplicaRemoved after checkpoint returned error: %v", err)
+		}
+		assertSettledSlotStateUnchanged(t, ctx, reopened, slot, beforeState, beforePending, beforeRouting)
+		if _, exists := reopened.Pending()[slot]; exists {
+			t.Fatalf("pending for completed slot after checkpoint reopen duplicate progress = %#v, want none", reopened.Pending()[slot])
+		}
+	})
 }
 
 func TestDuplicateAutoJoinRegistrationUsesSingleMembershipRecord(t *testing.T) {
@@ -949,6 +876,89 @@ func TestDeterministicRepeatedHistory(t *testing.T) {
 	}
 	if !reflect.DeepEqual(left.pending, right.pending) {
 		t.Fatalf("pending mismatch\nleft=%#v\nright=%#v", left.pending, right.pending)
+	}
+}
+
+func mustBootstrapAndSettleAddNodeRepair(
+	t *testing.T,
+	ctx context.Context,
+	server *Server,
+	readyCommandID string,
+	removedCommandID string,
+) (int, string) {
+	t.Helper()
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	return mustStartAndSettleAddNodeRepair(t, ctx, server, readyCommandID, removedCommandID)
+}
+
+func mustStartAndSettleAddNodeRepair(
+	t *testing.T,
+	ctx context.Context,
+	server *Server,
+	readyCommandID string,
+	removedCommandID string,
+) (int, string) {
+	t.Helper()
+	if _, err := server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slot := mustPendingSlotForNode(t, server.Pending(), "d", pendingKindReady)
+	if _, err := server.ReportReplicaReady(ctx, "d", slot, 0, readyCommandID); err != nil {
+		t.Fatalf("ReportReplicaReady returned error: %v", err)
+	}
+	leavingNodeID := replicaNodeWithState(server.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node before settle")
+	}
+	if _, err := server.ReportReplicaRemoved(ctx, leavingNodeID, slot, 0, removedCommandID); err != nil {
+		t.Fatalf("ReportReplicaRemoved returned error: %v", err)
+	}
+	return slot, leavingNodeID
+}
+
+func captureSettledSlotState(
+	t *testing.T,
+	ctx context.Context,
+	server *Server,
+) (coordruntime.State, map[int]PendingWork, RoutingSnapshot) {
+	t.Helper()
+	routing, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	return server.Current(), server.Pending(), routing
+}
+
+func assertSettledSlotStateUnchanged(
+	t *testing.T,
+	ctx context.Context,
+	server *Server,
+	slot int,
+	wantState coordruntime.State,
+	wantPending map[int]PendingWork,
+	wantRouting RoutingSnapshot,
+) {
+	t.Helper()
+	afterRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after duplicates returned error: %v", err)
+	}
+	if got := server.Current(); !reflect.DeepEqual(got, wantState) {
+		t.Fatalf("state changed on settled-slot idempotence check\ngot=%#v\nwant=%#v", got, wantState)
+	}
+	if got := server.Pending(); !reflect.DeepEqual(got, wantPending) {
+		t.Fatalf("pending changed on settled-slot idempotence check\ngot=%#v\nwant=%#v", got, wantPending)
+	}
+	if !reflect.DeepEqual(afterRouting, wantRouting) {
+		t.Fatalf("routing changed on settled-slot idempotence check\nafter=%#v\nbefore=%#v", afterRouting, wantRouting)
+	}
+	if runtimeOutboxHasSlot(server.Current().Outbox, slot) {
+		t.Fatalf("runtime outbox unexpectedly recreated for settled slot %d: %#v", slot, server.Current().Outbox)
 	}
 }
 

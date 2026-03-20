@@ -652,109 +652,111 @@ func TestHAFailoverAfterPartialRecoveryOutboxSuccessRetriesRemainingCommandOnlyA
 	}
 }
 
-func TestHARegisterAndHeartbeatRemainStableAcrossFailover(t *testing.T) {
-	ctx := context.Background()
-	h := newHAInMemoryHarness(t, []string{"d"})
+func TestHAMembershipContinuityAfterFailover(t *testing.T) {
+	t.Run("register_and_heartbeat_after_failover", func(t *testing.T) {
+		ctx := context.Background()
+		h := newHAInMemoryHarness(t, []string{"d"})
 
-	h.mustStepLeader(t)
-	h.mustBind(t, h.leader)
-	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
-		t.Fatalf("ReportHeartbeat(d) on leader returned error: %v", err)
-	}
-	if got, want := len(h.leader.Current().Cluster.NodesByID), 1; got != want {
-		t.Fatalf("leader membership size = %d, want %d", got, want)
-	}
+		h.mustStepLeader(t)
+		h.mustBind(t, h.leader)
+		if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(d) on leader returned error: %v", err)
+		}
+		if got, want := len(h.leader.Current().Cluster.NodesByID), 1; got != want {
+			t.Fatalf("leader membership size = %d, want %d", got, want)
+		}
 
-	h.clock.Advance(3 * time.Second)
-	h.mustStepStandby(t)
-	h.mustBind(t, h.standby)
-	if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
-		t.Fatalf("ReportHeartbeat(d) on standby returned error: %v", err)
-	}
-	if got, want := len(h.standby.Current().Cluster.NodesByID), 1; got != want {
-		t.Fatalf("standby membership size = %d, want %d", got, want)
-	}
-	if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
-		t.Fatal("node d not ready after failover heartbeat")
-	}
-}
+		h.clock.Advance(3 * time.Second)
+		h.mustStepStandby(t)
+		h.mustBind(t, h.standby)
+		if err := h.adapters["d"].Node().ReportHeartbeat(ctx); err != nil {
+			t.Fatalf("ReportHeartbeat(d) on standby returned error: %v", err)
+		}
+		if got, want := len(h.standby.Current().Cluster.NodesByID), 1; got != want {
+			t.Fatalf("standby membership size = %d, want %d", got, want)
+		}
+		if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
+			t.Fatal("node d not ready after failover heartbeat")
+		}
+	})
 
-func TestHARegisterNodeRejectsConflictingIdentityAfterFailover(t *testing.T) {
-	ctx := context.Background()
-	h := newHAInMemoryHarness(t, []string{"d"})
+	t.Run("identity_conflict_after_failover", func(t *testing.T) {
+		ctx := context.Background()
+		h := newHAInMemoryHarness(t, []string{"d"})
 
-	h.mustStepLeader(t)
-	h.mustBind(t, h.leader)
-	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-	reg := storage.NodeRegistration{
-		NodeID:         "d",
-		RPCAddress:     "127.0.0.1:7414",
-		FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
-	}
-	if _, err := h.leader.RegisterNode(ctx, reg); err != nil {
-		t.Fatalf("RegisterNode returned error: %v", err)
-	}
+		h.mustStepLeader(t)
+		h.mustBind(t, h.leader)
+		if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		reg := storage.NodeRegistration{
+			NodeID:         "d",
+			RPCAddress:     "127.0.0.1:7414",
+			FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+		}
+		if _, err := h.leader.RegisterNode(ctx, reg); err != nil {
+			t.Fatalf("RegisterNode returned error: %v", err)
+		}
 
-	h.clock.Advance(3 * time.Second)
-	h.mustStepStandby(t)
-	h.mustBind(t, h.standby)
-	if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{
-		NodeID:         "d",
-		RPCAddress:     "127.0.0.1:7999",
-		FailureDomains: cloneFailureDomains(reg.FailureDomains),
-	}); err == nil {
-		t.Fatal("conflicting HA RegisterNode unexpectedly succeeded")
-	}
-	if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
-		t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
-	}
-}
+		h.clock.Advance(3 * time.Second)
+		h.mustStepStandby(t)
+		h.mustBind(t, h.standby)
+		if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{
+			NodeID:         "d",
+			RPCAddress:     "127.0.0.1:7999",
+			FailureDomains: cloneFailureDomains(reg.FailureDomains),
+		}); err == nil {
+			t.Fatal("conflicting HA RegisterNode unexpectedly succeeded")
+		}
+		if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+			t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
+		}
+	})
 
-func TestHATombstoneRejectsOldNodeAndAdmitsReplacementAfterFailover(t *testing.T) {
-	ctx := context.Background()
-	h := newHAInMemoryHarness(t, []string{"a", "b", "d"})
+	t.Run("tombstone_and_replacement_after_failover", func(t *testing.T) {
+		ctx := context.Background()
+		h := newHAInMemoryHarness(t, []string{"a", "b", "d"})
 
-	h.mustStepLeader(t)
-	h.mustBind(t, h.leader)
-	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
-		t.Fatalf("Bootstrap returned error: %v", err)
-	}
-	h.seedBootstrap(t, h.leader, 1, 2, []string{"a", "b"})
-	current := h.leader.Current()
-	if _, err := h.leader.MarkNodeDead(ctx, reconfigureCommand("dead-a", current.Version, coordinator.Event{
-		Kind:   coordinator.EventKindMarkNodeDead,
-		NodeID: "a",
-	}, coordinator.ReconfigurationPolicy{})); err != nil {
-		t.Fatalf("MarkNodeDead returned error: %v", err)
-	}
+		h.mustStepLeader(t)
+		h.mustBind(t, h.leader)
+		if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+			t.Fatalf("Bootstrap returned error: %v", err)
+		}
+		h.seedBootstrap(t, h.leader, 1, 2, []string{"a", "b"})
+		current := h.leader.Current()
+		if _, err := h.leader.MarkNodeDead(ctx, reconfigureCommand("dead-a", current.Version, coordinator.Event{
+			Kind:   coordinator.EventKindMarkNodeDead,
+			NodeID: "a",
+		}, coordinator.ReconfigurationPolicy{})); err != nil {
+			t.Fatalf("MarkNodeDead returned error: %v", err)
+		}
 
-	h.clock.Advance(3 * time.Second)
-	h.mustStepStandby(t)
-	h.mustBind(t, h.standby)
-	if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{NodeID: "a"}); err == nil {
-		t.Fatal("RegisterNode(a) unexpectedly succeeded after HA failover tombstone")
-	}
-	if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "a"}); err == nil {
-		t.Fatal("ReportNodeHeartbeat(a) unexpectedly succeeded after HA failover tombstone")
-	}
-	if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{
-		NodeID:         "d",
-		RPCAddress:     "127.0.0.1:7414",
-		FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
-	}); err != nil {
-		t.Fatalf("RegisterNode(d) returned error: %v", err)
-	}
-	if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
-		t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
-	}
-	if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
-		t.Fatal("replacement node d not ready after HA failover")
-	}
+		h.clock.Advance(3 * time.Second)
+		h.mustStepStandby(t)
+		h.mustBind(t, h.standby)
+		if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{NodeID: "a"}); err == nil {
+			t.Fatal("RegisterNode(a) unexpectedly succeeded after HA failover tombstone")
+		}
+		if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "a"}); err == nil {
+			t.Fatal("ReportNodeHeartbeat(a) unexpectedly succeeded after HA failover tombstone")
+		}
+		if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{
+			NodeID:         "d",
+			RPCAddress:     "127.0.0.1:7414",
+			FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+		}); err != nil {
+			t.Fatalf("RegisterNode(d) returned error: %v", err)
+		}
+		if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+			t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
+		}
+		if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
+			t.Fatal("replacement node d not ready after HA failover")
+		}
+	})
 }
 
 func TestHANoopStepDoesNotChurnSettledState(t *testing.T) {
