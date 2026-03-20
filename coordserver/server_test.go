@@ -401,6 +401,88 @@ func TestAutoJoinHeartbeatRemainsStableAcrossServerReopen(t *testing.T) {
 	}
 }
 
+func TestNoOpReconcileDoesNotChurnSettledState(t *testing.T) {
+	ctx := context.Background()
+	nodes := map[string]*recordingNodeClient{
+		"a": newRecordingNodeClient("a"),
+		"b": newRecordingNodeClient("b"),
+		"c": newRecordingNodeClient("c"),
+	}
+	server := mustBootstrappedServer(t, ctx, mapToClient(nodes), 8, 3, "a", "b", "c")
+
+	before := server.Current()
+	beforePending := server.Pending()
+	beforeRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	if err := server.reconcileAndDispatch(ctx); err != nil {
+		t.Fatalf("first reconcileAndDispatch returned error: %v", err)
+	}
+	if err := server.reconcileAndDispatch(ctx); err != nil {
+		t.Fatalf("second reconcileAndDispatch returned error: %v", err)
+	}
+	afterRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after reconcile returned error: %v", err)
+	}
+
+	if got := server.Current(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("current state changed on no-op reconcile\ngot=%#v\nwant=%#v", got, before)
+	}
+	if got := server.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on no-op reconcile\ngot=%#v\nwant=%#v", got, beforePending)
+	}
+	if !reflect.DeepEqual(afterRouting, beforeRouting) {
+		t.Fatalf("routing changed on no-op reconcile\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
+	}
+}
+
+func TestHealthyEvaluateLivenessDoesNotChurnState(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	server := mustOpenServerWithConfig(t, coordruntime.NewInMemoryStore(), nil, ServerConfig{
+		Clock:          clock,
+		LivenessPolicy: LivenessPolicy{SuspectAfter: 5 * time.Second, DeadAfter: 10 * time.Second},
+	})
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{NodeID: "a"}); err != nil {
+		t.Fatalf("RegisterNode(a) returned error: %v", err)
+	}
+	if err := server.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "a"}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(a) returned error: %v", err)
+	}
+
+	before := server.Current()
+	beforePending := server.Pending()
+	beforeRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("first EvaluateLiveness returned error: %v", err)
+	}
+	if err := server.EvaluateLiveness(ctx); err != nil {
+		t.Fatalf("second EvaluateLiveness returned error: %v", err)
+	}
+	afterRouting, err := server.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after liveness returned error: %v", err)
+	}
+
+	if got := server.Current(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("current state changed on healthy EvaluateLiveness\ngot=%#v\nwant=%#v", got, before)
+	}
+	if got := server.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on healthy EvaluateLiveness\ngot=%#v\nwant=%#v", got, beforePending)
+	}
+	if !reflect.DeepEqual(afterRouting, beforeRouting) {
+		t.Fatalf("routing changed on healthy EvaluateLiveness\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
+	}
+}
+
 func TestDelayedProgressFromQueuedAdaptersCompletesPendingWork(t *testing.T) {
 	ctx := context.Background()
 	h := newInMemoryHarness(t, []string{"a", "b", "c", "d"})

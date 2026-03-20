@@ -228,6 +228,93 @@ func TestAddNodeDispatchTimeoutThenRetryCompletesRepairAndRestoresDataPlane(t *t
 	assertSlotRoundTrip(t, ctx, h.server, h.adapters, slot, "timeout-add-tail", "v1")
 }
 
+func TestAddNodePartialOutboxSuccessThenRetryDoesNotRedispatchCompletedPeerUpdates(t *testing.T) {
+	ctx := context.Background()
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		DispatchTimeout:       time.Nanosecond,
+		DispatchRetryInterval: time.Hour,
+	})
+	if _, err := h.server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 8, 3, []string{"a", "b", "c"})
+
+	preview, err := coordinator.PlanReconfiguration(h.server.Current().Cluster, []coordinator.Event{{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})
+	if err != nil {
+		t.Fatalf("PlanReconfiguration preview returned error: %v", err)
+	}
+	slot := preview.ChangedSlots[0].Slot
+	updateNodes := activeAfterNodeIDs(activeServingChain(preview.ChangedSlots[0].After), map[string]bool{"d": true})
+	if len(updateNodes) < 2 {
+		t.Fatalf("update node count = %d, want at least 2 for partial-success replay", len(updateNodes))
+	}
+
+	addTailWrapper := newFaultInjectingNodeClient(h.adapters["d"])
+	h.server.nodes["d"] = addTailWrapper
+	updateWrappers := make(map[string]*faultInjectingNodeClient, len(updateNodes))
+	for _, nodeID := range updateNodes {
+		wrapper := newFaultInjectingNodeClient(h.adapters[nodeID])
+		updateWrappers[nodeID] = wrapper
+		h.server.nodes[nodeID] = wrapper
+	}
+	updateWrappers[updateNodes[len(updateNodes)-1]].updatePeersTimeouts = 1
+
+	_, err = h.server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1}))
+	if err == nil {
+		t.Fatal("AddNode unexpectedly succeeded")
+	}
+	if !errors.Is(err, ErrDispatchTimeout) {
+		t.Fatalf("error = %v, want dispatch timeout", err)
+	}
+	if got, want := addTailWrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after partial success = %d, want %d", got, want)
+	}
+	for _, nodeID := range updateNodes[:len(updateNodes)-1] {
+		if got, want := updateWrappers[nodeID].updatePeersCallCount(), 1; got != want {
+			t.Fatalf("update-peers calls for %q after partial success = %d, want %d", nodeID, got, want)
+		}
+	}
+	if got, want := updateWrappers[updateNodes[len(updateNodes)-1]].updatePeersCallCount(), 1; got != want {
+		t.Fatalf("update-peers calls for timed-out node after partial success = %d, want %d", got, want)
+	}
+	if got, want := h.server.Pending()[slot].Kind, pendingKindReady; got != want {
+		t.Fatalf("pending kind after partial success = %q, want %q", got, want)
+	}
+
+	if err := h.server.dispatchRuntimeOutbox(ctx); err != nil {
+		t.Fatalf("dispatchRuntimeOutbox returned error: %v", err)
+	}
+	if got, want := addTailWrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after retry = %d, want no redispatch", got)
+	}
+	for _, nodeID := range updateNodes[:len(updateNodes)-1] {
+		if got, want := updateWrappers[nodeID].updatePeersCallCount(), 1; got != want {
+			t.Fatalf("update-peers calls for %q after retry = %d, want no duplicate", nodeID, got)
+		}
+	}
+	if got, want := updateWrappers[updateNodes[len(updateNodes)-1]].updatePeersCallCount(), 2; got != want {
+		t.Fatalf("update-peers calls for retried node after retry = %d, want %d", got, want)
+	}
+
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	leavingNodeID := replicaNodeWithState(h.server.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after partial-success retry activation")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica(%q) returned error: %v", leavingNodeID, err)
+	}
+	assertSlotRoundTrip(t, ctx, h.server, h.adapters, slot, "partial-add-tail", "v-partial-1")
+}
+
 func TestMarkLeavingDispatchTimeoutThenRetryCompletesRepairAndRestoresDataPlane(t *testing.T) {
 	ctx := context.Background()
 	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
@@ -289,6 +376,70 @@ func TestMarkLeavingDispatchTimeoutThenRetryCompletesRepairAndRestoresDataPlane(
 		t.Fatalf("runtime outbox still contains repaired slot %d: %#v", slot, h.server.Current().Outbox)
 	}
 	assertSlotRoundTrip(t, ctx, h.server, h.adapters, slot, "timeout-mark-leaving", "v2")
+}
+
+func TestMarkLeavingPartialOutboxSuccessThenRetryDoesNotRedispatchCompletedPeerUpdates(t *testing.T) {
+	ctx := context.Background()
+	h := newInMemoryHarnessWithConfig(t, []string{"a", "b", "c", "d"}, ServerConfig{
+		DispatchTimeout:       time.Nanosecond,
+		DispatchRetryInterval: time.Hour,
+	})
+	if _, err := h.server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, 8, 3, []string{"a", "b", "c"})
+	h.adapters["d"].EnableQueuedProgress()
+
+	if _, err := h.server.AddNode(ctx, reconfigureCommand("add-d", 1, coordinator.Event{
+		Kind: coordinator.EventKindAddNode,
+		Node: uniqueNode("d"),
+	}, coordinator.ReconfigurationPolicy{MaxChangedChains: 1})); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+	slot := mustPendingSlotForNode(t, h.server.Pending(), "d", pendingKindReady)
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+
+	leavingNodeID := lastActiveReplicaNode(h.server.Current().Cluster.Chains[slot])
+	if leavingNodeID == "" {
+		t.Fatal("failed to determine leaving node before partial mark-leaving timeout")
+	}
+	updateNodes := activeAfterNodeIDs(activeServingChain(h.server.Current().Cluster.Chains[slot]), map[string]bool{leavingNodeID: true})
+	if len(updateNodes) == 0 {
+		t.Fatal("no peer-update nodes found before mark-leaving timeout")
+	}
+	updateWrapper := newFaultInjectingNodeClient(h.adapters[updateNodes[0]])
+	h.server.nodes[updateNodes[0]] = updateWrapper
+	leavingWrapper := newFaultInjectingNodeClient(h.adapters[leavingNodeID])
+	leavingWrapper.markLeavingTimeouts = 1
+	h.server.nodes[leavingNodeID] = leavingWrapper
+
+	if err := h.adapters["d"].DeliverNextProgress(ctx); err == nil {
+		t.Fatal("DeliverNextProgress unexpectedly succeeded")
+	} else if !errors.Is(err, ErrDispatchTimeout) {
+		t.Fatalf("DeliverNextProgress error = %v, want dispatch timeout", err)
+	}
+	if got, want := updateWrapper.updatePeersCallCount(), 1; got != want {
+		t.Fatalf("update-peers calls after partial mark-leaving success = %d, want %d", got, want)
+	}
+	if got, want := leavingWrapper.markLeavingCallCount(), 1; got != want {
+		t.Fatalf("mark-leaving calls after timeout = %d, want %d", got, want)
+	}
+
+	if err := h.server.dispatchRuntimeOutbox(ctx); err != nil {
+		t.Fatalf("dispatchRuntimeOutbox returned error: %v", err)
+	}
+	if got, want := updateWrapper.updatePeersCallCount(), 1; got != want {
+		t.Fatalf("update-peers calls after retry = %d, want no duplicate", got)
+	}
+	if got, want := leavingWrapper.markLeavingCallCount(), 2; got != want {
+		t.Fatalf("mark-leaving calls after retry = %d, want %d", got, want)
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica(%q) returned error: %v", leavingNodeID, err)
+	}
+	assertSlotRoundTrip(t, ctx, h.server, h.adapters, slot, "partial-mark-leaving", "v-partial-2")
 }
 
 func TestLivenessTriggeredDeadRepairTimeoutThenRetryCompletesRepairAndRestoresDataPlane(t *testing.T) {

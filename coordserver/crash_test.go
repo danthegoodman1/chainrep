@@ -28,8 +28,10 @@ type faultInjectingNodeClient struct {
 	mu                  sync.Mutex
 	addTailTimeouts     int
 	markLeavingTimeouts int
+	updatePeersTimeouts int
 	addTailCalls        int
 	markLeavingCalls    int
+	updatePeersCalls    int
 }
 
 func newFaultInjectingNodeClient(delegate StorageNodeClient) *faultInjectingNodeClient {
@@ -45,8 +47,11 @@ func (c *faultInjectingNodeClient) AddReplicaAsTail(ctx context.Context, cmd sto
 	}
 	c.mu.Unlock()
 	if shouldTimeout {
-		<-ctx.Done()
-		return ctx.Err()
+		if _, ok := ctx.Deadline(); ok {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
 	}
 	return c.delegate.AddReplicaAsTail(ctx, cmd)
 }
@@ -64,8 +69,11 @@ func (c *faultInjectingNodeClient) MarkReplicaLeaving(ctx context.Context, cmd s
 	}
 	c.mu.Unlock()
 	if shouldTimeout {
-		<-ctx.Done()
-		return ctx.Err()
+		if _, ok := ctx.Deadline(); ok {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
 	}
 	return c.delegate.MarkReplicaLeaving(ctx, cmd)
 }
@@ -75,6 +83,20 @@ func (c *faultInjectingNodeClient) RemoveReplica(ctx context.Context, cmd storag
 }
 
 func (c *faultInjectingNodeClient) UpdateChainPeers(ctx context.Context, cmd storage.UpdateChainPeersCommand) error {
+	c.mu.Lock()
+	c.updatePeersCalls++
+	shouldTimeout := c.updatePeersTimeouts > 0
+	if shouldTimeout {
+		c.updatePeersTimeouts--
+	}
+	c.mu.Unlock()
+	if shouldTimeout {
+		if _, ok := ctx.Deadline(); ok {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
+	}
 	return c.delegate.UpdateChainPeers(ctx, cmd)
 }
 
@@ -100,6 +122,12 @@ func (c *faultInjectingNodeClient) markLeavingCallCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.markLeavingCalls
+}
+
+func (c *faultInjectingNodeClient) updatePeersCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updatePeersCalls
 }
 
 func newDurableCoordHarness(t *testing.T, path string, nodeIDs []string) *durableCoordHarness {

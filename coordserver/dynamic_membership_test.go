@@ -120,6 +120,85 @@ func TestDeadNodeTombstoneSurvivesRestartAndRejectsRejoin(t *testing.T) {
 	if _, err := reopened.RegisterNode(ctx, storage.NodeRegistration{NodeID: "c"}); err != nil {
 		t.Fatalf("RegisterNode(c) returned error: %v", err)
 	}
+	if err := reopened.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "c"}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(c) returned error: %v", err)
+	}
+	if !reopened.Current().Cluster.ReadyNodeIDs["c"] {
+		t.Fatal("replacement node c did not become ready after reopen")
+	}
+}
+
+func TestRegisterNodeRejectsConflictingIdentityAndRemainsStableAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir()
+	store, err := coordruntime.OpenBadgerStore(path)
+	if err != nil {
+		t.Fatalf("OpenBadgerStore returned error: %v", err)
+	}
+	server := mustOpenServerWithConfig(t, store, nil, ServerConfig{})
+	if _, err := server.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+
+	reg := storage.NodeRegistration{
+		NodeID:         "d",
+		RPCAddress:     "127.0.0.1:7414",
+		FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+	}
+	if _, err := server.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("RegisterNode returned error: %v", err)
+	}
+	if _, err := server.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("duplicate RegisterNode returned error: %v", err)
+	}
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "d",
+		RPCAddress:     "127.0.0.1:7999",
+		FailureDomains: cloneFailureDomains(reg.FailureDomains),
+	}); err == nil {
+		t.Fatal("RegisterNode with conflicting RPCAddress unexpectedly succeeded")
+	}
+	if _, err := server.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:     "d",
+		RPCAddress: reg.RPCAddress,
+		FailureDomains: map[string]string{
+			"host": "host-other",
+			"rack": "rack-other",
+			"az":   "az-other",
+		},
+	}); err == nil {
+		t.Fatal("RegisterNode with conflicting failure domains unexpectedly succeeded")
+	}
+	if err := server.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
+	}
+
+	if err := server.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close returned error: %v", err)
+	}
+
+	reopenedStore, err := coordruntime.OpenBadgerStore(path)
+	if err != nil {
+		t.Fatalf("OpenBadgerStore(reopen) returned error: %v", err)
+	}
+	defer func() { _ = reopenedStore.Close() }()
+	reopened := mustOpenServerWithConfig(t, reopenedStore, nil, ServerConfig{})
+	if _, err := reopened.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "d",
+		RPCAddress:     "127.0.0.1:7999",
+		FailureDomains: cloneFailureDomains(reg.FailureDomains),
+	}); err == nil {
+		t.Fatal("reopened RegisterNode with conflicting RPCAddress unexpectedly succeeded")
+	}
+	if err := reopened.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+		t.Fatalf("reopened ReportNodeHeartbeat(d) returned error: %v", err)
+	}
+	if got, want := len(reopened.Current().Cluster.NodesByID), 1; got != want {
+		t.Fatalf("membership size after reopen = %d, want %d", got, want)
+	}
 }
 
 func TestNonHADurableOutboxResumesAfterRestart(t *testing.T) {

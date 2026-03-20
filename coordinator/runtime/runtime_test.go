@@ -715,6 +715,129 @@ func TestCheckpointPreservesCompletedProgressWhileAnotherSlotRemainsPending(t *t
 	}
 }
 
+func TestDuplicateOutboxAcknowledgeIsIdempotentBeforeAndAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore()
+	rt := mustOpenRuntime(t, store)
+
+	state, err := rt.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	_, state, err = rt.Reconfigure(ctx, Command{
+		ID:              "add-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: []coordinator.Event{{Kind: coordinator.EventKindAddNode, Node: uniqueNode("d")}},
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(add-d) returned error: %v", err)
+	}
+	if len(state.Outbox) == 0 {
+		t.Fatal("outbox unexpectedly empty")
+	}
+
+	ack := Command{
+		ID:              "ack-outbox-1",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindAcknowledgeOutbox,
+		AcknowledgeOutbox: &AcknowledgeOutboxCommand{
+			EntryID: state.Outbox[0].ID,
+		},
+	}
+	acked, err := rt.AcknowledgeOutbox(ctx, ack)
+	if err != nil {
+		t.Fatalf("AcknowledgeOutbox returned error: %v", err)
+	}
+	duplicate, err := rt.AcknowledgeOutbox(ctx, ack)
+	if err != nil {
+		t.Fatalf("duplicate AcknowledgeOutbox returned error: %v", err)
+	}
+	if !reflect.DeepEqual(duplicate, acked) {
+		t.Fatalf("duplicate ack snapshot mismatch\nduplicate=%#v\nacked=%#v", duplicate, acked)
+	}
+
+	reopened := mustOpenRuntime(t, store)
+	reopenedDuplicate, err := reopened.AcknowledgeOutbox(ctx, ack)
+	if err != nil {
+		t.Fatalf("reopened duplicate AcknowledgeOutbox returned error: %v", err)
+	}
+	if !reflect.DeepEqual(reopenedDuplicate, acked) {
+		t.Fatalf("reopened duplicate ack snapshot mismatch\nreopened=%#v\nacked=%#v", reopenedDuplicate, acked)
+	}
+}
+
+func TestMultiSlotReconcilePreservesUntouchedSlotPendingOutboxAndVersion(t *testing.T) {
+	ctx := context.Background()
+	rt := mustOpenRuntime(t, NewInMemoryStore())
+
+	state, err := rt.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	plan, state, err := rt.Reconfigure(ctx, Command{
+		ID:              "add-d",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: []coordinator.Event{{Kind: coordinator.EventKindAddNode, Node: uniqueNode("d")}},
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(add-d) returned error: %v", err)
+	}
+	if got, want := len(plan.ChangedSlots), 2; got != want {
+		t.Fatalf("changed slot count = %d, want %d", got, want)
+	}
+
+	firstSlot := plan.ChangedSlots[0].Slot
+	secondSlot := plan.ChangedSlots[1].Slot
+	secondVersionBefore := state.SlotVersions[secondSlot]
+	secondOutboxBefore := countOutboxEntriesForSlot(state.Outbox, secondSlot)
+
+	state, err = rt.ApplyProgress(ctx, Command{
+		ID:              "progress-ready-d-first",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindProgress,
+		Progress: &ProgressCommand{
+			Event: coordinator.Event{
+				Kind:   coordinator.EventKindReplicaBecameActive,
+				Slot:   firstSlot,
+				NodeID: "d",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProgress(first ready) returned error: %v", err)
+	}
+	_, state, err = rt.Reconfigure(ctx, Command{
+		ID:              "reconcile-after-first-ready",
+		ExpectedVersion: state.Version,
+		Kind:            CommandKindReconfigure,
+		Reconfigure: &ReconfigureCommand{
+			Events: nil,
+			Policy: coordinator.ReconfigurationPolicy{MaxChangedChains: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Reconfigure(after first ready) returned error: %v", err)
+	}
+
+	if got, want := state.PendingBySlot[secondSlot].Kind, PendingKindReady; got != want {
+		t.Fatalf("second slot pending kind = %q, want %q", got, want)
+	}
+	if got, want := state.SlotVersions[secondSlot], secondVersionBefore; got != want {
+		t.Fatalf("second slot version = %d, want %d", got, want)
+	}
+	if got, want := countOutboxEntriesForSlot(state.Outbox, secondSlot), secondOutboxBefore; got != want {
+		t.Fatalf("second slot outbox count = %d, want %d", got, want)
+	}
+}
+
 func TestCompletedProgressHistoryPrunesToBoundedWindow(t *testing.T) {
 	current := map[int][]CompletedProgressRecord{}
 	slotVersions := map[int]uint64{7: 0}
@@ -750,6 +873,16 @@ func TestCompletedProgressHistoryPrunesToBoundedWindow(t *testing.T) {
 	}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("newest retained record = %#v, want %#v", got, want)
 	}
+}
+
+func countOutboxEntriesForSlot(entries []OutboxEntry, slot int) int {
+	count := 0
+	for _, entry := range entries {
+		if entry.Slot == slot {
+			count++
+		}
+	}
+	return count
 }
 
 func TestSlotVersionsAdvanceOnlyOnSlotChanges(t *testing.T) {

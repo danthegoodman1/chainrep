@@ -374,6 +374,126 @@ func TestHAFailoverAfterAddTailAckBeforeReadyProgressDoesNotRedispatchAndRestore
 	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-after-add-ack", "v5")
 }
 
+func TestHAFailoverAfterPartialAddTailOutboxSuccessRetriesRemainingPeerUpdatesOnly(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b", "c", "d"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 8, 3, []string{"a", "b", "c"})
+
+	preview, err := coordinator.PlanReconfiguration(h.leader.Current().Cluster, []coordinator.Event{uniqueAddNodeEvent("d")}, noBudgetPolicy())
+	if err != nil {
+		t.Fatalf("PlanReconfiguration preview returned error: %v", err)
+	}
+	slot := preview.ChangedSlots[0].Slot
+	updateNodes := activeAfterNodeIDs(activeServingChain(preview.ChangedSlots[0].After), map[string]bool{"d": true})
+	if len(updateNodes) < 2 {
+		t.Fatalf("update node count = %d, want at least 2 for HA partial-success replay", len(updateNodes))
+	}
+
+	addTailWrapper := newFaultInjectingNodeClient(h.adapters["d"])
+	h.leader.nodes["d"] = addTailWrapper
+	updateWrappers := make(map[string]*faultInjectingNodeClient, len(updateNodes))
+	for _, nodeID := range updateNodes {
+		wrapper := newFaultInjectingNodeClient(h.adapters[nodeID])
+		updateWrappers[nodeID] = wrapper
+		h.leader.nodes[nodeID] = wrapper
+	}
+	updateWrappers[updateNodes[len(updateNodes)-1]].updatePeersTimeouts = 1
+
+	if _, err = h.leader.AddNode(ctx, reconfigureCommand("add-d", 1, uniqueAddNodeEvent("d"), noBudgetPolicy())); err != nil {
+		t.Fatalf("AddNode returned error: %v", err)
+	}
+
+	snapshot, err := h.store.LoadSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LoadSnapshot returned error: %v", err)
+	}
+	addTailEntry := h.mustFindOutbox(t, OutboxCommandAddReplicaAsTail, "d", slot)
+	if err := h.leader.dispatchOutboxEntry(ctx, addTailEntry); err != nil {
+		t.Fatalf("dispatchOutboxEntry(add tail) returned error: %v", err)
+	}
+	snapshot.Outbox = removeOutboxEntry(snapshot.Outbox, addTailEntry.ID)
+	if err := h.leader.saveHASnapshot(ctx, snapshot.SnapshotVersion, snapshot); err != nil {
+		t.Fatalf("saveHASnapshot(after add tail) returned error: %v", err)
+	}
+	if got, want := addTailWrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after manual dispatch = %d, want %d", got, want)
+	}
+
+	for _, nodeID := range updateNodes[:len(updateNodes)-1] {
+		entry := h.mustFindOutbox(t, OutboxCommandUpdateChainPeers, nodeID, slot)
+		if err := h.leader.dispatchOutboxEntry(ctx, entry); err != nil {
+			t.Fatalf("dispatchOutboxEntry(update peers %q) returned error: %v", nodeID, err)
+		}
+		snapshot, err = h.store.LoadSnapshot(ctx)
+		if err != nil {
+			t.Fatalf("LoadSnapshot after update peers %q returned error: %v", nodeID, err)
+		}
+		snapshot.Outbox = removeOutboxEntry(snapshot.Outbox, entry.ID)
+		if err := h.leader.saveHASnapshot(ctx, snapshot.SnapshotVersion, snapshot); err != nil {
+			t.Fatalf("saveHASnapshot(after update peers %q) returned error: %v", nodeID, err)
+		}
+		if got, want := updateWrappers[nodeID].updatePeersCallCount(), 1; got != want {
+			t.Fatalf("update-peers calls for %q after manual dispatch = %d, want %d", nodeID, got, want)
+		}
+	}
+
+	retriedNodeID := updateNodes[len(updateNodes)-1]
+	entry := h.mustFindOutbox(t, OutboxCommandUpdateChainPeers, retriedNodeID, slot)
+	if err := h.leader.dispatchOutboxEntry(ctx, entry); err == nil {
+		t.Fatal("dispatchOutboxEntry(update peers retry target) unexpectedly succeeded")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dispatchOutboxEntry(update peers retry target) error = %v, want deadline exceeded", err)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+	h.standby.nodes["d"] = addTailWrapper
+	for nodeID, wrapper := range updateWrappers {
+		h.standby.nodes[nodeID] = wrapper
+	}
+	h.mustStepStandby(t)
+	if err := h.standby.dispatchOutbox(ctx); err != nil {
+		t.Fatalf("standby dispatchOutbox returned error: %v", err)
+	}
+	if got, want := addTailWrapper.addTailCallCount(), 1; got != want {
+		t.Fatalf("add-tail calls after failover = %d, want no redispatch", got)
+	}
+	for _, nodeID := range updateNodes[:len(updateNodes)-1] {
+		if got, want := updateWrappers[nodeID].updatePeersCallCount(), 1; got != want {
+			t.Fatalf("update-peers calls for %q after failover = %d, want %d", nodeID, got, want)
+		}
+	}
+	snapshot, err = h.store.LoadSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LoadSnapshot after failover returned error: %v", err)
+	}
+	for _, entry := range snapshot.Outbox {
+		if entry.Kind == OutboxCommandUpdateChainPeers && entry.Slot == slot && entry.NodeID == retriedNodeID {
+			t.Fatalf("retry-target update-peers entry still present after failover dispatch: %#v", entry)
+		}
+	}
+
+	if err := h.adapters["d"].Node().ActivateReplica(ctx, storage.ActivateReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("ActivateReplica(d) returned error: %v", err)
+	}
+	h.mustStepStandby(t)
+	leavingNodeID := replicaNodeWithState(h.standby.Current().Cluster.Chains[slot], coordinator.ReplicaStateLeaving)
+	if leavingNodeID == "" {
+		t.Fatal("failed to find leaving node after HA partial-success replay")
+	}
+	if err := h.adapters[leavingNodeID].Node().RemoveReplica(ctx, storage.RemoveReplicaCommand{Slot: slot}); err != nil {
+		t.Fatalf("RemoveReplica returned error: %v", err)
+	}
+	assertSlotRoundTrip(t, ctx, h.standby, h.adapters, slot, "ha-partial-add-tail", "v6")
+}
+
 func TestHARegisterAndHeartbeatRemainStableAcrossFailover(t *testing.T) {
 	ctx := context.Background()
 	h := newHAInMemoryHarness(t, []string{"d"})
@@ -401,6 +521,115 @@ func TestHARegisterAndHeartbeatRemainStableAcrossFailover(t *testing.T) {
 	}
 	if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
 		t.Fatal("node d not ready after failover heartbeat")
+	}
+}
+
+func TestHARegisterNodeRejectsConflictingIdentityAfterFailover(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"d"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 1)); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	reg := storage.NodeRegistration{
+		NodeID:         "d",
+		RPCAddress:     "127.0.0.1:7414",
+		FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+	}
+	if _, err := h.leader.RegisterNode(ctx, reg); err != nil {
+		t.Fatalf("RegisterNode returned error: %v", err)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+	if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "d",
+		RPCAddress:     "127.0.0.1:7999",
+		FailureDomains: cloneFailureDomains(reg.FailureDomains),
+	}); err == nil {
+		t.Fatal("conflicting HA RegisterNode unexpectedly succeeded")
+	}
+	if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
+	}
+}
+
+func TestHATombstoneRejectsOldNodeAndAdmitsReplacementAfterFailover(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b", "d"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 1, 2, "a", "b")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 1, 2, []string{"a", "b"})
+	current := h.leader.Current()
+	if _, err := h.leader.MarkNodeDead(ctx, reconfigureCommand("dead-a", current.Version, coordinator.Event{
+		Kind:   coordinator.EventKindMarkNodeDead,
+		NodeID: "a",
+	}, coordinator.ReconfigurationPolicy{})); err != nil {
+		t.Fatalf("MarkNodeDead returned error: %v", err)
+	}
+
+	h.clock.Advance(3 * time.Second)
+	h.mustStepStandby(t)
+	h.mustBind(t, h.standby)
+	if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{NodeID: "a"}); err == nil {
+		t.Fatal("RegisterNode(a) unexpectedly succeeded after HA failover tombstone")
+	}
+	if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "a"}); err == nil {
+		t.Fatal("ReportNodeHeartbeat(a) unexpectedly succeeded after HA failover tombstone")
+	}
+	if _, err := h.standby.RegisterNode(ctx, storage.NodeRegistration{
+		NodeID:         "d",
+		RPCAddress:     "127.0.0.1:7414",
+		FailureDomains: cloneFailureDomains(uniqueNode("d").FailureDomains),
+	}); err != nil {
+		t.Fatalf("RegisterNode(d) returned error: %v", err)
+	}
+	if err := h.standby.ReportNodeHeartbeat(ctx, storage.NodeStatus{NodeID: "d"}); err != nil {
+		t.Fatalf("ReportNodeHeartbeat(d) returned error: %v", err)
+	}
+	if !h.standby.Current().Cluster.ReadyNodeIDs["d"] {
+		t.Fatal("replacement node d not ready after HA failover")
+	}
+}
+
+func TestHANoopStepDoesNotChurnSettledState(t *testing.T) {
+	ctx := context.Background()
+	h := newHAInMemoryHarness(t, []string{"a", "b", "c"})
+
+	h.mustStepLeader(t)
+	h.mustBind(t, h.leader)
+	if _, err := h.leader.Bootstrap(ctx, bootstrapCommand("bootstrap-1", 0, 8, 3, "a", "b", "c")); err != nil {
+		t.Fatalf("Bootstrap returned error: %v", err)
+	}
+	h.seedBootstrap(t, h.leader, 8, 3, []string{"a", "b", "c"})
+
+	before := h.leader.Current()
+	beforePending := h.leader.Pending()
+	beforeRouting, err := h.leader.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot returned error: %v", err)
+	}
+	h.mustStepLeader(t)
+	afterRouting, err := h.leader.RoutingSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("RoutingSnapshot after StepHA returned error: %v", err)
+	}
+
+	if got := h.leader.Current(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("current state changed on no-op StepHA\ngot=%#v\nwant=%#v", got, before)
+	}
+	if got := h.leader.Pending(); !reflect.DeepEqual(got, beforePending) {
+		t.Fatalf("pending changed on no-op StepHA\ngot=%#v\nwant=%#v", got, beforePending)
+	}
+	if !reflect.DeepEqual(afterRouting, beforeRouting) {
+		t.Fatalf("routing changed on no-op StepHA\nafter=%#v\nbefore=%#v", afterRouting, beforeRouting)
 	}
 }
 
