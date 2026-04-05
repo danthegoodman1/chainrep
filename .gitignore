@@ -1,2 +1,5 @@
 .gocache
 .tmpbench
+.env.local
+artifacts/
+*.terraform*

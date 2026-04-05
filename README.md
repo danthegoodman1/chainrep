@@ -19,6 +19,7 @@ Highlights:
 Documentation:
 
 - [Architecture](./ARCHITECTURE.md)
+- [Benchmarking](./BENCHMARKING.md)
 - [Coordinator HA Store](./HA_STORE.md)
 - [Coordinator](./coordinator/README.md)
 - [Observability](./OBSERVABILITY.md)
@@ -41,6 +42,8 @@ The admin listener is unauthenticated in v1 and is intended for loopback or a
 trusted network only.
 
 ## Performance Notes
+
+For cloud benchmark orchestration, see [BENCHMARKING.md](./BENCHMARKING.md).
 
 The repo includes an end-to-end localhost gRPC benchmark in
 [`transport/grpcx/grpc_benchmark_test.go`](./transport/grpcx/grpc_benchmark_test.go).
