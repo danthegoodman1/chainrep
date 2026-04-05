@@ -1,0 +1,167 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/danthegoodman1/chainrep/benchmark"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: chainrep-bench <run|destroy|analyze|daemon|loadgen|probe|collect> [flags]")
+	}
+	switch args[0] {
+	case "run":
+		return runCommand(args[1:])
+	case "destroy":
+		return destroyCommand(args[1:])
+	case "analyze":
+		return analyzeCommand(args[1:])
+	case "daemon":
+		return daemonCommand(args[1:])
+	case "loadgen":
+		return loadgenCommand(args[1:])
+	case "probe":
+		return probeCommand(args[1:])
+	case "collect":
+		return collectCommand(args[1:])
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func runCommand(args []string) error {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	profile := fs.String("profile", "profiles/bench/aws_i8ge_steady.yaml", "benchmark profile yaml")
+	region := fs.String("region", "", "aws region override")
+	topology := fs.String("topology", "", "topology: single-az or multi-az")
+	clientPlacement := fs.String("client-placement", "", "client placement: same-az or remote-az")
+	runName := fs.String("run-name", "bench", "human readable run name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	runDir, err := benchmark.RunBenchmark(context.Background(), benchmark.RunOptions{
+		ProfilePath:     *profile,
+		Region:          *region,
+		Topology:        *topology,
+		ClientPlacement: *clientPlacement,
+		RunName:         *runName,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(runDir)
+	return nil
+}
+
+func destroyCommand(args []string) error {
+	fs := flag.NewFlagSet("destroy", flag.ContinueOnError)
+	runDir := fs.String("run-dir", "", "run directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runDir == "" {
+		return fmt.Errorf("destroy requires --run-dir")
+	}
+	return benchmark.DestroyBenchmark(context.Background(), benchmark.DestroyOptions{RunDir: *runDir})
+}
+
+func analyzeCommand(args []string) error {
+	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
+	runDir := fs.String("run-dir", "", "run directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runDir == "" {
+		return fmt.Errorf("analyze requires --run-dir")
+	}
+	_, err := benchmark.AnalyzeRun(*runDir)
+	return err
+}
+
+func daemonCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: chainrep-bench daemon <coordinator|storage> --config <path>")
+	}
+	switch args[0] {
+	case "coordinator":
+		fs := flag.NewFlagSet("daemon coordinator", flag.ContinueOnError)
+		configPath := fs.String("config", "", "coordinator json config")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var cfg benchmark.CoordinatorProcessConfig
+		if err := benchmark.LoadJSON(*configPath, &cfg); err != nil {
+			return err
+		}
+		return benchmark.RunSignalContext(func(ctx context.Context) error { return benchmark.RunCoordinatorProcess(ctx, cfg) })
+	case "storage":
+		fs := flag.NewFlagSet("daemon storage", flag.ContinueOnError)
+		configPath := fs.String("config", "", "storage json config")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var cfg benchmark.StorageProcessConfig
+		if err := benchmark.LoadJSON(*configPath, &cfg); err != nil {
+			return err
+		}
+		return benchmark.RunSignalContext(func(ctx context.Context) error { return benchmark.RunStorageProcess(ctx, cfg) })
+	default:
+		return fmt.Errorf("unknown daemon role %q", args[0])
+	}
+}
+
+func loadgenCommand(args []string) error {
+	fs := flag.NewFlagSet("loadgen", flag.ContinueOnError)
+	configPath := fs.String("config", "", "loadgen json config")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var cfg benchmark.LoadGenProcessConfig
+	if err := benchmark.LoadJSON(*configPath, &cfg); err != nil {
+		return err
+	}
+	_, err := benchmark.RunLoadGen(context.Background(), cfg)
+	return err
+}
+
+func probeCommand(args []string) error {
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	output := fs.String("output", "", "probe output path")
+	interval := fs.Duration("interval", 0, "sample interval")
+	duration := fs.Duration("duration", 0, "optional duration")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return benchmark.RunSignalContext(func(ctx context.Context) error {
+		return benchmark.RunProbe(ctx, benchmark.ProbeConfig{
+			OutputPath: *output,
+			Interval:   *interval,
+			Duration:   *duration,
+		})
+	})
+}
+
+func collectCommand(args []string) error {
+	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
+	configPath := fs.String("config", "", "collect json config")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var cfg benchmark.CollectConfig
+	if err := benchmark.LoadJSON(*configPath, &cfg); err != nil {
+		return err
+	}
+	_, err := benchmark.CollectArtifacts(context.Background(), cfg)
+	return err
+}
